@@ -1,0 +1,64 @@
+[package]
+name = "proxy"
+version = "0.1.0"
+edition = "2021"
+description = "Intercepting HTTP/HTTPS proxy with ad/tracker blocking (network + cosmetic filtering)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+hyper = { version = "1", features = ["http1", "server", "client"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+futures-util = "0.3"
+
+# TLS / MITM
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+# aws-lc-rs is enabled alongside ring purely for its HPKE suites, which the
+# ring provider does not implement — they're what makes outbound Encrypted
+# Client Hello (ECH) possible. ring stays the process-wide default provider;
+# only the per-host ECH ClientConfig is built on the aws-lc-rs provider.
+rustls = { version = "0.23", default-features = false, features = ["ring", "aws-lc-rs", "std", "tls12", "logging"] }
+rustls-pemfile = "2"
+webpki-roots = "0.26"
+# Trust the OS/keychain root store for upstream verification (not just the
+# static Mozilla bundle) so MITM'd corporate/VPN networks work.
+rustls-native-certs = "0.8"
+rcgen = { version = "0.13", default-features = false, features = ["pem", "ring", "x509-parser"] }
+# Parse rejected upstream certs so verification failures name the actual issuer.
+x509-parser = "0.16"
+
+# Ad blocking
+adblock = { version = "0.9", default-features = false, features = ["embedded-domain-resolver", "full-regex-handling"] }
+# Pin transitive `rmp` to a version compatible with adblock's rmp-serde 0.15.
+rmp = "=0.8.11"
+
+# Config / serde
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+toml = "0.8"
+
+# Logging / errors
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+hickory-proto = "0.26"
+lru = "0.18.0"
+
+# Allocator: jemalloc returns freed memory to the OS far better than glibc
+# malloc, which spins up one arena per worker thread and retains each arena's
+# high-water-mark forever (the cause of multi-GB idle RSS). Not available on
+# MSVC, so gate it off there.
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = "0.6"
+
+[dev-dependencies]
+# "full" (from [dependencies]) covers macros + runtime; test-util adds paused
+# time (tokio::time::advance) for the blackhole TTL test.
+tokio = { version = "1", features = ["test-util"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"

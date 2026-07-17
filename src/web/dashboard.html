@@ -1,0 +1,1926 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>proxy · dashboard</title>
+<style>
+  :root {
+    --bg:#0e1116; --panel:#161b22; --panel2:#1c2330; --border:#2a3240;
+    --fg:#e6edf3; --muted:#8b98a5; --accent:#3b82f6;
+    --blocked:#f97316; --error:#ef4444; --info:#38bdf8; --ok:#22c55e;
+  }
+  * { box-sizing:border-box; }
+  html, body { height:100%; }
+  body { margin:0; background:var(--bg); color:var(--fg); overflow:hidden;
+    display:flex; flex-direction:column;
+    font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+  header { padding:14px 24px; border-bottom:1px solid var(--border);
+    display:flex; align-items:center; gap:14px; flex-wrap:wrap; background:var(--panel);
+    position:sticky; top:0; z-index:10; }
+  header h1 { font-size:18px; margin:0; letter-spacing:.3px; }
+  header .badge { color:var(--ok); font-weight:600; }
+  header .meta { color:var(--muted); font-size:12px; }
+  #hdr-errors { margin-left:auto; font-size:12px; font-weight:700; padding:3px 10px;
+    border-radius:20px; background:rgba(239,68,68,.15); color:var(--error); display:none; }
+  /* shell: sidebar + main fill everything under the header */
+  .shell { display:flex; flex:1; min-height:0; }
+  #sidebar { width:184px; flex-shrink:0; background:var(--panel);
+    border-right:1px solid var(--border); padding:12px 10px;
+    display:flex; flex-direction:column; gap:2px; overflow-y:auto; }
+  #sidebar .side-item { display:flex; align-items:center; gap:10px; background:none;
+    border:none; border-radius:8px; color:var(--muted); font-size:13px; font-weight:600;
+    padding:9px 12px; cursor:pointer; text-align:left; width:100%; }
+  #sidebar .side-item svg { width:16px; height:16px; flex-shrink:0; }
+  #sidebar .side-item:hover { color:var(--fg); background:var(--panel2); }
+  #sidebar .side-item.active { color:var(--fg); background:var(--panel2);
+    box-shadow:inset 3px 0 0 var(--accent); }
+  #sidebar .side-item.active svg { color:var(--accent); }
+  #sidebar .sbadge { margin-left:auto; padding:0 7px; border-radius:20px;
+    font-size:11px; background:var(--bg); color:var(--muted); }
+  #sidebar .sbadge.bad { background:rgba(239,68,68,.15); color:var(--error); }
+  @media (max-width:720px){
+    #sidebar { width:52px; padding:12px 6px; }
+    #sidebar .side-item { justify-content:center; padding:9px 0; gap:0; }
+    #sidebar .side-item .sl, #sidebar .sbadge { display:none; }
+  }
+  /* DNS settings pane: a stack of panels, not one .panel itself */
+  #pane-dnscfg, #pane-dnsrw { display:flex; flex-direction:column; gap:20px; }
+  #pane-dnscfg[hidden], #pane-dnsrw[hidden] { display:none; }
+  #pane-dnscfg input, #pane-dnscfg textarea, #pane-dnscfg select, #pane-dnsrw input {
+    background:var(--panel2);
+    border:1px solid var(--border); border-radius:8px; color:var(--fg); padding:8px 12px; }
+  #pane-dnscfg textarea { width:100%; resize:vertical;
+    font:12px/1.5 ui-monospace,Menlo,Consolas,monospace; }
+  #pane-dnscfg label, #pane-dnsrw label { color:var(--muted); font-size:12px; font-weight:600; }
+  /* service on/off + listen-address control (proxy on Dashboard, DNS on DNS→Settings) */
+  .svcctl { display:flex; align-items:center; gap:12px; flex-wrap:wrap;
+    background:var(--panel2); border:1px solid var(--border); border-radius:10px;
+    padding:11px 14px; margin:0 0 16px; }
+  .svcctl .sw { display:flex; align-items:center; gap:7px; color:var(--fg); font-weight:600; }
+  .svcctl input[type=text] { background:var(--bg); border:1px solid var(--border);
+    color:var(--fg); border-radius:6px; padding:6px 9px; width:160px;
+    font:13px ui-monospace,Menlo,Consolas,monospace; }
+  .svcctl input[type=text]:disabled { opacity:.45; }
+  /* Statistics & logs (Setup pane): hour inputs */
+  #pane-setup .actions label { color:var(--muted); font-size:12px; font-weight:600; }
+  #pane-setup input[type=number] { background:var(--panel2); border:1px solid var(--border);
+    border-radius:8px; color:var(--fg); padding:8px 12px; width:90px;
+    font:13px ui-monospace,Menlo,Consolas,monospace; font-variant-numeric:tabular-nums; }
+  /* dashboard overview cards */
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; }
+  .cards .card { background:var(--panel2); border:1px solid var(--border);
+    border-radius:10px; padding:14px 16px; }
+  .cards .cv { font-size:22px; font-weight:700; font-variant-numeric:tabular-nums; }
+  .cards .cl { color:var(--muted); font-size:11px; text-transform:uppercase;
+    letter-spacing:.06em; margin-top:2px; }
+  .cards .spark { display:block; width:100%; height:26px; margin-top:8px; cursor:crosshair; }
+  .cards .spark polyline { fill:none; stroke-width:1.5; vector-effect:non-scaling-stroke;
+    stroke-linejoin:round; stroke-linecap:round; }
+  /* floating tooltip showing the value of the sparkline bucket under the cursor */
+  .spark-tip { position:fixed; z-index:50; pointer-events:none; display:none;
+    transform:translate(-50%,-100%); margin-top:-6px;
+    background:var(--panel2); border:1px solid var(--border); border-radius:4px;
+    padding:2px 6px; font-size:11px; font-variant-numeric:tabular-nums;
+    color:var(--fg); white-space:nowrap; box-shadow:0 2px 6px rgba(0,0,0,.3);
+    text-align:center; }
+  .spark-tip .t { display:block; color:var(--muted); font-size:10px; }
+  /* top queried/blocked domain tables, side by side when there's room */
+  .topgrid { display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:0 24px; }
+  .topgrid .topbar { height:3px; background:var(--bg); border-radius:2px; margin-top:4px;
+    overflow:hidden; }
+  .topgrid .topbar i { display:block; height:100%; background:var(--accent); }
+  .topgrid td.cnt { text-align:right; font-variant-numeric:tabular-nums; color:var(--muted); }
+  /* top tables scroll past ~8 rows; sticky <th> keeps the header visible */
+  .topgrid .toplog { max-height:290px; }
+  /* main is the only page scroller (tall tabs like Setup scroll here);
+     the Requests pane instead flexes to fit so only its log scrolls */
+  main { padding:20px 24px; max-width:1300px; margin:0 auto; width:100%;
+    flex:1; min-height:0; overflow-y:auto; overscroll-behavior:contain;
+    display:flex; flex-direction:column; gap:20px; }
+  #pane-requests, #pane-scriptlets, #pane-errors, #pane-blocklists, #pane-exclusions, #pane-dns {
+    display:flex; flex-direction:column; flex:1; min-height:0; }
+  #pane-scriptlets .log, #pane-errors .log, #pane-blocklists .log, #pane-exclusions .log,
+  #pane-dns .log { flex:1; min-height:0; max-height:none; }
+  #pane-requests[hidden], #pane-scriptlets[hidden], #pane-errors[hidden],
+  #pane-blocklists[hidden], #pane-exclusions[hidden], #pane-dns[hidden] { display:none; }
+  #pane-requests .log { flex:1; min-height:0; max-height:none; }
+  .log { overscroll-behavior:contain; }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted);
+    margin:0 0 12px; font-weight:600; display:flex; align-items:center; gap:8px; }
+  .panel { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:16px 18px; }
+  .row { display:flex; align-items:center; justify-content:space-between; padding:8px 0;
+    border-bottom:1px solid var(--border); gap:12px; }
+  .row:last-child { border-bottom:none; }
+  .row .hint { color:var(--muted); font-size:12px; }
+  .hint { color:var(--muted); font-size:12px; }
+  button { background:var(--accent); color:#fff; border:none; border-radius:8px;
+    padding:8px 14px; font-weight:600; cursor:pointer; }
+  button.ghost { background:var(--panel2); border:1px solid var(--border); color:var(--fg); }
+  button.mini { padding:3px 10px; font-size:11px; }
+  .actions { display:flex; gap:10px; align-items:center; margin-top:12px; }
+  .log { max-height:340px; overflow-y:auto; border-radius:8px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th { text-align:left; color:var(--muted); font-weight:600; font-size:11px;
+    text-transform:uppercase; letter-spacing:.06em; padding:5px 8px; position:sticky; top:0;
+    background:var(--panel); z-index:1; }
+  td { padding:5px 8px; border-top:1px solid var(--border); vertical-align:top; }
+  td.msg { color:var(--fg); word-break:break-all; }
+  .k { display:inline-block; padding:1px 8px; border-radius:20px; font-size:11px; font-weight:700; }
+  .k.blocked { background:rgba(249,115,22,.15); color:var(--blocked); }
+  .k.error   { background:rgba(239,68,68,.15);  color:var(--error); }
+  .k.info    { background:rgba(56,189,248,.15);  color:var(--info); }
+  .k.ok      { background:rgba(34,197,94,.15);   color:var(--ok); }
+  .k.ech, .k.src { margin-left:6px; padding:0 6px; font-size:10px; }
+  .ts { color:var(--muted); font-variant-numeric:tabular-nums; white-space:nowrap; }
+  .xn { color:var(--muted); font-weight:700; white-space:nowrap; }
+  .chips { display:flex; gap:6px; flex-wrap:wrap; margin-left:auto; align-items:center; }
+  .chip { border:1px solid var(--border); background:var(--panel2); color:var(--muted);
+    border-radius:20px; padding:2px 10px; font-size:11px; font-weight:600; cursor:pointer; }
+  .chip.new { border-color:var(--accent); color:var(--accent); }
+  .searchwrap { position:relative; display:inline-flex; }
+  .searchwrap input { background:var(--panel2); border:1px solid var(--border);
+    border-radius:8px; color:var(--fg); padding:5px 26px 5px 10px; min-width:380px; font-size:12px; }
+  .searchwrap .sx { position:absolute; right:8px; top:50%; transform:translateY(-50%);
+    color:var(--muted); cursor:pointer; font-size:12px; display:none; }
+  .searchwrap .sx:hover { color:var(--fg); }
+  .empty { color:var(--muted); font-size:12px; padding:14px 8px; text-align:center; }
+  a { color:var(--accent); }
+  /* request rows: click to expand request/response body */
+  tr.rq { cursor:pointer; }
+  /* only the URL cell wraps; time/method/status/type stay one line */
+  tr.rq td { white-space:nowrap; }
+  tr.rq td.msg { white-space:normal; }
+  /* block attribution under the URL: rule chip + source-list pill */
+  tr.rq .bb { margin-top:3px; display:flex; align-items:center; gap:6px;
+    font-size:11px; color:var(--muted); flex-wrap:wrap; }
+  tr.rq .bb .bb-rule { font:11px/1.6 ui-monospace,Menlo,Consolas,monospace;
+    color:var(--blocked); background:rgba(249,115,22,.12); border:1px solid rgba(249,115,22,.25);
+    border-radius:5px; padding:0 6px; word-break:break-all; }
+  tr.rq .bb .bb-list { color:var(--muted); border:1px solid var(--border);
+    background:var(--panel2); border-radius:20px; padding:0 8px; font-weight:600;
+    white-space:nowrap; }
+  tr.rq .sj { margin-top:3px; display:flex; align-items:center; gap:6px;
+    font-size:11px; color:var(--muted); flex-wrap:wrap; }
+  tr.rq .sj .sj-name { font:11px/1.6 ui-monospace,Menlo,Consolas,monospace;
+    color:var(--accent); background:rgba(99,102,241,.12); border:1px solid rgba(99,102,241,.28);
+    border-radius:5px; padding:0 6px; white-space:nowrap; }
+  /* SNI hidden via Encrypted Client Hello (ECH config learned from DNS). */
+  tr.rq .ech-tag { display:inline-block; margin-left:7px; font:10px/1.5 ui-monospace,Menlo,Consolas,monospace;
+    color:var(--ok); background:rgba(34,197,94,.12); border:1px solid rgba(34,197,94,.3);
+    border-radius:5px; padding:0 5px; font-weight:700; letter-spacing:.03em; vertical-align:middle;
+    white-space:nowrap; }
+  /* row background tinted by status class (2xx/3xx/4xx/5xx/blocked) */
+  tr.st-ok td   { background:rgba(34,197,94,.06); }
+  tr.st-info td { background:rgba(56,189,248,.06); }
+  tr.st-warn td { background:rgba(249,115,22,.07); }
+  tr.st-err td  { background:rgba(239,68,68,.08); }
+  #errors td    { background:rgba(239,68,68,.06); }
+  /* error rows expand like request rows: full message + occurrence times */
+  #errors tr.err { cursor:pointer; }
+  #errors tr.err:hover td { background:var(--panel2); }
+  #errors tr.rq-detail td { background:var(--panel2); }
+  tr.rq:hover td { background:var(--panel2); }
+  tr.rq-detail td { background:var(--panel2); font-size:12px; padding:10px 12px; }
+  .rq-detail .lbl { color:var(--muted); font-size:11px; text-transform:uppercase;
+    letter-spacing:.06em; margin:8px 0 3px; }
+  .rq-detail pre { margin:0; padding:8px 10px; background:var(--bg); border:1px solid var(--border);
+    border-radius:6px; max-height:240px; overflow:auto; white-space:pre-wrap; word-break:break-all;
+    font:12px/1.45 ui-monospace,Menlo,Consolas,monospace; color:var(--fg); }
+  /* network-tab detail: general info, then request | response side by side */
+  .rq-detail .gen { display:grid; grid-template-columns:90px 1fr; gap:2px 12px;
+    margin-bottom:4px; }
+  .rq-detail .gen .gl { color:var(--muted); font-size:10px; text-transform:uppercase;
+    letter-spacing:.06em; padding-top:2px; }
+  .rq-detail .gen .gv { word-break:break-all;
+    font:12px/1.5 ui-monospace,Menlo,Consolas,monospace; }
+  .rq-detail .cols { display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr));
+    gap:0 16px; }
+  /* tab bar: Requests is home; everything else lives one click away */
+  .tabs { display:flex; gap:4px; border-bottom:1px solid var(--border); }
+  .tabs .tab { background:none; border:none; border-bottom:2px solid transparent;
+    border-radius:0; color:var(--muted); font-size:13px; font-weight:600;
+    text-transform:uppercase; letter-spacing:.08em; padding:8px 14px; cursor:pointer; }
+  .tabs .tab:hover { color:var(--fg); }
+  .tabs .tab.active { color:var(--fg); border-bottom-color:var(--accent); }
+  .tabs .tab .ticon svg { width:14px; height:14px; margin-right:6px; vertical-align:-2px; }
+  .tabs .tab.active .ticon { color:var(--accent); }
+  .tabs .tab .tbadge { display:inline-block; margin-left:6px; padding:0 7px;
+    border-radius:20px; font-size:11px; background:var(--panel2); color:var(--muted); }
+  .tabs .tab .tbadge.bad { background:rgba(239,68,68,.15); color:var(--error); }
+  .tabpane[hidden] { display:none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>proxy <span class="badge" id="alive">●</span></h1>
+  <span class="meta" id="hdr-meta">connecting…</span>
+  <span id="hdr-errors">0 errors</span>
+</header>
+<div class="shell">
+<!-- sidebar sections; each groups one or more tab panes (mapping in SECTIONS) -->
+<nav id="sidebar">
+  <button class="side-item" data-section="sec-dashboard"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg><span class="sl">Dashboard</span></button>
+  <button class="side-item" data-section="sec-proxy"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg><span class="sl">Proxy</span><span class="sbadge bad" id="side-err" style="display:none">0</span></button>
+  <button class="side-item" data-section="sec-dns"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg><span class="sl">DNS</span></button>
+  <button class="side-item" data-section="sec-adblock"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg><span class="sl">Adblocker</span></button>
+  <button class="side-item" data-section="sec-settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span class="sl">Settings</span></button>
+</nav>
+<main>
+  <!-- tab icons: inline Feather-style SVGs, stroke=currentColor so they follow tab state -->
+  <nav class="tabs" id="tabs">
+    <button class="tab" data-pane="pane-requests"><span class="ticon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg></span>Requests</button>
+    <button class="tab" data-pane="pane-dns"><span class="ticon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span>Queries</button>
+    <button class="tab" data-pane="pane-dnsrw"><span class="ticon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg></span>Rewrites<span class="tbadge" id="rw-badge">0</span></button>
+    <button class="tab" data-pane="pane-dnscfg"><span class="ticon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg></span>Settings</button>
+    <button class="tab" data-pane="pane-errors"><span class="ticon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></span>Errors<span class="tbadge" id="err-badge">0</span></button>
+    <button class="tab" data-pane="pane-custom"><span class="ticon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></span>Custom filters<span class="tbadge" id="cf-badge">0</span></button>
+    <button class="tab" data-pane="pane-blocklists"><span class="ticon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></span>Blocklists<span class="tbadge" id="bl-badge">0</span></button>
+    <button class="tab" data-pane="pane-exclusions"><span class="ticon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="4.9" y1="4.9" x2="19.1" y2="19.1"/></svg></span>Excluded</button>
+    <button class="tab" data-pane="pane-proxycfg"><span class="ticon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg></span>Settings</button>
+    <button class="tab" data-pane="pane-scriptlets"><span class="ticon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg></span>Scriptlets<span class="tbadge" id="sl-badge">0</span></button>
+    <button class="tab" data-pane="pane-tester"><span class="ticon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2v7.5L4.7 20.6a1 1 0 0 0 .9 1.4h12.8a1 1 0 0 0 .9-1.4L14 9.5V2"/><path d="M8.5 2h7"/><path d="M7 16h10"/></svg></span>Rule tester</button>
+    <button class="tab" data-pane="pane-setup"><span class="ticon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></span>Setup</button>
+  </nav>
+
+  <section class="panel tabpane" id="pane-overview">
+    <h2>Dashboard
+      <button class="ghost mini" id="ov-reset" title="zero every counter and the 24 h history">reset stats</button>
+    </h2>
+    <div class="cards">
+      <div class="card"><div class="cv" id="ov-req">–</div><div class="cl">requests</div>
+        <svg class="spark" viewBox="0 0 143 26" preserveAspectRatio="none"><polyline id="sp-req" style="stroke:var(--accent)"/></svg></div>
+      <div class="card"><div class="cv" id="ov-blk" style="color:var(--blocked)">–</div><div class="cl" id="ov-blk-l">blocked</div>
+        <svg class="spark" viewBox="0 0 143 26" preserveAspectRatio="none"><polyline id="sp-blk" style="stroke:var(--blocked)"/></svg></div>
+      <div class="card"><div class="cv" id="ov-err" style="color:var(--error)">–</div><div class="cl">errors</div>
+        <svg class="spark" viewBox="0 0 143 26" preserveAspectRatio="none"><polyline id="sp-err" style="stroke:var(--error)"/></svg></div>
+      <div class="card"><div class="cv" id="ov-dq">–</div><div class="cl">dns queries</div>
+        <svg class="spark" viewBox="0 0 143 26" preserveAspectRatio="none"><polyline id="sp-dq" style="stroke:var(--info)"/></svg></div>
+      <div class="card"><div class="cv" id="ov-db" style="color:var(--blocked)">–</div><div class="cl" id="ov-db-l">dns blocked</div>
+        <svg class="spark" viewBox="0 0 143 26" preserveAspectRatio="none"><polyline id="sp-db" style="stroke:var(--blocked)"/></svg></div>
+      <div class="card"><div class="cv" id="ov-dc">–</div><div class="cl" id="ov-dc-l">dns from cache</div>
+        <svg class="spark" viewBox="0 0 143 26" preserveAspectRatio="none"><polyline id="sp-dc" style="stroke:var(--ok)"/></svg></div>
+    </div>
+    <p class="hint" style="margin-bottom:0">Everything above covers the <b>last 24 hours</b>
+      (10-minute buckets, updated live every 2 s; history is in-memory and restarts with the
+      proxy). Details live in the <b>Proxy</b>, <b>DNS</b> and <b>Adblocker</b> sections.</p>
+    <div class="topgrid">
+      <div>
+        <h2 style="margin-top:20px">Top queried domains</h2>
+        <div class="log toplog">
+          <table>
+            <thead><tr><th>Domain</th><th style="width:90px;text-align:right">Queries</th>
+              <th style="width:76px"></th></tr></thead>
+            <tbody id="top-queried"><tr><td colspan="3" class="hint">nothing in the last 24 h</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+      <div>
+        <h2 style="margin-top:20px">Top blocked domains</h2>
+        <div class="log toplog">
+          <table>
+            <thead><tr><th>Domain</th><th style="width:90px;text-align:right">Blocked</th>
+              <th style="width:76px"></th></tr></thead>
+            <tbody id="top-blocked"><tr><td colspan="3" class="hint">nothing in the last 24 h</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    <h2 style="margin-top:20px">DNS upstreams <span class="hint">— per-upstream health</span></h2>
+    <table>
+      <thead><tr><th>Upstream</th><th style="width:90px">Queries</th>
+        <th style="width:90px">Failed</th><th style="width:110px">Avg lookup</th>
+        <th style="width:110px" title="Does the upstream return ECH configs (the ech SvcParam) in HTTPS answers? Probed against the configured canary domain.">ECH</th></tr></thead>
+      <tbody id="up-stats"><tr><td colspan="5" class="hint">no lookups yet</td></tr></tbody>
+    </table>
+  </section>
+
+  <section class="panel tabpane" id="pane-requests">
+    <h2>Requests
+      <span class="chips" style="margin-left:auto">
+        <span class="chip" id="rq-new" style="display:none"></span>
+        <span class="searchwrap">
+          <input type="text" id="rq-search" placeholder="search url / method / status / rule…">
+          <span class="sx" id="rq-sx">✕</span>
+        </span>
+        <button class="ghost mini" id="rq-wipe" title="delete all logged requests">clear log</button>
+      </span>
+    </h2>
+    <div class="log" id="rq-log">
+      <table>
+        <thead><tr><th style="width:92px">Time</th><th style="width:52px">Method</th>
+          <th style="width:52px">Status</th><th style="width:80px">Type</th><th>URL</th>
+          <th style="width:64px"></th></tr></thead>
+        <tbody id="requests"></tbody>
+      </table>
+      <div class="empty" id="rq-empty">no requests logged yet</div>
+    </div>
+  </section>
+
+  <section class="panel tabpane" id="pane-dns">
+    <h2>DNS
+      <span class="chips" style="margin-left:auto">
+        <span class="chip" id="dq-new" style="display:none"></span>
+        <span class="searchwrap">
+          <input type="text" id="dq-search" placeholder="search domain / type / outcome / rule…">
+          <span class="sx" id="dq-sx">✕</span>
+        </span>
+        <button class="ghost mini" id="dq-wipe" title="delete all logged queries">clear log</button>
+      </span>
+    </h2>
+    <div class="log" id="dq-log">
+      <table>
+        <thead><tr><th style="width:92px">Time</th><th style="width:84px">Outcome</th>
+          <th>Answer</th><th style="width:56px">Type</th><th>Domain</th>
+          <th style="width:180px">Upstream</th>
+          <th style="width:44px">ms</th><th style="width:64px"></th></tr></thead>
+        <tbody id="dnslog"></tbody>
+      </table>
+      <div class="empty" id="dq-empty">no DNS queries logged yet — browse through the proxy or point a client at the DNS listener</div>
+    </div>
+    <p class="hint" id="dns-conf">loading resolver status…</p>
+  </section>
+
+  <section class="tabpane" id="pane-dnsrw">
+    <div class="panel">
+      <h2>DNS rewrites <span class="hint" id="rw-count"></span></h2>
+      <div class="log" id="rw-log">
+        <table>
+          <thead><tr><th>Domain</th><th>Answer</th><th style="width:70px"></th></tr></thead>
+          <tbody id="rewrites"></tbody>
+        </table>
+      </div>
+      <div class="actions" style="flex-wrap:wrap">
+        <input type="text" id="rw-domain" placeholder="app.example.com or *.example.com"
+          style="flex:1;min-width:200px">
+        <input type="text" id="rw-answer" placeholder="1.2.3.4 · target.host (CNAME)"
+          style="flex:1;min-width:200px">
+        <button id="rw-add">Add rewrite</button>
+      </div>
+      <p class="hint">Local DNS records, answered before any filtering or recursion —
+        so they win over blocklists and are never cached. An IPv4 answers A queries,
+        anything else becomes a CNAME (its target resolved upstream and appended).
+        IPv6 answers are not supported — the resolver is IPv4-only.
+        <code>*.domain</code> covers the domain and every subdomain; one domain can
+        hold several answers. Persisted across restarts.</p>
+      <p class="hint" id="rw-status"></p>
+    </div>
+  </section>
+
+  <section class="tabpane" id="pane-dnscfg">
+    <div class="panel">
+      <h2>DNS service</h2>
+      <div class="svcctl" id="dns-ctl" style="margin-bottom:0">
+        <label class="sw"><input type="checkbox" id="dns-enabled"> Enabled</label>
+        <label for="dns-listen" style="color:var(--muted);font-size:12px;font-weight:600">Listen (UDP + TCP)</label>
+        <input type="text" id="dns-listen" placeholder="0.0.0.0:53" spellcheck="false">
+        <button id="dns-svc-save">Save</button>
+        <span class="hint" id="dns-svc-status"></span>
+      </div>
+      <p class="hint">Start, stop, or move the resolver's listener without a restart — applied
+        live and persisted (over <code>config.toml [dns]</code>). Any change here rebuilds the
+        resolver, so the cache is cleared, but upstreams, rewrites and the settings below are
+        kept.</p>
+    </div>
+
+    <div class="panel">
+      <h2>Upstream servers</h2>
+      <p class="hint" style="margin-top:0">One per line (IPv4 only — the resolver
+        doesn't speak IPv6): <code>https://host/dns-query</code> (DoH) ·
+        <code>tls://host</code> (DoT) ·
+        <code>udp://ip</code> / bare IP / <code>tcp://ip</code> (plain DNS).</p>
+      <textarea id="up-list" spellcheck="false" rows="4"></textarea>
+      <div class="actions" style="flex-wrap:wrap">
+        <label for="up-mode">Mode</label>
+        <select id="up-mode">
+          <option value="failover">Failover — in order, from the last that answered</option>
+          <option value="load-balance">Load balance — weighted random by speed &amp; failures</option>
+          <option value="parallel">Parallel — query all at once, first answer wins</option>
+        </select>
+      </div>
+      <div class="actions" style="flex-wrap:wrap">
+        <label for="up-bootstrap">Bootstrap (plain-DNS IPs that resolve upstream <em>hostnames</em>, comma-separated)</label>
+        <input type="text" id="up-bootstrap" placeholder="1.1.1.1:53, 8.8.8.8:53" style="flex:1;min-width:220px">
+      </div>
+      <div class="actions">
+        <button id="up-save">Save upstreams</button>
+        <span class="hint" id="up-status"></span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Cache</h2>
+      <div class="actions" style="margin-top:0;flex-wrap:wrap">
+        <label for="ca-size">Size (entries, 0 disables)</label>
+        <input type="number" id="ca-size" min="0" step="1" style="width:110px">
+        <label for="ca-min">Min TTL (s)</label>
+        <input type="number" id="ca-min" min="0" step="1" style="width:90px">
+        <label for="ca-max">Max TTL (s)</label>
+        <input type="number" id="ca-max" min="1" step="1" style="width:90px">
+      </div>
+      <p class="hint">Cached answers are clamped into the [min, max] TTL band. A resize
+        keeps existing entries; changed TTLs apply to answers cached from now on.</p>
+      <div class="actions">
+        <button id="ca-save">Save cache settings</button>
+        <button class="ghost" id="dns-flush" title="drop every cached DNS answer">Flush cache</button>
+        <button class="ghost" id="dnscfg-reset"
+          title="drop every saved override (upstreams, mode, bootstrap, cache) and return to config.toml">
+          Reset all to config.toml</button>
+        <span class="hint" id="ca-status"></span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Query log</h2>
+      <div class="actions" style="margin-top:0">
+        <label style="display:flex;align-items:center;gap:7px">
+          <input type="checkbox" id="lv6-log"> Log IPv6 (AAAA) queries</label>
+        <button id="lv6-save">Save</button>
+        <span class="hint" id="lv6-status"></span>
+      </div>
+      <p class="hint">The resolver is IPv4-only — AAAA queries are answered NODATA without
+        resolving — so they are kept out of the live query log by default. Turn on to log them
+        too. Applied live and persisted; metrics count AAAA queries either way.</p>
+    </div>
+
+    <div class="panel">
+      <h2>ECH detection <span class="hint">— probe whether each upstream returns ECH configs</span></h2>
+      <div class="actions" style="margin-top:0;flex-wrap:wrap">
+        <label for="ech-domain">Probe (canary) domain</label>
+        <input type="text" id="ech-domain" placeholder="crypto.cloudflare.com" style="flex:1;min-width:220px">
+        <button id="ech-save">Save</button>
+        <span class="hint" id="ech-status"></span>
+      </div>
+      <p class="hint">Must be a domain that publishes an ECHConfigList, or every upstream reads as
+        "no ECH". Leave blank to disable detection. Results appear in the <b>ECH</b> column of the
+        DNS upstreams table on the <b>Dashboard</b>; each upstream is re-probed hourly.</p>
+    </div>
+
+    <div class="panel">
+      <h2>Check domain <span class="hint">— test a domain against the DNS filter without sending a query</span></h2>
+      <div class="actions" style="flex-wrap:wrap">
+        <input type="text" id="dt-domain" placeholder="ads.example.com" style="flex:1;min-width:220px">
+        <button id="dt-run">Check domain</button>
+        <span class="hint" id="dt-result"></span>
+      </div>
+      <p class="hint">Hostname rules only (<code>||domain^</code>), as the DNS resolver applies
+        them — typed and <code>$third-party</code> options never match at this layer. To test a
+        full URL the way the HTTP proxy sees it, use the <b>Rule tester</b> tab.</p>
+    </div>
+  </section>
+
+  <section class="tabpane" id="pane-proxycfg">
+    <div class="panel">
+      <h2>Proxy service</h2>
+      <div class="svcctl" id="proxy-ctl" style="margin-bottom:0;display:none">
+        <label class="sw"><input type="checkbox" id="px-enabled"> Enabled</label>
+        <label for="px-listen" style="color:var(--muted);font-size:12px;font-weight:600">Listen</label>
+        <input type="text" id="px-listen" placeholder="0.0.0.0:8080" spellcheck="false">
+        <button id="px-save">Save</button>
+        <span class="hint" id="px-status"></span>
+      </div>
+      <p class="hint">Start, stop, or move the proxy's listener without a restart — applied
+        live and persisted. Rebinding drops connections currently using the old address.</p>
+    </div>
+
+    <div class="panel">
+      <h2>Name resolution &amp; privacy</h2>
+      <div style="display:flex;flex-direction:column;gap:14px;max-width:660px">
+        <div>
+          <label class="sw"><input type="checkbox" id="eg-resolver-only"> Resolve only through the built-in DNS</label>
+          <p class="hint">The proxy resolves the hosts it connects to by querying this app's filtering
+            DNS resolver like any other client — same filtering, rewrites, cache and upstreams
+            (configured on the <b>DNS → Settings</b> tab) — never the container's system or LAN
+            resolver. If the resolver is disabled, egress connections fail rather than leaking lookups
+            to the system resolver.</p>
+        </div>
+        <div>
+          <label class="sw"><input type="checkbox" id="eg-disable-ipv6"> Disable IPv6</label>
+          <p class="hint">Resolve the hosts the proxy dials over IPv4 only: send a Type A query and
+            never a Type AAAA (type 28) one, and never open an IPv6 connection. On by default. Turn it
+            off to also query AAAA and let the proxy connect over IPv6 when a host publishes one.</p>
+        </div>
+        <div>
+          <label class="sw"><input type="checkbox" id="eg-use-ech"> Encrypted Client Hello (ECH)</label>
+          <p class="hint">Read the target's ECH config from its HTTPS DNS record and negotiate Encrypted
+            Client Hello on the outbound TLS connection, hiding the server name from the network. Requests
+            whose connection used it are tagged <span class="ech-tag">[ECH]</span> in the
+            <b>Requests</b> log.</p>
+        </div>
+      </div>
+      <div class="actions">
+        <button id="eg-save">Save</button>
+        <span class="hint" id="eg-status"></span>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel tabpane" id="pane-errors">
+    <h2>Errors
+      <span class="hint" id="err-count"></span>
+      <button class="ghost mini" id="err-clear" style="margin-left:auto">clear</button>
+    </h2>
+    <div class="log">
+      <table>
+        <thead><tr><th style="width:92px">Time</th><th>Detail</th><th style="width:44px"></th></tr></thead>
+        <tbody id="errors"></tbody>
+      </table>
+      <div class="empty" id="err-empty">no errors 🎉</div>
+    </div>
+  </section>
+
+  <section class="panel tabpane" id="pane-custom">
+    <h2>Custom filters
+      <span class="hint">one rule per line — EasyList/uBO syntax, saved to <code>custom.txt</code></span>
+    </h2>
+    <textarea id="cf-text" spellcheck="false" style="width:100%;height:320px;font:12px/1.4
+      ui-monospace,Menlo,Consolas,monospace;background:var(--panel2);border:1px solid var(--border);
+      border-radius:8px;color:var(--fg);padding:10px;resize:vertical"></textarea>
+    <div class="actions">
+      <button id="cf-save">Save rules</button>
+      <button class="ghost" id="cf-reload">Reload</button>
+      <span class="hint" id="cf-status"></span>
+    </div>
+  </section>
+
+  <section class="panel tabpane" id="pane-blocklists">
+    <h2>Blocklists <span class="hint" id="bl-count"></span></h2>
+    <div class="log" id="bl-log">
+      <table>
+        <thead><tr><th>Name</th><th>Source</th><th style="width:70px">Rules</th><th style="width:96px"></th></tr></thead>
+        <tbody id="blocklists"></tbody>
+      </table>
+    </div>
+    <p class="hint" id="bl-total"></p>
+    <div class="actions">
+      <input type="url" id="bl-url" placeholder="https://…/list.txt" style="flex:1;min-width:180px;
+        background:var(--panel2);border:1px solid var(--border);border-radius:8px;color:var(--fg);padding:8px 12px">
+      <button id="bl-add">Add list</button>
+    </div>
+    <p class="hint">Lists come from URLs and auto-update when older than
+      <code>adblock.auto_update_hours</code> (re-add one to refresh immediately).
+      Custom rules have their own tab.</p>
+    <p class="hint" id="bl-status"></p>
+  </section>
+
+  <section class="panel tabpane" id="pane-exclusions">
+    <h2>Excluded domains <span class="hint" id="ex-count"></span></h2>
+    <div class="log" id="ex-log">
+      <table>
+        <thead><tr><th>Domain</th><th style="width:70px"></th></tr></thead>
+        <tbody id="exclusions"></tbody>
+      </table>
+    </div>
+    <div class="actions">
+      <input type="text" id="ex-domain" placeholder="bank.example.com" style="flex:1;min-width:180px;
+        background:var(--panel2);border:1px solid var(--border);border-radius:8px;color:var(--fg);padding:8px 12px">
+      <button id="ex-add">Add domain</button>
+    </div>
+    <p class="hint">Tunneled blind (no TLS interception) — for cert-pinned apps that
+      reject the forged leaf. Matches the exact host or any subdomain. Persisted.</p>
+    <p class="hint" id="ex-status"></p>
+  </section>
+
+  <section class="panel tabpane" id="pane-scriptlets">
+    <h2>Scriptlets <span class="hint" id="sl-summary"></span></h2>
+    <p class="hint" id="sl-note"></p>
+    <p class="hint">Library source: <a id="sl-source" href="#" target="_blank" rel="noopener"></a>
+      <span id="sl-updated"></span></p>
+    <div class="actions" style="margin-top:0">
+      <input type="text" id="sl-filter" placeholder="filter scriptlets…" style="flex:1;min-width:180px;
+        background:var(--panel2);border:1px solid var(--border);border-radius:8px;color:var(--fg);padding:8px 12px">
+      <button id="sl-update">Update from uBO</button>
+    </div>
+    <div class="log" id="sl-log">
+      <table>
+        <thead><tr><th>Name</th><th>Aliases</th><th style="width:70px">Kind</th><th style="width:70px">Bytes</th></tr></thead>
+        <tbody id="sl-library"></tbody>
+      </table>
+    </div>
+    <p class="hint">Click a scriptlet to view its JS. Which scriptlets fired into which pages shows in the
+      <b>Requests</b> tab (indigo badge), searchable by scriptlet name.</p>
+  </section>
+
+  <section class="panel tabpane" id="pane-tester">
+    <h2>Rule tester <span class="hint">— check a URL against the current rules without sending traffic</span></h2>
+    <div class="actions" style="margin-top:0;flex-wrap:wrap">
+      <input type="text" id="rt-url" placeholder="weather-analytics-events.apple.com/report — or a host, or just /ads.js"
+        style="flex:1;min-width:260px;background:var(--panel2);border:1px solid var(--border);
+        border-radius:8px;color:var(--fg);padding:8px 12px">
+      <select id="rt-type" style="background:var(--panel2);border:1px solid var(--border);
+        border-radius:8px;color:var(--fg);padding:8px 10px">
+        <option value="other">other</option>
+        <option value="script">script</option>
+        <option value="image">image</option>
+        <option value="stylesheet">stylesheet</option>
+        <option value="fetch">fetch (xhr)</option>
+        <option value="media">media</option>
+        <option value="document">document</option>
+        <option value="font">font</option>
+      </select>
+      <button id="rt-run">Test</button>
+    </div>
+    <p class="hint" style="margin-top:8px">Scheme optional — <code>host.com</code>,
+      <code>host.com/path</code>, or a bare path like <code>/ads.js</code> all work
+      (paths are tested against a neutral host, so only host-agnostic rules match).</p>
+    <p class="hint" style="margin-top:8px">Type matters: EasyList rules are often
+      restricted to a resource type (a browser sends <code>script</code> for
+      <code>/ads.js</code>). If a URL tests <strong>blocked</strong> here but still loads,
+      that request isn't reaching the proxy (e.g. an OS/app that bypasses the proxy).</p>
+    <div id="rt-result"></div>
+  </section>
+
+  <section class="panel tabpane" id="pane-setup">
+    <h2>Setup &amp; requirements</h2>
+    <p class="hint" style="margin-top:12px">Point your client's HTTP + HTTPS proxy at
+      <strong id="listen-addr">…</strong>.</p>
+    <p class="hint">To inspect HTTPS, install the root certificate in your trust store:</p>
+    <p><a href="/ca-cert.pem" download>⬇ Download root CA (proxy-ca.pem)</a></p>
+    <table class="req">
+      <tr><th>Feature</th><th>Requirement to run it fully</th></tr>
+      <tr><td>HTTP/HTTPS proxy</td>
+          <td>Set client proxy to the address above.</td></tr>
+      <tr><td>HTTPS inspection</td>
+          <td>Install the root CA (link above) in the OS/browser trust store.</td></tr>
+      <tr><td>Ad / tracker blocking</td>
+          <td>Always on. Filter lists load at startup from <code>config.toml</code> or live
+              via “Add list” here (persisted). Cosmetic <code>##</code> rules hide page
+              elements on HTML pages. Blocked requests drop the connection.</td></tr>
+      <tr><td>Excluded domains</td>
+          <td>Add them live in the “Excluded domains” tab — hosts tunneled blind
+              (no TLS interception) for cert-pinned apps. Persisted across restarts.</td></tr>
+      <tr><td>DNS filtering</td>
+          <td>Point clients' DNS at the address in the <b>DNS</b> tab (UDP or TCP).
+              Queries are filtered with the same blocklists, cached, and resolved
+              recursively over encrypted upstreams (DoH / DoT). Configure in
+              <code>config.toml [dns]</code>.</td></tr>
+      <tr><td>Encrypted Client Hello (ECH)</td>
+          <td>Toggle in the <b>DNS</b> tab under the proxy egress policy. To test it,
+              browse to <a href="https://tls-ech.dev" target="_blank" rel="noopener">tls-ech.dev</a>
+              through the proxy — it reports whether the connection used ECH.</td></tr>
+    </table>
+
+    <h2 style="margin-top:22px">Statistics &amp; logs</h2>
+    <div class="actions" style="flex-wrap:wrap">
+      <label for="st-retention">Statistics retention in hours (dashboard cards, sparklines, top domains)</label>
+      <input type="number" id="st-retention" min="1" max="168" step="1">
+    </div>
+    <div class="actions" style="flex-wrap:wrap">
+      <label for="st-rotate">Request / query log rotation in hours (on-disk JSONL logs)</label>
+      <input type="number" id="st-rotate" min="1" max="2160" step="1">
+    </div>
+    <p class="hint">The statistics window lives in memory and restarts with the process.
+      Request and DNS query records append to <code>request-log.jsonl</code> /
+      <code>query-log.jsonl</code> next to the blocklists; when a file gets older than the
+      rotation period it is moved to its <code>.old</code> sibling (replacing the previous
+      one), so records are kept for one to two rotation periods.</p>
+    <div class="actions">
+      <button id="st-save">Save statistics settings</button>
+      <span class="hint" id="st-status"></span>
+    </div>
+  </section>
+</main>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let errorTotal = 0;
+
+function fmtDur(s){
+  const d=Math.floor(s/86400), h=Math.floor(s%86400/3600),
+        m=Math.floor(s%3600/60), sec=s%60;
+  return (d?d+"d ":"")+(h?h+"h ":"")+(m?m+"m ":"")+sec+"s";
+}
+function fmtTime(ms){
+  const t=new Date(ms);
+  return t.toLocaleTimeString([], {hour12:false})+"."+String(t.getMilliseconds()).padStart(3,"0");
+}
+function esc(s){ const d=document.createElement("span"); d.textContent=s; return d.innerHTML; }
+
+// Redraw one card's 24 h sparkline (a fixed-height polyline, x = one bucket).
+function spark(id, data){
+  const el = $(id);
+  if(!el || !data || !data.length) return;
+  const svg = el.ownerSVGElement;
+  svg.setAttribute("viewBox", `0 0 ${data.length-1} 26`);
+  const max = Math.max(1, ...data);
+  el.setAttribute("points", data.map((v,i)=>`${i},${24 - (v/max)*22}`).join(" "));
+  svg._sparkData = data;
+  bindSparkTip(svg);
+}
+
+// Human label for how long ago a 10-min bucket is, counting back from the
+// newest (in-progress) bucket at the right edge. `back` = buckets from "now".
+function bucketAgo(back){
+  const mins = back * 10;              // BUCKET_SECS = 600
+  if(mins < 10) return "now";
+  const h = Math.floor(mins/60), m = mins%60;
+  return (h ? `${h} h` + (m ? ` ${m} m` : "") : `${m} m`) + " ago";
+}
+
+// Lazily-created floating tooltip shared by every sparkline.
+let sparkTip;
+function bindSparkTip(svg){
+  if(svg._tipBound) return;
+  svg._tipBound = true;
+  svg.addEventListener("mousemove", e => {
+    const data = svg._sparkData;
+    if(!data || !data.length) return;
+    const r = svg.getBoundingClientRect();
+    let i = Math.round((e.clientX - r.left) / r.width * (data.length - 1));
+    i = Math.max(0, Math.min(data.length - 1, i));
+    if(!sparkTip){
+      sparkTip = document.createElement("div");
+      sparkTip.className = "spark-tip";
+      document.body.appendChild(sparkTip);
+    }
+    sparkTip.innerHTML = `${data[i].toLocaleString()}<span class="t">${bucketAgo(data.length - 1 - i)}</span>`;
+    sparkTip.style.left = e.clientX + "px";
+    sparkTip.style.top = r.top + "px";
+    sparkTip.style.display = "block";
+  });
+  svg.addEventListener("mouseleave", () => {
+    if(sparkTip) sparkTip.style.display = "none";
+  });
+}
+
+// Share of a whole as a card-label suffix, e.g. " (12.3%)".
+function pctOf(part, whole){
+  return whole ? ` (${(100*part/whole).toFixed(1)}%)` : "";
+}
+
+// Rebuild a top-domains table — only when its data actually changed, so the
+// 2 s stats frames don't churn the DOM under a hovering cursor.
+const topCache = {};
+function renderTop(id, rows, barColor, isBlocked){
+  rows = rows || [];
+  const key = JSON.stringify(rows);
+  if(topCache[id] === key) return;
+  topCache[id] = key;
+  const tb = $(id);
+  tb.innerHTML = "";
+  if(!rows.length){
+    tb.innerHTML = `<tr><td colspan="3" class="hint">nothing in the last 24 h</td></tr>`;
+    return;
+  }
+  const max = Math.max(1, rows[0].count); // rows arrive count-descending
+  for(const r of rows){
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td class="msg"><span class="dom"></span><div class="topbar"><i></i></div></td>`+
+      `<td class="cnt">${r.count.toLocaleString()}</td><td></td>`;
+    tr.querySelector(".dom").textContent = r.domain;
+    const bar = tr.querySelector(".topbar i");
+    bar.style.width = (100*r.count/max).toFixed(1) + "%";
+    bar.style.background = barColor;
+    tr.lastChild.appendChild(ruleButton(r.domain, isBlocked));
+    tb.appendChild(tr);
+  }
+}
+
+// Stats arrive as SSE frames (on connect + every 2 s); this only renders.
+// The overview cards, sparklines and top-domain tables all read the rolling
+// 24 h window; the since-startup metrics stay available under /api/stats.
+// Live proxy listen string for the header/setup line, kept fresh by
+// refreshServer() so it reflects a live rebind rather than the startup value.
+let srvProxyListen = "";
+function renderStats(s){
+  const proxyShown = srvProxyListen || s.info.listen;
+  $("hdr-meta").textContent =
+    `up ${fmtDur(s.uptime_secs)} · proxy ${proxyShown} · v${s.info.version}`;
+  $("alive").style.color = "var(--ok)";
+  $("listen-addr").textContent = proxyShown;
+  const w = s.window;
+  if(w && w.totals){
+    const t = w.totals;
+    $("ov-req").textContent = t.requests.toLocaleString();
+    $("ov-blk").textContent = t.blocked.toLocaleString();
+    $("ov-blk-l").textContent = "blocked" + pctOf(t.blocked, t.requests);
+    $("ov-err").textContent = t.errors.toLocaleString();
+    $("ov-dq").textContent = t.dns_queries.toLocaleString();
+    $("ov-db").textContent = t.dns_blocked.toLocaleString();
+    $("ov-db-l").textContent = "dns blocked" + pctOf(t.dns_blocked, t.dns_queries);
+    $("ov-dc").textContent = t.dns_cached.toLocaleString();
+    $("ov-dc-l").textContent = "dns from cache" + pctOf(t.dns_cached, t.dns_queries);
+    spark("sp-req", w.series.requests);
+    spark("sp-blk", w.series.blocked);
+    spark("sp-err", w.series.errors);
+    spark("sp-dq", w.series.dns_queries);
+    spark("sp-db", w.series.dns_blocked);
+    spark("sp-dc", w.series.dns_cached);
+    renderTop("top-queried", w.top_queried, "var(--accent)", false);
+    renderTop("top-blocked", w.top_blocked, "var(--blocked)", true);
+  }
+}
+
+$("ov-reset").addEventListener("click", async ()=>{
+  if(!confirm("Reset all statistics?\n(zeroes every counter and the 24 h history)")) return;
+  const b = $("ov-reset");
+  b.disabled = true;
+  try {
+    const r = await fetch("/api/stats/reset", {method:"POST"});
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.error || r.status);
+    renderStats(d); // the response is a fresh stats document — repaint now
+    refreshDns();   // the DNS-upstream health table reset too
+  } catch(e){ b.textContent = "failed: " + e.message; }
+  b.disabled = false;
+});
+
+// ---- service control: start/stop/rebind proxy + DNS listeners --------------
+// Proxy controls live on the Dashboard, DNS controls on DNS → Settings; both
+// POST /api/server/config and repaint from /api/server (the source of truth).
+async function refreshServer(){
+  try {
+    const r = await fetch("/api/server"); const d = await r.json();
+    // Proxy (Dashboard). Hidden entirely when the proxy can't be controlled.
+    if(d.proxy_controllable === false){
+      $("proxy-ctl").style.display = "none";
+    } else {
+      $("proxy-ctl").style.display = "";
+      $("px-enabled").checked = !!d.proxy_enabled;
+      $("px-listen").value = d.proxy_listen || "";
+      $("px-listen").disabled = !d.proxy_enabled;
+    }
+    srvProxyListen = !d.proxy_enabled ? "disabled"
+      : d.proxy_running ? d.proxy_listen : d.proxy_listen + " (bind failed)";
+    // DNS (DNS → Settings).
+    $("dns-enabled").checked = !!d.dns_enabled;
+    $("dns-listen").value = d.dns_listen || "";
+    $("dns-listen").disabled = !d.dns_enabled;
+  } catch(e){}
+}
+
+async function postServer(body, statusId, busyMsg){
+  const el = $(statusId);
+  el.textContent = busyMsg;
+  try {
+    const r = await fetch("/api/server/config", {method:"POST",
+      headers:{"content-type":"application/json"}, body:JSON.stringify(body)});
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.error || r.status);
+    el.textContent = "saved ✓ (applied live, persisted)";
+    refreshServer();
+  } catch(e){ el.textContent = "failed: " + e.message; }
+}
+$("px-enabled").addEventListener("change", ()=>{ $("px-listen").disabled = !$("px-enabled").checked; });
+$("px-save").addEventListener("click", ()=>{
+  const enabled = $("px-enabled").checked;
+  if(!enabled && !confirm("Stop the proxy service? Clients pointed at it will lose connectivity.")) return;
+  const body = {proxy_enabled: enabled};
+  if(enabled){
+    const listen = $("px-listen").value.trim();
+    if(!listen){ $("px-status").textContent = "a listen address is required"; return; }
+    body.proxy_listen = listen;
+  }
+  postServer(body, "px-status", "applying…");
+});
+// ---- proxy egress policy: resolver-only DNS, ECH, disable-IPv6 -------------
+async function refreshProxyCfg(){
+  try {
+    const r = await fetch("/api/proxy"); const d = await r.json();
+    $("eg-resolver-only").checked = !!d.resolver_only;
+    $("eg-use-ech").checked = !!d.use_ech;
+    $("eg-disable-ipv6").checked = !!d.disable_ipv6;
+  } catch(e){}
+}
+$("eg-save").addEventListener("click", async ()=>{
+  const el = $("eg-status"); el.textContent = "saving…";
+  const body = {
+    resolver_only: $("eg-resolver-only").checked,
+    use_ech: $("eg-use-ech").checked,
+    disable_ipv6: $("eg-disable-ipv6").checked,
+  };
+  try {
+    const r = await fetch("/api/proxy/config", {method:"POST",
+      headers:{"content-type":"application/json"}, body: JSON.stringify(body)});
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.error || r.status);
+    el.textContent = "saved ✓ (applied live, persisted)";
+    refreshProxyCfg();
+  } catch(e){ el.textContent = "failed: " + e.message; }
+});
+
+$("dns-enabled").addEventListener("change", ()=>{ $("dns-listen").disabled = !$("dns-enabled").checked; });
+$("dns-svc-save").addEventListener("click", ()=>{
+  const enabled = $("dns-enabled").checked;
+  if(!enabled && !confirm("Stop the DNS resolver? Clients pointed at it will lose name resolution.")) return;
+  const body = {dns_enabled: enabled};
+  if(enabled){
+    const listen = $("dns-listen").value.trim();
+    if(!listen){ $("dns-svc-status").textContent = "a listen address is required"; return; }
+    body.dns_listen = listen;
+  }
+  postServer(body, "dns-svc-status", "applying…");
+});
+
+// fmtTime shows only the time of day; persisted errors can be days old, so
+// the expanded view dates them fully.
+function fmtDateTime(ms){
+  const t = new Date(ms);
+  return t.toLocaleDateString([], {year:"numeric", month:"short", day:"2-digit"})
+    + " " + fmtTime(ms);
+}
+
+// One error row: a main line plus a hidden detail row — click to expand the
+// full message and its occurrence times. Consecutive identical messages
+// collapse into a ×N counter; the detail keeps first/last seen.
+function pushRow(tbody, e){
+  const first = tbody.firstChild;
+  if(first && first.dataset.msg === e.message){
+    const n = (parseInt(first.dataset.n)||1) + 1;
+    first.dataset.n = n;
+    first.dataset.last = e.ts_ms;
+    if(e.trace) first._trace = e.trace; // keep the latest occurrence's trace
+    first.querySelector(".xn").textContent = "×"+n;
+    first.querySelector(".ts").textContent = fmtTime(e.ts_ms);
+    renderErrDetail(first); // refresh an open detail in place
+    return;
+  }
+  const tr = document.createElement("tr");
+  tr.className = "err";
+  tr.dataset.msg = e.message; tr.dataset.n = 1;
+  tr.dataset.first = e.ts_ms; tr.dataset.last = e.ts_ms;
+  if(e.trace) tr._trace = e.trace; // a property, not dataset: traces are long
+  tr.innerHTML = `<td class="ts">${fmtTime(e.ts_ms)}</td><td class="msg"></td><td class="xn"></td>`;
+  tr.querySelector(".msg").textContent = e.message;
+  const detail = document.createElement("tr");
+  detail.className = "rq-detail";
+  detail.style.display = "none";
+  detail.innerHTML = `<td colspan="3"></td>`;
+  tr._detail = detail;
+  tr.addEventListener("click", ()=>{
+    const open = detail.style.display === "none";
+    detail.style.display = open ? "" : "none";
+    if(open) renderErrDetail(tr);
+  });
+  tbody.insertBefore(detail, tbody.firstChild);
+  tbody.insertBefore(tr, tbody.firstChild);
+  // Two <tr> per error (main + detail); rows always leave in pairs.
+  while(tbody.children.length > 600) tbody.removeChild(tbody.lastChild);
+}
+
+// (Re)render one error's expanded view. No-op while it's collapsed.
+function renderErrDetail(tr){
+  const d = tr._detail;
+  if(!d || d.style.display === "none") return;
+  const n = parseInt(tr.dataset.n)||1;
+  const td = d.firstChild;
+  td.innerHTML = `<div class="gen">`+
+      `<div class="gl">${n > 1 ? "last seen" : "time"}</div><div class="gv gv-last"></div>`+
+      (n > 1 ? `<div class="gl">first seen</div><div class="gv gv-first"></div>`+
+               `<div class="gl">repeats</div><div class="gv gv-n"></div>` : ``)+
+    `</div><div class="lbl">full message</div><pre></pre>`+
+    (tr._trace ? `<div class="lbl">stack trace</div><pre class="trace"></pre>` : ``);
+  td.querySelector(".gv-last").textContent = fmtDateTime(parseInt(tr.dataset.last));
+  if(n > 1){
+    td.querySelector(".gv-first").textContent = fmtDateTime(parseInt(tr.dataset.first));
+    td.querySelector(".gv-n").textContent = "×" + n;
+  }
+  td.querySelector("pre").textContent = tr.dataset.msg;
+  if(tr._trace) td.querySelector("pre.trace").textContent = tr._trace;
+}
+
+function updateErrorBadges(){
+  // Two <tr> per error (main + detail) — count only the main rows.
+  const nr = $("errors").querySelectorAll("tr.err").length;
+  $("err-empty").style.display = nr ? "none" : "";
+  $("err-count").textContent = nr ? `(${nr} shown)` : "";
+  $("err-badge").textContent = errorTotal;
+  $("err-badge").classList.toggle("bad", errorTotal > 0);
+  $("hdr-errors").style.display = errorTotal ? "" : "none";
+  $("hdr-errors").textContent = errorTotal + " error" + (errorTotal===1?"":"s");
+  $("side-err").style.display = errorTotal ? "" : "none";
+  $("side-err").textContent = errorTotal;
+}
+
+// One event pushed over SSE. Only errors surface in the panel (as before).
+function handleEvent(e){
+  if(e.kind === "error"){ errorTotal++; pushRow($("errors"), e); updateErrorBadges(); }
+}
+
+// Errors are the one persisted log (they survive restarts, unlike the
+// request/DNS streams): seed the panel from it before live SSE takes over.
+async function loadErrors(){
+  try {
+    const r = await fetch("/api/errors"); const d = await r.json();
+    for(const e of d.errors){ errorTotal++; pushRow($("errors"), e); }
+    updateErrorBadges();
+  } catch {}
+}
+
+$("err-clear").addEventListener("click", ()=>{
+  fetch("/api/errors/clear", {method:"POST"}).catch(()=>{});
+  $("errors").innerHTML = ""; errorTotal = 0;
+  $("err-empty").style.display = ""; $("err-count").textContent = "";
+  $("err-badge").textContent = "0"; $("err-badge").classList.remove("bad");
+  $("hdr-errors").style.display = "none";
+  $("side-err").style.display = "none";
+});
+
+// Sidebar sections → their tab panes. One pane visible at a time; the tab
+// bar shows only the active section's tabs (and hides for one-pane sections).
+// Last selection survives reloads, per section.
+const SECTIONS = {
+  "sec-dashboard": ["pane-overview"],
+  "sec-proxy":     ["pane-requests", "pane-errors", "pane-exclusions", "pane-proxycfg"],
+  "sec-dns":       ["pane-dns", "pane-dnsrw", "pane-dnscfg"],
+  "sec-adblock":   ["pane-custom", "pane-blocklists", "pane-scriptlets", "pane-tester"],
+  "sec-settings":  ["pane-setup"],
+};
+function sectionOf(pane){
+  for(const [s, ps] of Object.entries(SECTIONS)) if(ps.includes(pane)) return s;
+  return "sec-dashboard";
+}
+function showTab(pane){
+  const sec = sectionOf(pane), panes = SECTIONS[sec];
+  for(const it of document.querySelectorAll("#sidebar .side-item"))
+    it.classList.toggle("active", it.dataset.section === sec);
+  $("tabs").style.display = panes.length > 1 ? "" : "none";
+  for(const t of document.querySelectorAll(".tabs .tab")){
+    t.style.display = panes.includes(t.dataset.pane) ? "" : "none";
+    t.classList.toggle("active", t.dataset.pane === pane);
+  }
+  for(const p of document.querySelectorAll(".tabpane"))
+    p.hidden = p.id !== pane;
+  // Fresh resolver status (upstream health, cache occupancy) on entry.
+  if(["pane-overview", "pane-dns", "pane-dnscfg"].includes(pane)) refreshDns();
+  // Fresh service on/off + listen state for the panes that show the controls.
+  if(["pane-proxycfg", "pane-dnscfg"].includes(pane)) refreshServer();
+  // The proxy egress DNS/ECH policy toggles.
+  if(pane === "pane-proxycfg") refreshProxyCfg();
+  localStorage.setItem("tab", pane);
+  localStorage.setItem("tab:" + sec, pane);
+}
+function showSection(sec){
+  const saved = localStorage.getItem("tab:" + sec);
+  showTab(SECTIONS[sec].includes(saved) ? saved : SECTIONS[sec][0]);
+}
+for(const t of document.querySelectorAll(".tabs .tab"))
+  t.addEventListener("click", ()=>showTab(t.dataset.pane));
+for(const it of document.querySelectorAll("#sidebar .side-item"))
+  it.addEventListener("click", ()=>showSection(it.dataset.section));
+{
+  const saved = localStorage.getItem("tab");
+  showTab(document.getElementById(saved) ? saved : "pane-overview");
+}
+
+async function refreshBlocklists(){
+  try {
+    const r = await fetch("/api/blocklists"); const d = await r.json();
+    // `custom` has its own tab; this table is URL/file lists only.
+    const custom = d.lists.find(l=>l.name==="custom");
+    const lists = d.lists.filter(l=>l.name!=="custom");
+    $("blocklists").innerHTML = lists.map(l=>{
+      const n = esc(l.name);
+      // Only URL-sourced lists have a source to open; file/config lists don't.
+      const open = /^https?:\/\//i.test(l.source)
+        ? `<button class="ghost mini bl-src" data-url="${esc(l.source)}" title="Open source in new tab">↗</button> `
+        : "";
+      return `<tr><td>${n}</td><td class="msg">${esc(l.source)}</td>`+
+        `<td>${l.rules.toLocaleString()}</td>`+
+        `<td style="white-space:nowrap">${open}<button class="ghost mini bl-del" data-name="${n}">del</button></td></tr>`;
+    }).join("") || `<tr><td colspan="4" class="hint">no lists loaded</td></tr>`;
+    $("bl-count").textContent = `(${lists.length})`;
+    $("bl-badge").textContent = lists.length;
+    $("cf-badge").textContent = custom ? custom.rules : 0;
+    // Totals by rule category across everything loaded (custom included).
+    const t = d.lists.reduce((a,l)=>({rules:a.rules+l.rules, network:a.network+(l.network||0),
+      cosmetic:a.cosmetic+(l.cosmetic||0), exception:a.exception+(l.exception||0)}),
+      {rules:0, network:0, cosmetic:0, exception:0});
+    $("bl-total").textContent = `${d.lists.length} lists loaded · ${t.rules.toLocaleString()} rules`+
+      ` — ${t.network.toLocaleString()} network · ${t.cosmetic.toLocaleString()} cosmetic`+
+      ` · ${t.exception.toLocaleString()} exceptions`;
+    for(const b of document.querySelectorAll(".bl-del"))
+      b.addEventListener("click", ()=>deleteList(b.dataset.name));
+    for(const b of document.querySelectorAll(".bl-src"))
+      b.addEventListener("click", ()=>window.open(b.dataset.url, "_blank", "noopener,noreferrer"));
+  } catch(e){}
+}
+
+// ---- custom filters tab: always-open editor for the `custom` list ---------
+async function loadCustom(){
+  $("cf-status").textContent = "loading…";
+  try {
+    const r = await fetch("/api/blocklist?name=custom");
+    const d = await r.json();
+    if(d.error) throw new Error(d.error);
+    $("cf-text").value = d.text;
+    $("cf-status").textContent = "";
+  } catch(e){ $("cf-status").textContent = "failed: " + e.message; }
+}
+$("cf-reload").addEventListener("click", loadCustom);
+$("cf-save").addEventListener("click", async ()=>{
+  $("cf-status").textContent = "saving + rebuilding engine…";
+  $("cf-save").disabled = true;
+  try {
+    const r = await fetch("/api/blocklists",{method:"POST",
+      headers:{"content-type":"application/json"},
+      body:JSON.stringify({name:"custom", rules:$("cf-text").value, replace:true})});
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.error || r.status);
+    $("cf-status").textContent = "saved ✓ (engine rebuilt)";
+    refreshBlocklists();
+  } catch(e){ $("cf-status").textContent = "failed: " + e.message; }
+  $("cf-save").disabled = false;
+});
+
+async function deleteList(name){
+  if(!confirm("Delete list \""+name+"\"?\n(config/url lists come back on restart)")) return;
+  postBlocklist({name, delete: true}, "removing " + name + "…");
+}
+
+async function postBlocklist(body, busyMsg){
+  $("bl-status").textContent = busyMsg;
+  $("bl-add").disabled = true;
+  try {
+    const r = await fetch("/api/blocklists",{method:"POST",
+      headers:{"content-type":"application/json"}, body:JSON.stringify(body)});
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.error || r.status);
+    $("bl-status").textContent = "done ✓ (engine rebuilt)";
+    $("bl-url").value = "";
+    refreshBlocklists();
+  } catch(e){ $("bl-status").textContent = "failed: " + e.message; }
+  $("bl-add").disabled = false;
+}
+$("bl-add").addEventListener("click", ()=>{
+  const url = $("bl-url").value.trim();
+  if(url) postBlocklist({url}, "downloading + rebuilding engine… (can take a few seconds)");
+});
+
+// ---- excluded domains tab: blind-tunnel bypass list -----------------------
+async function refreshExclusions(){
+  try {
+    const r = await fetch("/api/exclusions"); const d = await r.json();
+    const domains = d.domains || [];
+    $("exclusions").innerHTML = domains.map(dom=>{
+      const n = esc(dom);
+      return `<tr><td>${n}</td>`+
+        `<td><button class="ghost mini ex-del" data-domain="${n}">del</button></td></tr>`;
+    }).join("") || `<tr><td colspan="2" class="hint">no excluded domains</td></tr>`;
+    $("ex-count").textContent = `(${domains.length})`;
+    for(const b of document.querySelectorAll(".ex-del"))
+      b.addEventListener("click", ()=>postExclusion({domain:b.dataset.domain, delete:true},
+        "removing " + b.dataset.domain + "…"));
+  } catch(e){}
+}
+
+async function postExclusion(body, busyMsg){
+  $("ex-status").textContent = busyMsg;
+  $("ex-add").disabled = true;
+  try {
+    const r = await fetch("/api/exclusions",{method:"POST",
+      headers:{"content-type":"application/json"}, body:JSON.stringify(body)});
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.error || r.status);
+    $("ex-status").textContent = "done ✓";
+    $("ex-domain").value = "";
+    refreshExclusions();
+  } catch(e){ $("ex-status").textContent = "failed: " + e.message; }
+  $("ex-add").disabled = false;
+}
+$("ex-add").addEventListener("click", ()=>{
+  const domain = $("ex-domain").value.trim();
+  if(domain) postExclusion({domain}, "adding " + domain + "…");
+});
+$("ex-domain").addEventListener("keydown", e=>{ if(e.key==="Enter") $("ex-add").click(); });
+
+async function runRuleTest(){
+  const url = $("rt-url").value.trim();
+  if(!url){ return; }
+  $("rt-result").innerHTML = `<p class="hint">testing…</p>`;
+  try {
+    const r = await fetch("/api/check",{method:"POST",
+      headers:{"content-type":"application/json"},
+      body:JSON.stringify({url, type: $("rt-type").value})});
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.error || r.status);
+    const blocked = d.outcome==="blocked";
+    let html = `<div class="row" style="border:none"><span class="k ${blocked?'blocked':'info'}"`
+      + (blocked?``:` style="background:rgba(34,197,94,.15);color:var(--ok)"`)
+      + `>${blocked?"BLOCKED":"ALLOWED (not blocked)"}</span>`;
+    html += `<span class="hint">type: ${esc(d.request_type)}</span></div>`;
+    if(d.filter) html += `<p class="hint">matched rule: <code>${esc(d.filter)}</code>`
+      + (d.list ? ` — from <b>${esc(d.list)}</b>` : ` — list unknown (rewritten/merged rule)`) + `</p>`;
+    else if(!blocked) html += `<p class="hint">no rule matched this URL for type
+      “${esc(d.request_type)}”. Try a different type, or add a rule above.</p>`;
+    $("rt-result").innerHTML = html;
+  } catch(e){ $("rt-result").innerHTML = `<p class="hint">failed: ${esc(e.message)}</p>`; }
+}
+$("rt-run").addEventListener("click", runRuleTest);
+$("rt-url").addEventListener("keydown", e=>{ if(e.key==="Enter") runRuleTest(); });
+
+// ---- request log (searchable, collapsed to host/path) --------------------
+// The server keeps no log at all: records stream in over SSE only while this
+// page is connected, and captured artifacts (headers/bodies/scriptlets)
+// follow as "attach" frames that patch the record in place. The open page
+// owns the logs — search and the expand view read from the records the
+// browser already holds — and a refresh starts empty.
+let rqQuery = "";
+const RQ_MAX = 200; // most recent records kept; older rows (and their recs) evict
+const recs = new Map(); // seq → record, for patching by attach frames
+function statusColor(s){
+  if(s<300) return "var(--ok)";
+  if(s<400) return "var(--info)";
+  if(s<500) return "var(--blocked)";
+  return "var(--error)";
+}
+// Drop the query string for display: "…/ads.js?id=1&x" → "…/ads.js"
+function stripQuery(u){ const i = u.indexOf("?"); return i<0 ? u : u.slice(0,i); }
+
+// Render the full network-tab detail when a row is expanded: general info,
+// then request and response (headers + body) side by side. Pure client render
+// — no round-trip; the record lives in `recs` and attach frames patch it (an
+// open detail re-renders when a late artifact lands).
+function renderDetail(d, cell){
+  const st0 = d.kind==="failed" ? "failed (dropped)" : d.blocked_by ? "blocked (dropped)" : "—";
+  const gen = [["URL", d.url], ["Method", d.method],
+    ["Status", d.status || st0],
+    ["Type", d.type], ["Time", fmtTime(d.ts_ms)]];
+  if(d.blocked_by) gen.push([d.kind==="tunnel" ? "Tunnel" : d.kind==="failed" ? "Error" : "Blocked by", d.blocked_by]);
+  if(d.scriptlets) gen.push(["Scriptlets", d.scriptlets]);
+  if(d.ech) gen.push(["SNI", "hidden — Encrypted Client Hello (ECH config from DNS)"]);
+
+  cell.innerHTML =
+    `<div class="gen"></div>`+
+    `<div class="cols">`+
+      `<div><div class="lbl">Request headers</div><pre class="qh"></pre>`+
+           `<div class="lbl">Request body</div><pre class="qb"></pre></div>`+
+      `<div><div class="lbl">Response headers</div><pre class="sh"></pre>`+
+           `<div class="lbl">Response body</div><pre class="sb"></pre></div>`+
+    `</div>`;
+  const g = cell.querySelector(".gen");
+  for(const [l,v] of gen){
+    const gl = document.createElement("span"); gl.className = "gl"; gl.textContent = l;
+    const gv = document.createElement("span"); gv.className = "gv"; gv.textContent = v;
+    if(l === "Status" && d.status) gv.style.color = statusColor(d.status);
+    if(l === "Blocked by") gv.style.color = "var(--blocked)";
+    if(l === "Error") gv.style.color = "var(--error)";
+    // Tint the "excluded:" tag prefix with the block theme color, matching how
+    // blocked_by is highlighted; the domain stays in the default value color.
+    if(l === "Tunnel" && v.startsWith("excluded:")){
+      gv.textContent = "";
+      const pre = document.createElement("span");
+      pre.textContent = "excluded:"; pre.style.color = "var(--blocked)";
+      gv.append(pre, document.createTextNode(v.slice(9)));
+    }
+    g.append(gl, gv);
+  }
+  const none = d.kind==="failed" ? "(no response — upstream failed)"
+    : d.blocked_by ? "(request dropped — never sent upstream)" : "(none)";
+  cell.querySelector(".qh").textContent = d.req_headers || "(none)";
+  cell.querySelector(".qb").textContent = d.req_body || "(empty)";
+  cell.querySelector(".sh").textContent = d.resp_headers || none;
+  cell.querySelector(".sb").textContent = d.resp_body || (d.blocked_by ? none : "(empty)");
+}
+
+// While a request is being inspected (a row is expanded) or the list is
+// scrolled away from the top, new rows are buffered instead of inserted, so
+// nothing shifts under the cursor. The "N new" chip flushes them on demand.
+let rqPending = [], rqOpen = 0;
+function rqPaused(){ return rqOpen > 0 || $("rq-log").scrollTop > 4; }
+function updateNewChip(){
+  const c = $("rq-new");
+  c.style.display = rqPending.length ? "" : "none";
+  c.className = "chip new";
+  c.textContent = rqPending.length + " new ↑";
+}
+
+function buildRow(rec){
+  // The typed `kind` says what a status-0 record is: an opened tunnel, an
+  // upstream failure, or a block.
+  const isTunnel = rec.kind === "tunnel";
+  const isFailed = rec.kind === "failed";
+  let st, col, tint;
+  if(rec.status!==0){
+    st = rec.status; col = statusColor(rec.status);
+    tint = rec.status<300 ? "st-ok" : rec.status<400 ? "st-info"
+         : rec.status<500 ? "st-warn" : "st-err";
+  }
+  else if(isTunnel){ st = "OPEN"; col = "var(--muted)"; tint = ""; }
+  else if(isFailed){ st = "ERR"; col = "var(--error)"; tint = "st-err"; }
+  else { st = "BLK"; col = "var(--error)"; tint = "st-err"; }
+
+  const main = document.createElement("tr");
+  main.className = "rq " + tint;
+  main.innerHTML =
+    `<td class="ts">${fmtTime(rec.ts_ms)}</td>`+
+    `<td class="xn" style="color:var(--muted)">${esc(rec.method)}</td>`+
+    `<td class="xn" style="color:${col}">${st}</td>`+
+    `<td class="hint">${esc(rec.type)}</td>`+
+    `<td class="msg"><span class="u"></span></td>`+
+    `<td class="act"></td>`;
+  main.querySelector(".u").textContent = stripQuery(rec.url);
+  // ECH: this request's TLS connection hid its SNI using an ECH config the
+  // proxy learned from the target's HTTPS DNS record.
+  if(rec.ech){
+    const tag = document.createElement("span");
+    tag.className = "ech-tag";
+    tag.textContent = "[ECH]";
+    tag.title = "SNI hidden — Encrypted Client Hello negotiated using the ECH config from DNS";
+    main.querySelector(".msg").appendChild(tag);
+  }
+  // One-click block/unblock: appends `||host^` (or `@@||host^`) to the
+  // custom list, which rebuilds the engine immediately.
+  let host = "";
+  try { host = new URL(rec.url).hostname; } catch(e){}
+  if(host){
+    const blocked = rec.kind === "blocked";
+    const btn = document.createElement("button");
+    btn.className = "ghost mini";
+    btn.textContent = blocked ? "unblock" : "block";
+    btn.title = (blocked ? "@@||" : "||") + host + "^ → custom list";
+    btn.addEventListener("click", async e=>{
+      e.stopPropagation();
+      const rule = (blocked ? "@@||" : "||") + host + "^";
+      btn.disabled = true; btn.textContent = "…";
+      try {
+        const r = await fetch("/api/blocklists", {method:"POST",
+          headers:{"content-type":"application/json"},
+          body: JSON.stringify({name:"custom", rules: rule})});
+        if(!r.ok) throw new Error((await r.json()).error || r.status);
+        btn.textContent = "✓ " + (blocked ? "unblocked" : "blocked");
+        loadCustom();
+      } catch(err){ btn.textContent = "failed"; btn.title = err.message; btn.disabled = false; }
+    });
+    main.querySelector(".act").appendChild(btn);
+  }
+  if(rec.blocked_by){
+    // "rule — list" from the API; mechanism-only blocks have no list part.
+    // Excluded tunnels come as "excluded: <domain>", upstream failures as
+    // "upstream host: cause" — render all with the same pill+chip pair,
+    // "excluded"/"error" taking the list slot.
+    let rule, list;
+    const exc = rec.blocked_by.match(/^excluded:\s*(.*)$/);
+    if(isFailed){ list = "error"; rule = rec.blocked_by; }
+    else if(exc){ list = "excluded"; rule = exc[1]; }
+    else {
+      const sep = rec.blocked_by.lastIndexOf(" — ");
+      rule = sep < 0 ? rec.blocked_by : rec.blocked_by.slice(0, sep);
+      list = sep < 0 ? "" : rec.blocked_by.slice(sep + 3);
+      if(list === "custom") list = "custom filters";
+    }
+    // Rules can be huge (multi-domain options, regex): first line, capped.
+    // The expanded row shows the full rule.
+    rule = rule.split("\n")[0];
+    if(rule.length > 90) rule = rule.slice(0, 90) + "…";
+    const bb = document.createElement("div");
+    bb.className = "bb";
+    bb.innerHTML = (list ? `<span class="bb-list"></span>` : ``)+
+      `<span class="bb-rule"></span>`;
+    if(list) bb.querySelector(".bb-list").textContent = list + ":";
+    bb.querySelector(".bb-rule").textContent = rule;
+    main.querySelector(".msg").appendChild(bb);
+  }
+  if(rec.scriptlets) scriptletBadge(rec, main);
+
+  const detail = document.createElement("tr");
+  detail.className = "rq-detail"; detail.style.display = "none";
+  detail.innerHTML = `<td colspan="6"></td>`;
+
+  // Text this row matches search against (client-side; the server doesn't
+  // keep the records).
+  main._hay = computeHay(rec);
+  main._detail = detail;
+  main._seq = rec.seq;
+  rec._main = main; rec._detail = detail; rec._rendered = false;
+  if(rqQuery && !main._hay.includes(rqQuery)){ main.style.display = "none"; }
+
+  main.addEventListener("click", ()=>{
+    const open = detail.style.display === "none";
+    detail.style.display = open ? "" : "none";
+    rqOpen += open ? 1 : -1;
+    if(open && !rec._rendered){ rec._rendered = true; renderDetail(rec, detail.firstChild); }
+    if(!rqPaused()) flushRequests();
+  });
+  return [main, detail];
+}
+
+function computeHay(rec){
+  const st0 = rec.kind==="tunnel" ? "open" : rec.kind==="failed" ? "err error failed" : "blk blocked";
+  return [rec.method, rec.status===0 ? st0 : rec.status,
+    rec.type, rec.url, rec.blocked_by, rec.scriptlets, rec.ech ? "ech" : ""].join(" ").toLowerCase();
+}
+
+// Collapsed row shows just the first scriptlet + a count; the expanded view's
+// General grid lists them all. Called from buildRow, or from an attach frame
+// when the annotation lands after the row was built.
+function scriptletBadge(rec, main){
+  const names = rec.scriptlets.split(", ").filter(Boolean);
+  const sj = document.createElement("div");
+  sj.className = "sj";
+  sj.innerHTML = `<span>scriptlets</span><span class="sj-name"></span>`+
+    (names.length > 1 ? `<span class="hint"></span>` : ``);
+  sj.querySelector(".sj-name").textContent = names[0];
+  if(names.length > 1)
+    sj.querySelector(".hint").textContent = `+${names.length-1} more`;
+  main.querySelector(".msg").appendChild(sj);
+}
+
+// An "attach" frame: a captured artifact for a record we may already show.
+// Patch the record, then refresh whatever is rendered from it — the search
+// text, the scriptlet badge, and an already-open detail view.
+function applyAttach(seq, slot, text){
+  const rec = recs.get(seq);
+  if(!rec) return; // row evicted, or record predates this page
+  rec[slot] = text;
+  const main = rec._main;
+  if(!main) return; // still queued in rqPending; it renders with the patch
+  if(slot === "scriptlets" && !main.querySelector(".sj")) scriptletBadge(rec, main);
+  main._hay = computeHay(rec);
+  if(rqQuery) main.style.display = main._hay.includes(rqQuery) ? "" : "none";
+  if(rec._rendered) renderDetail(rec, rec._detail.firstChild);
+}
+
+// Show/hide already-rendered rows to match the search box — no server call.
+function applyFilter(){
+  const q = rqQuery;
+  for(const main of $("requests").querySelectorAll("tr.rq")){
+    const hit = !q || main._hay.includes(q);
+    main.style.display = hit ? "" : "none";
+    if(!hit && main._detail){ main._detail.style.display = "none"; }
+  }
+  $("rq-empty").style.display =
+    $("requests").querySelector("tr.rq:not([style*='display: none'])") ? "none" : "";
+}
+
+function flushRequests(){
+  const tb = $("requests");
+  for(const rec of rqPending){
+    const [main, detail] = buildRow(rec);
+    tb.insertBefore(detail, tb.firstChild);
+    tb.insertBefore(main, tb.firstChild);
+  }
+  rqPending = [];
+  // Two <tr> per record (main + detail), so RQ_MAX records = 2×RQ_MAX rows.
+  while(tb.children.length > RQ_MAX * 2){
+    const el = tb.lastChild;
+    if(el._seq !== undefined) recs.delete(el._seq); // evicted with its row
+    tb.removeChild(el);
+  }
+  $("rq-empty").style.display = tb.querySelector("tr.rq") ? "none" : "";
+  updateNewChip();
+}
+
+function resetRequests(){
+  rqPending = []; rqOpen = 0; recs.clear(); updateNewChip();
+  $("requests").innerHTML = ""; $("rq-empty").style.display = "";
+}
+$("rq-new").addEventListener("click", ()=>{
+  flushRequests(); $("rq-log").scrollTop = 0;
+});
+$("rq-log").addEventListener("scroll", ()=>{
+  if(!rqPaused() && rqPending.length) flushRequests();
+});
+$("rq-search").addEventListener("input", e=>{
+  $("rq-sx").style.display = e.target.value ? "" : "none";
+  rqQuery = e.target.value.trim().toLowerCase();
+  applyFilter();
+});
+$("rq-sx").addEventListener("click", ()=>{
+  $("rq-search").value = ""; $("rq-sx").style.display = "none";
+  rqQuery = ""; applyFilter();
+});
+$("rq-wipe").addEventListener("click", ()=>{
+  if(!confirm("Clear the request log?")) return;
+  // The page owns the log — the server keeps nothing to clear.
+  resetRequests();
+});
+
+// ---- DNS tab: resolver status + live query log -----------------------------
+// Same page-owned model as the request log: dns frames stream over SSE while
+// this page is connected; nothing is stored server-side. Rows buffer while
+// the log is scrolled away from the top ("N new" chip flushes them).
+const DQ_MAX = 200;
+let dqQuery = "", dqPending = [];
+function dqPaused(){ return $("dq-log").scrollTop > 4; }
+// Row visibility = search text. AAAA rows only stream at all when the
+// "Log IPv6 (AAAA) queries" setting (DNS settings tab) is on.
+function dqShow(tr){
+  return !dqQuery || tr._hay.includes(dqQuery);
+}
+function dqRefilter(){
+  for(const tr of $("dnslog").children) tr.style.display = dqShow(tr) ? "" : "none";
+}
+function dqChip(){
+  const c = $("dq-new");
+  c.style.display = dqPending.length ? "" : "none";
+  c.className = "chip new";
+  c.textContent = dqPending.length + " new ↑";
+}
+function dqHay(d){
+  return [d.domain, d.qtype, d.outcome, d.rcode, d.answers, d.upstream, d.blocked_by,
+          d.ech ? "ech" : "", d.proxy ? "proxy" : ""].join(" ").toLowerCase();
+}
+
+// One-click block/unblock into the custom list — same call the Requests tab
+// makes, so DNS and HTTP filtering stay one rule set.
+function ruleButton(domain, isBlocked){
+  const btn = document.createElement("button");
+  btn.className = "ghost mini";
+  btn.textContent = isBlocked ? "unblock" : "block";
+  btn.title = (isBlocked ? "@@||" : "||") + domain + "^ → custom list";
+  btn.addEventListener("click", async e=>{
+    e.stopPropagation();
+    btn.disabled = true; btn.textContent = "…";
+    try {
+      const r = await fetch("/api/blocklists", {method:"POST",
+        headers:{"content-type":"application/json"},
+        body: JSON.stringify({name:"custom", rules:(isBlocked?"@@||":"||")+domain+"^"})});
+      if(!r.ok) throw new Error((await r.json()).error || r.status);
+      btn.textContent = "✓ " + (isBlocked ? "unblocked" : "blocked");
+      loadCustom();
+    } catch(err){ btn.textContent = "failed"; btn.title = err.message; btn.disabled = false; }
+  });
+  return btn;
+}
+
+function dqRow(d){
+  const pill = d.outcome==="blocked" ? "blocked" : d.outcome==="error" ? "error"
+             : (d.outcome==="cached" || d.outcome==="rewritten") ? "info" : "ok";
+  const tint = d.outcome==="blocked" ? "st-warn" : d.outcome==="error" ? "st-err" : "";
+  const tr = document.createElement("tr");
+  tr.className = "rq " + tint; // reuse row styling; DNS rows don't expand
+  tr.style.cursor = "default";
+  tr.innerHTML =
+    `<td class="ts">${fmtTime(d.ts_ms)}</td>`+
+    `<td><span class="k ${pill}">${esc(d.outcome)}</span></td>`+
+    `<td class="msg ans hint"></td>`+
+    `<td class="hint">${esc(d.qtype)}</td>`+
+    `<td class="msg domcell"><span class="dom"></span></td>`+
+    `<td class="hint ups"></td>`+
+    `<td class="ts">${d.elapsed_ms}</td>`+
+    `<td class="act"></td>`;
+  tr.querySelector(".dom").textContent = d.domain;
+  if(d.proxy){
+    // The proxy's own lookup (egress resolution / ECH config), not a client's.
+    const src = document.createElement("span");
+    src.className = "k info src";
+    src.textContent = "proxy";
+    src.title = "the proxy's own lookup (egress resolution / ECH config), not a client query";
+    tr.querySelector(".domcell").appendChild(src);
+  }
+  // Answer column: the RR summary; errors show their cause, blocks their rule.
+  tr.querySelector(".ans").textContent =
+    d.outcome==="error" ? d.rcode : (d.answers || d.rcode);
+  tr.querySelector(".ups").textContent = d.upstream || (d.outcome==="cached" ? "cache" : "");
+  if(d.ech){
+    // The answer delivered an ECH config — tag the source (upstream or cache).
+    const ech = document.createElement("span");
+    ech.className = "k ok ech";
+    ech.textContent = "ECH";
+    tr.querySelector(".ups").appendChild(ech);
+  }
+  if(d.blocked_by){
+    // Same pill+chip rendering as the Requests tab: "rule — list" splits
+    // into a source-list pill and a monospace rule chip.
+    const sep = d.blocked_by.lastIndexOf(" — ");
+    let rule = sep < 0 ? d.blocked_by : d.blocked_by.slice(0, sep);
+    let list = sep < 0 ? "" : d.blocked_by.slice(sep + 3);
+    if(list === "custom") list = "custom filters";
+    rule = rule.split("\n")[0];
+    if(rule.length > 90) rule = rule.slice(0, 90) + "…";
+    const bb = document.createElement("div");
+    bb.className = "bb";
+    bb.innerHTML = (list ? `<span class="bb-list"></span>` : ``)+
+      `<span class="bb-rule"></span>`;
+    if(list) bb.querySelector(".bb-list").textContent = list + ":";
+    bb.querySelector(".bb-rule").textContent = rule;
+    tr.querySelector(".domcell").appendChild(bb);
+  }
+  if(d.domain) tr.querySelector(".act").appendChild(ruleButton(d.domain, d.outcome==="blocked"));
+  tr._hay = dqHay(d);
+  if(!dqShow(tr)) tr.style.display = "none";
+  return tr;
+}
+
+function dqFlush(){
+  const tb = $("dnslog");
+  for(const d of dqPending) tb.insertBefore(dqRow(d), tb.firstChild);
+  dqPending = [];
+  while(tb.children.length > DQ_MAX) tb.removeChild(tb.lastChild);
+  $("dq-empty").style.display = tb.children.length ? "none" : "";
+  dqChip();
+}
+
+$("dq-new").addEventListener("click", ()=>{ dqFlush(); $("dq-log").scrollTop = 0; });
+$("dq-log").addEventListener("scroll", ()=>{ if(!dqPaused() && dqPending.length) dqFlush(); });
+$("dq-search").addEventListener("input", e=>{
+  $("dq-sx").style.display = e.target.value ? "" : "none";
+  dqQuery = e.target.value.trim().toLowerCase();
+  dqRefilter();
+});
+$("dq-sx").addEventListener("click", ()=>{
+  $("dq-search").value = ""; $("dq-sx").style.display = "none"; dqQuery = "";
+  dqRefilter();
+});
+$("dq-wipe").addEventListener("click", ()=>{
+  if(!confirm("Clear the DNS query log?")) return;
+  dqPending = []; $("dnslog").innerHTML = ""; $("dq-empty").style.display = ""; dqChip();
+});
+
+async function refreshDns(){
+  try {
+    const r = await fetch("/api/dns"); const d = await r.json();
+    if(!d.enabled){
+      $("dns-conf").textContent = "DNS resolver disabled (set dns.enabled = true).";
+      return;
+    }
+    const total = d.cache.hits + d.cache.misses;
+    const rate = total ? ` · hit rate ${(100*d.cache.hits/total).toFixed(0)}%` : "";
+    $("dns-conf").textContent =
+      `listening on ${d.listen} (UDP + TCP) · upstreams (${d.upstream_mode}): ${d.upstreams.join(", ")}`+
+      ` · blocking: ${d.blocking_mode}`+
+      ` · ECH: ${d.strip_ech ? "stripped from answers" : "passed through"}`+
+      ` · cache ${d.cache.entries}/${d.cache.capacity}${rate}`;
+    const stats = (d.upstream_stats || []).filter(s=>s.queries > 0);
+    $("up-stats").innerHTML = stats.map(()=>
+      `<tr><td class="msg us-spec"></td><td class="us-q"></td>`+
+      `<td class="us-f"></td><td class="us-rtt"></td><td class="us-ech"></td></tr>`
+    ).join("") || `<tr><td colspan="5" class="hint">no lookups yet</td></tr>`;
+    const trs = $("up-stats").querySelectorAll("tr");
+    const echBadge = {
+      supported:   ['k ok',    'ECH',   'returns ECH configs in HTTPS answers'],
+      unsupported: ['k error', 'no ECH','strips or omits ECH configs from HTTPS answers'],
+    };
+    stats.forEach((s, i)=>{
+      trs[i].querySelector(".us-spec").textContent = s.spec;
+      trs[i].querySelector(".us-q").textContent = s.queries;
+      trs[i].querySelector(".us-f").textContent = s.failures;
+      trs[i].querySelector(".us-rtt").textContent =
+        s.avg_rtt_ms == null ? "—" : s.avg_rtt_ms + " ms";
+      const cell = trs[i].querySelector(".us-ech");
+      const b = echBadge[s.ech];
+      if(b){ cell.innerHTML = `<span class="${b[0]}" title="${b[2]}">${b[1]}</span>`; }
+      else { cell.textContent = "—"; cell.title = "not yet probed"; }
+    });
+  } catch(e){}
+}
+
+$("dns-flush").addEventListener("click", async ()=>{
+  const b = $("dns-flush");
+  b.disabled = true;
+  try {
+    const r = await fetch("/api/dns/flush", {method:"POST"});
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.error || r.status);
+    b.textContent = `flushed ${d.cleared} entries`;
+    refreshDns();
+  } catch(e){ b.textContent = "failed: " + e.message; }
+  setTimeout(()=>{ b.disabled = false; b.textContent = "Flush cache"; }, 3000);
+});
+
+// ---- DNS settings tab: rewrites, upstreams, cache --------------------------
+async function refreshRewrites(){
+  try {
+    const r = await fetch("/api/dns/rewrites"); const d = await r.json();
+    if(d.error) return;
+    const rows = d.rewrites || [];
+    $("rewrites").innerHTML = rows.map(x=>{
+      return `<tr><td class="msg rw-d"></td><td class="msg rw-a"></td>`+
+        `<td><button class="ghost mini rw-del">del</button></td></tr>`;
+    }).join("") || `<tr><td colspan="3" class="hint">no rewrites defined</td></tr>`;
+    const trs = $("rewrites").querySelectorAll("tr");
+    rows.forEach((x, i)=>{
+      trs[i].querySelector(".rw-d").textContent = x.domain;
+      trs[i].querySelector(".rw-a").textContent = x.answer;
+      trs[i].querySelector(".rw-del").addEventListener("click", ()=>
+        postRewrite({domain:x.domain, answer:x.answer, delete:true},
+          "removing " + x.domain + "…"));
+    });
+    $("rw-count").textContent = rows.length ? `(${rows.length})` : "";
+    $("rw-badge").textContent = rows.length;
+    $("rw-badge").style.display = rows.length ? "" : "none";
+  } catch(e){}
+}
+
+async function postRewrite(body, busyMsg){
+  $("rw-status").textContent = busyMsg;
+  $("rw-add").disabled = true;
+  try {
+    const r = await fetch("/api/dns/rewrites",{method:"POST",
+      headers:{"content-type":"application/json"}, body:JSON.stringify(body)});
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.error || r.status);
+    $("rw-status").textContent = "done ✓ (takes effect on the next query)";
+    $("rw-domain").value = ""; $("rw-answer").value = "";
+    refreshRewrites();
+  } catch(e){ $("rw-status").textContent = "failed: " + e.message; }
+  $("rw-add").disabled = false;
+}
+$("rw-add").addEventListener("click", ()=>{
+  const domain = $("rw-domain").value.trim(), answer = $("rw-answer").value.trim();
+  if(domain && answer) postRewrite({domain, answer}, "adding " + domain + "…");
+});
+$("rw-answer").addEventListener("keydown", e=>{ if(e.key==="Enter") $("rw-add").click(); });
+
+// Fill the settings form from /api/dns. Called on load and after a save/reset
+// — never on the periodic refresh, so it can't clobber an edit in progress.
+async function loadDnsCfg(){
+  try {
+    const r = await fetch("/api/dns"); const d = await r.json();
+    if(!d.enabled){
+      for(const id of ["rw-add","up-save","ca-save","ech-save","lv6-save","dnscfg-reset"]) $(id).disabled = true;
+      $("up-status").textContent = "DNS resolver disabled (set dns.enabled = true)";
+      return;
+    }
+    $("up-list").value = (d.upstreams || []).join("\n");
+    $("up-mode").value = d.upstream_mode || "failover";
+    $("up-bootstrap").value = (d.bootstrap || []).join(", ");
+    $("ca-size").value = d.cache.capacity;
+    $("ca-min").value = d.cache.min_ttl_secs;
+    $("ca-max").value = d.cache.max_ttl_secs;
+    $("ech-domain").value = d.ech_probe_domain || "";
+    $("lv6-log").checked = !!d.log_ipv6;
+  } catch(e){}
+}
+
+async function postDnsConfig(body, statusEl, busyMsg){
+  const el = $(statusEl);
+  el.textContent = busyMsg;
+  try {
+    const r = await fetch("/api/dns/config",{method:"POST",
+      headers:{"content-type":"application/json"}, body:JSON.stringify(body)});
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.error || r.status);
+    el.textContent = "saved ✓ (applied live, persisted)";
+    loadDnsCfg(); refreshDns();
+  } catch(e){ el.textContent = "failed: " + e.message; }
+}
+$("up-save").addEventListener("click", ()=>{
+  const upstreams = $("up-list").value.split("\n").map(s=>s.trim()).filter(Boolean);
+  const bootstrap = $("up-bootstrap").value.split(",").map(s=>s.trim()).filter(Boolean);
+  if(!upstreams.length){ $("up-status").textContent = "at least one upstream is required"; return; }
+  postDnsConfig({upstreams, upstream_mode: $("up-mode").value, bootstrap},
+    "up-status", "validating + applying…");
+});
+$("ca-save").addEventListener("click", ()=>{
+  postDnsConfig({
+    cache_size: Math.max(0, parseInt($("ca-size").value) || 0),
+    min_ttl_secs: Math.max(0, parseInt($("ca-min").value) || 0),
+    max_ttl_secs: Math.max(1, parseInt($("ca-max").value) || 1),
+  }, "ca-status", "applying…");
+});
+$("ech-save").addEventListener("click", ()=>{
+  // Empty is valid — it disables ECH probing — so send it verbatim (trimmed).
+  postDnsConfig({ech_probe_domain: $("ech-domain").value.trim()}, "ech-status", "applying…");
+});
+$("lv6-save").addEventListener("click", ()=>{
+  postDnsConfig({log_ipv6: $("lv6-log").checked}, "lv6-status", "applying…");
+});
+$("dnscfg-reset").addEventListener("click", ()=>{
+  if(!confirm("Drop every saved DNS override (upstreams, mode, bootstrap, cache, ECH probe domain, query-log IPv6) and return to config.toml?")) return;
+  postDnsConfig({reset:true}, "ca-status", "resetting…");
+});
+
+async function runDnsTest(){
+  const domain = $("dt-domain").value.trim();
+  if(!domain) return;
+  $("dt-result").textContent = "checking…";
+  try {
+    const r = await fetch("/api/dns/test", {method:"POST",
+      headers:{"content-type":"application/json"}, body:JSON.stringify({domain})});
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.error || r.status);
+    $("dt-result").innerHTML = d.blocked
+      ? `<span class="k blocked">BLOCKED</span> <code></code>`
+      : `<span class="k ok">ALLOWED</span>`;
+    if(d.blocked){
+      const c = $("dt-result").querySelector("code");
+      c.textContent = d.filter + (d.list ? ` — ${d.list}` : "");
+    }
+  } catch(e){ $("dt-result").textContent = "failed: " + e.message; }
+}
+$("dt-run").addEventListener("click", runDnsTest);
+$("dt-domain").addEventListener("keydown", e=>{ if(e.key==="Enter") runDnsTest(); });
+
+// ---- Setup tab: statistics retention + log rotation ------------------------
+// Filled on load and after a save — never on the periodic refresh, so it
+// can't clobber an edit in progress.
+async function loadStatsCfg(){
+  try {
+    const r = await fetch("/api/stats"); const d = await r.json();
+    const s = d.settings || {};
+    if(s.retention_hours) $("st-retention").value = String(s.retention_hours);
+    if(s.log_rotate_hours) $("st-rotate").value = String(s.log_rotate_hours);
+  } catch(e){}
+}
+$("st-save").addEventListener("click", async ()=>{
+  const el = $("st-status");
+  el.textContent = "applying…";
+  try {
+    const r = await fetch("/api/stats/config",{method:"POST",
+      headers:{"content-type":"application/json"},
+      body:JSON.stringify({
+        retention_hours: parseInt($("st-retention").value),
+        log_rotate_hours: parseInt($("st-rotate").value),
+      })});
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.error || r.status);
+    el.textContent = "saved ✓ (applied live, persisted)";
+    loadStatsCfg();
+  } catch(e){ el.textContent = "failed: " + e.message; }
+});
+
+let slLibrary = [];
+function renderScriptletLibrary(){
+  const q = $("sl-filter").value.trim().toLowerCase();
+  const rows = slLibrary.filter(s => !q || s.name.toLowerCase().includes(q)
+    || (s.aliases||[]).some(a=>a.toLowerCase().includes(q)));
+  $("sl-library").innerHTML = rows.map(s=>{
+    const kind = s.injectable ? "scriptlet" : "dep";
+    return `<tr class="sl-row" data-name="${esc(s.name)}" style="cursor:pointer">`+
+      `<td>${esc(s.name)}</td>`+
+      `<td class="msg">${esc((s.aliases||[]).join(", "))}</td>`+
+      `<td><span class="chip">${kind}</span></td>`+
+      `<td>${s.bytes.toLocaleString()}</td></tr>`;
+  }).join("") || `<tr><td colspan="4" class="hint">no scriptlets match</td></tr>`;
+}
+// Click a row → toggle an inline row showing the scriptlet's JS source.
+$("sl-library").addEventListener("click", async e=>{
+  const row = e.target.closest("tr.sl-row");
+  if(!row) return;
+  const open = row.nextElementSibling;
+  if(open && open.classList.contains("sl-src")){ open.remove(); return; }
+  document.querySelectorAll("#sl-library tr.sl-src").forEach(x=>x.remove());
+  const tr = document.createElement("tr");
+  tr.className = "sl-src";
+  tr.innerHTML = `<td colspan="4"><pre class="hint" style="white-space:pre-wrap;max-height:340px;
+    overflow:auto;margin:4px 0;background:var(--panel2);padding:10px;border-radius:8px">loading…</pre></td>`;
+  row.after(tr);
+  try {
+    const r = await fetch(`/api/scriptlet?name=${encodeURIComponent(row.dataset.name)}`);
+    const d = await r.json();
+    tr.querySelector("pre").textContent = d.source || d.error || "(empty)";
+  } catch(err){ tr.querySelector("pre").textContent = "failed: "+err.message; }
+});
+async function refreshScriptlets(){
+  try {
+    const r = await fetch("/api/scriptlets"); const d = await r.json();
+    $("sl-summary").textContent = d.enabled
+      ? `— ${d.injectable.toLocaleString()} scriptlets + ${(d.loaded-d.injectable).toLocaleString()} deps loaded`
+      : "— disabled (set adblock.inject_scriptlets = true)";
+    $("sl-note").textContent = d.enabled
+      ? "Resolves uBO ##+js(…) rules and injects them as a <script> into HTML pages."
+      : "";
+    $("sl-badge").textContent = d.injectable;
+    const src = $("sl-source");
+    src.textContent = d.source_url || ""; src.href = d.source_url || "#";
+    $("sl-updated").textContent = d.updated_ms
+      ? ` — updated ${new Date(d.updated_ms).toLocaleString()} (auto-updates with blocklists)` : "";
+    slLibrary = d.library || [];
+    renderScriptletLibrary();
+  } catch(e){}
+}
+$("sl-filter").addEventListener("input", renderScriptletLibrary);
+$("sl-update").addEventListener("click", async ()=>{
+  const b = $("sl-update");
+  b.disabled = true; b.textContent = "updating… (downloads uBO, ~30 s)";
+  try {
+    const r = await fetch("/api/scriptlets/update", {method:"POST"});
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.error || r.status);
+    b.textContent = `updated — ${d.loaded} resources`;
+    refreshScriptlets();
+  } catch(e){ b.textContent = "failed: "+e.message; }
+  setTimeout(()=>{ b.disabled = false; b.textContent = "Update from uBO"; }, 4000);
+});
+
+// ---- live stream ----------------------------------------------------------
+// One SSE connection replaces the old 2 s polls. The server pushes stats /
+// request / attach / event frames only while this page is connected; nothing
+// is buffered for us while we're away. EventSource reconnects on its own, and
+// each reconnect simply resumes from "now" — existing rows stay put.
+const es = new EventSource("/api/stream");
+es.addEventListener("stats", e => renderStats(JSON.parse(e.data)));
+es.addEventListener("event", e => handleEvent(JSON.parse(e.data)));
+es.addEventListener("request", e => {
+  const rec = JSON.parse(e.data);
+  recs.set(rec.seq, rec);
+  rqPending.push(rec);
+  // The pending buffer honors the same cap, so a row left expanded for hours
+  // doesn't grow it unbounded — oldest pending records fall off first.
+  if(rqPending.length > RQ_MAX){
+    for(const d of rqPending.splice(0, rqPending.length - RQ_MAX)) recs.delete(d.seq);
+  }
+  if(rqPaused()) updateNewChip(); else flushRequests();
+});
+es.addEventListener("attach", e => {
+  const a = JSON.parse(e.data);
+  applyAttach(a.seq, a.slot, a.text);
+});
+es.addEventListener("dns", e => {
+  dqPending.push(JSON.parse(e.data));
+  if(dqPending.length > DQ_MAX) dqPending.splice(0, dqPending.length - DQ_MAX);
+  if(dqPaused()) dqChip(); else dqFlush();
+});
+es.onerror = () => {
+  $("hdr-meta").textContent = "proxy unreachable";
+  $("alive").style.color = "var(--error)";
+};
+
+refreshBlocklists(); refreshExclusions(); loadCustom(); refreshScriptlets(); refreshDns();
+refreshRewrites(); loadDnsCfg(); refreshServer(); loadErrors(); loadStatsCfg();
+</script>
+</body>
+</html>

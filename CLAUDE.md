@@ -1,0 +1,1 @@
+- When reporting back to me from now on explain things in plain, simple language. Use short sentences and everyday words. Avoid unnecessary detail, buzzwords, overly formal language, metaphors, analogies, and figures of speech. Be direct, clear, and literal.

@@ -1,0 +1,16 @@
+# Keep the build context (and image) small — target/ alone is multi-GB and is
+# rebuilt inside the image anyway.
+target/
+.git/
+.gitignore
+
+# Local CA material / CA state must never be baked into an image. The MITM
+# signer is bind-mounted (step-ca intermediate) or self-generated at runtime.
+ca-cert.pem
+ca-key.pem
+ca-cert.srl
+step-ca-data/
+
+# Orchestration and docs aren't needed to compile.
+docker-compose*.yml
+*.md

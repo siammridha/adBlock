@@ -1,0 +1,35 @@
+// For format details, see https://aka.ms/devcontainer.json. For config options, see the
+// README at: https://github.com/devcontainers/templates/tree/main/src/rust
+{
+	"name": "Rust",
+	// Dedicated image: rust + node + Claude Code + rust-analyzer + the
+	// rust-analyzer-lsp plugin are baked in by the Dockerfile.
+	"build": {
+		"dockerfile": "Dockerfile"
+	},
+	"workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+	"remoteUser": "vscode",
+	// Volumes survive rebuilds: cargo cache, and all Claude state (login,
+	// sessions, history, plugins — the Dockerfile sets CLAUDE_CONFIG_DIR so
+	// everything, including what would otherwise be ~/.claude.json, lives in
+	// /home/vscode/.claude).
+	"mounts": [
+		{
+			"source": "devcontainer-cargo-cache-${devcontainerId}",
+			"target": "/usr/local/cargo",
+			"type": "volume"
+		},
+		{
+			"source": "devcontainer-claude-config-${devcontainerId}",
+			"target": "/home/vscode/.claude",
+			"type": "volume"
+		}
+	],
+
+	// DNS needs UDP, which VS Code's forwardPorts can't do (TCP only), so
+	// publish port 53 straight through docker -p, bound to the Mac's loopback.
+	"appPort": [
+		"127.0.0.1:53:53/udp",
+		"127.0.0.1:53:53/tcp"
+	]
+}
