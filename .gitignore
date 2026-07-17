@@ -6,3 +6,4 @@ ca-key.pem
 lists/
 models/
 .DS_Store
+.claude/
