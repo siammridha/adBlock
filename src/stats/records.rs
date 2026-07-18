@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use super::Event;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RequestKind {
     #[default]
@@ -14,7 +14,13 @@ pub enum RequestKind {
     Failed,
 }
 
-#[derive(Clone, Debug, Default, serde::Serialize)]
+// The captured artifacts (headers/bodies/scriptlets) are heavy and only fetched
+// on demand, so they are stripped from the persisted list line via
+// `skip_serializing_if` and live instead in the detail sidecar
+// (`RequestDetail`). `#[serde(default)]` lets old log lines — and the lean list
+// lines that omit the captures — deserialize cleanly.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct RequestRecord {
     pub seq: u64,
     pub ts_ms: u64,
@@ -24,13 +30,60 @@ pub struct RequestRecord {
     #[serde(rename = "type")]
     pub req_type: String,
     pub url: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub req_body: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub resp_body: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub req_headers: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub resp_headers: String,
     pub blocked_by: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub scriptlets: String,
     pub ech: bool,
+}
+
+/// The heavy, fetched-on-demand half of a request record: the captured headers,
+/// bodies, and scriptlet names. Written to the detail sidecar when the exchange
+/// finishes and returned by the `/api/request` detail endpoint.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct RequestDetail {
+    pub seq: u64,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub req_headers: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub resp_headers: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub req_body: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub resp_body: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub scriptlets: String,
+}
+
+impl RequestDetail {
+    /// Pull the captured slots off a finished record. Returns `None` when
+    /// nothing was captured, so empty details never touch the sidecar.
+    pub(super) fn from_record(r: &RequestRecord) -> Option<Self> {
+        if r.req_headers.is_empty()
+            && r.resp_headers.is_empty()
+            && r.req_body.is_empty()
+            && r.resp_body.is_empty()
+            && r.scriptlets.is_empty()
+        {
+            return None;
+        }
+        Some(Self {
+            seq: r.seq,
+            req_headers: r.req_headers.clone(),
+            resp_headers: r.resp_headers.clone(),
+            req_body: r.req_body.clone(),
+            resp_body: r.resp_body.clone(),
+            scriptlets: r.scriptlets.clone(),
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,7 +117,7 @@ impl CaptureSlot {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DnsOutcome {
     Resolved,
@@ -74,8 +127,13 @@ pub enum DnsOutcome {
     Error,
 }
 
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct DnsRecord {
+    // Monotonic id assigned when the query is recorded; the page cursor orders
+    // and de-duplicates rows. Defaults to 0 for log lines written before the
+    // field existed.
+    #[serde(default)]
+    pub seq: u64,
     pub ts_ms: u64,
     pub domain: String,
     pub qtype: String,

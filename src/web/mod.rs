@@ -26,6 +26,7 @@ use crate::stats::SharedState;
 mod blocklists;
 mod dns;
 mod exclusions;
+mod logs;
 mod meta;
 mod respond;
 pub mod runtime;
@@ -116,6 +117,9 @@ impl Admin {
         match (&method, path.as_str()) {
             (&Method::GET, "/") => html(dashboard()),
             (&Method::GET, "/api/stream") => sse_stream(self.state.clone()),
+            (&Method::GET, "/api/requests") => logs::requests_page(&self.state, &query),
+            (&Method::GET, "/api/request") => logs::request_detail(&self.state, &query),
+            (&Method::GET, "/api/queries") => logs::queries_page(&self.state, &query),
             (&Method::GET, "/api/stats") => json_ok(stats_json(&self.state)),
             (&Method::GET, "/api/errors") => meta::error_log(&self.state),
             (&Method::GET, "/api/scriptlets") => json_ok(scriptlets_json(&self.curation)),
@@ -696,6 +700,29 @@ mod tests {
         assert_eq!(body_json(resp).await["cleared"], 1);
         let v = body_json(admin.route(get("/api/errors")).await).await;
         assert_eq!(v["errors"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn log_endpoints_answer_with_page_and_detail_shapes() {
+        let admin = admin(&[], Arc::new(CannedDownloader("")));
+
+        // No data dir on the test state, so the pages are empty but well-formed.
+        for path in ["/api/requests", "/api/queries"] {
+            let resp = admin.route(get(path)).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{path}");
+            let v = body_json(resp).await;
+            assert_eq!(v["records"].as_array().unwrap().len(), 0, "{path}");
+            assert_eq!(v["done"], true, "{path}");
+        }
+
+        // The detail endpoint echoes the seq even when nothing was captured.
+        let resp = admin.route(get("/api/request?seq=7")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(body_json(resp).await["seq"], 7);
+
+        // A detail request without a seq is a client error.
+        let resp = admin.route(get("/api/request")).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

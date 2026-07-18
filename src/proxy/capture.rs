@@ -26,7 +26,7 @@ where
 {
     CaptureBody {
         inner: body,
-        cap: if exchange.is_live() { RESP_BODY_CAP } else { 0 },
+        cap: if exchange.is_active() { RESP_BODY_CAP } else { 0 },
         exchange,
         buf: Vec::new(),
         total: 0,

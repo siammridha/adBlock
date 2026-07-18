@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::json;
@@ -22,7 +22,7 @@ mod records;
 use errors::ErrorLog;
 use logs::RotatingLog;
 pub use records::{
-    CaptureSlot, DnsOutcome, DnsRecord, RequestKind, RequestRecord, UiMsg,
+    CaptureSlot, DnsOutcome, DnsRecord, RequestDetail, RequestKind, RequestRecord, UiMsg,
 };
 
 #[derive(Clone, Copy)]
@@ -134,6 +134,7 @@ pub struct SharedState {
     next_seq: AtomicU64,
     errors: ErrorLog,
     request_log: Option<RotatingLog>,
+    request_detail: Option<RotatingLog>,
     query_log: Option<RotatingLog>,
     settings_store: Option<OverrideStore<StatsOverrides>>,
     log_rotate_hours: std::sync::atomic::AtomicU32,
@@ -152,6 +153,7 @@ impl SharedState {
             next_seq: AtomicU64::new(1),
             errors: ErrorLog::memory(),
             request_log: None,
+            request_detail: None,
             query_log: None,
             settings_store: None,
             log_rotate_hours: std::sync::atomic::AtomicU32::new(DEFAULT_LOG_ROTATE_HOURS),
@@ -173,6 +175,7 @@ impl SharedState {
         self.history.set_retention_hours(retention);
         self.log_rotate_hours = std::sync::atomic::AtomicU32::new(rotate);
         self.request_log = Some(RotatingLog::open(dir.join("request-log.jsonl"), rotate));
+        self.request_detail = Some(RotatingLog::open(dir.join("request-detail.jsonl"), rotate));
         self.query_log = Some(RotatingLog::open(dir.join("query-log.jsonl"), rotate));
         self.settings_store = Some(store);
         self
@@ -209,7 +212,10 @@ impl SharedState {
         }
         if let Some(h) = change.log_rotate_hours {
             self.log_rotate_hours.store(h, Ordering::Relaxed);
-            for log in [&self.request_log, &self.query_log].into_iter().flatten() {
+            for log in [&self.request_log, &self.request_detail, &self.query_log]
+                .into_iter()
+                .flatten()
+            {
                 log.set_rotate_hours(h);
             }
         }
@@ -296,21 +302,22 @@ impl SharedState {
     }
 
     pub fn record_forwarded(self: &Arc<Self>, facts: RequestFacts<'_>, status: u16, ech: bool) -> Exchange {
-        Exchange { seq: self.open(RequestKind::Forwarded, facts, status, String::new(), ech), state: self.clone() }
+        self.begin(RequestKind::Forwarded, facts, status, String::new(), ech)
     }
 
     pub fn record_blocked(self: &Arc<Self>, facts: RequestFacts<'_>, blocked_by: &str) -> Exchange {
-        Exchange { seq: self.open(RequestKind::Blocked, facts, 0, blocked_by.to_string(), false), state: self.clone() }
+        self.begin(RequestKind::Blocked, facts, 0, blocked_by.to_string(), false)
     }
 
     pub fn record_failed(self: &Arc<Self>, facts: RequestFacts<'_>, error: &str) -> Exchange {
-        Exchange { seq: self.open(RequestKind::Failed, facts, 0, error.to_string(), false), state: self.clone() }
+        self.begin(RequestKind::Failed, facts, 0, error.to_string(), false)
     }
 
-    pub fn record_dns(&self, record: DnsRecord) {
+    pub fn record_dns(&self, mut record: DnsRecord) {
         if !self.log_requests {
             return;
         }
+        record.seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
         if let Some(log) = &self.query_log {
             if let Ok(line) = serde_json::to_string(&record) {
                 log.append(record.ts_ms, &line);
@@ -321,17 +328,29 @@ impl SharedState {
         }
     }
 
-    pub fn record_tunnel(&self, facts: RequestFacts<'_>, attribution: &str) {
-        let _ = self.open(RequestKind::Tunnel, facts, 0, attribution.to_string(), false);
+    pub fn record_tunnel(self: &Arc<Self>, facts: RequestFacts<'_>, attribution: &str) {
+        // A tunnel never carries captured bodies, so the exchange just drops
+        // after writing the lean line.
+        let _ = self.begin(RequestKind::Tunnel, facts, 0, attribution.to_string(), false);
     }
 
-    fn open(&self, kind: RequestKind, facts: RequestFacts<'_>, status: u16, blocked_by: String, ech: bool) -> u64 {
-        if !self.log_requests {
-            return 0;
-        }
+    // Open a request record. The lean line lands in the request log now; the
+    // heavy captures accumulate on the returned `Exchange` and flush to the
+    // detail sidecar when it drops. The exchange stays inert (captures nothing,
+    // broadcasts nothing) when logging is off, or when nothing would consume the
+    // record — no live dashboard and no persistence.
+    fn begin(
+        self: &Arc<Self>,
+        kind: RequestKind,
+        facts: RequestFacts<'_>,
+        status: u16,
+        blocked_by: String,
+        ech: bool,
+    ) -> Exchange {
         let live = self.ui_connected();
-        if !live && self.request_log.is_none() {
-            return 0;
+        let persist = self.request_log.is_some();
+        if !self.log_requests || (!live && !persist) {
+            return Exchange { state: self.clone(), seq: 0, live: false, captures: None };
         }
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
         let record = RequestRecord {
@@ -351,15 +370,53 @@ impl SharedState {
                 log.append(record.ts_ms, &line);
             }
         }
-        if !live {
-            return 0;
+        if live {
+            let _ = self.ui.send(UiMsg::Request(Arc::new(record.clone())));
         }
-        let _ = self.ui.send(UiMsg::Request(Arc::new(record)));
-        seq
+        Exchange { state: self.clone(), seq, live, captures: Some(Mutex::new(record)) }
     }
 
     fn attach(&self, seq: u64, slot: CaptureSlot, text: String) {
         let _ = self.ui.send(UiMsg::Attach { seq, slot, text: text.into() });
+    }
+
+    fn persist_detail(&self, record: &RequestRecord) {
+        let Some(log) = &self.request_detail else { return };
+        let Some(detail) = RequestDetail::from_record(record) else { return };
+        if let Ok(line) = serde_json::to_string(&detail) {
+            log.append(record.ts_ms, &line);
+        }
+    }
+
+    /// A page of persisted request records, newest first. `before` is the
+    /// exclusive upper bound on `seq` (pass the smallest seq already shown to
+    /// walk backwards); `None` starts at the newest record.
+    pub fn request_page(&self, before: Option<u64>, limit: usize) -> Vec<RequestRecord> {
+        let Some(log) = &self.request_log else { return Vec::new() };
+        log.page(before, limit, line_seq)
+            .iter()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect()
+    }
+
+    /// The captured headers/bodies/scriptlets for one request, fetched on
+    /// demand. Returns an empty detail (only the seq) when nothing was captured.
+    pub fn request_detail(&self, seq: u64) -> RequestDetail {
+        let found = self.request_detail.as_ref().and_then(|log| {
+            log.find(|l| line_seq(l) == Some(seq))
+                .and_then(|l| serde_json::from_str(&l).ok())
+        });
+        found.unwrap_or(RequestDetail { seq, ..Default::default() })
+    }
+
+    /// A page of persisted DNS query records, newest first. Cursor semantics
+    /// match [`request_page`].
+    pub fn query_page(&self, before: Option<u64>, limit: usize) -> Vec<DnsRecord> {
+        let Some(log) = &self.query_log else { return Vec::new() };
+        log.page(before, limit, line_seq)
+            .iter()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect()
     }
 
     pub fn uptime_secs(&self) -> u64 {
@@ -367,21 +424,51 @@ impl SharedState {
     }
 }
 
+// A single request in flight. It carries the captured artifacts (headers,
+// bodies, scriptlet names) as they land, streams each one live to a connected
+// dashboard, and — on drop — writes them to the detail sidecar so they can be
+// fetched on demand later. `captures` is `None` for an inert exchange, which
+// short-circuits every capture path.
 pub struct Exchange {
     state: Arc<SharedState>,
     seq: u64,
+    live: bool,
+    captures: Option<Mutex<RequestRecord>>,
 }
 
 impl Exchange {
-    pub(crate) fn is_live(&self) -> bool {
-        self.seq != 0
+    /// Whether captured artifacts should be collected at all — true when the
+    /// record is live (a dashboard is watching) or being persisted for later
+    /// on-demand fetch. An inert exchange has none of either.
+    pub(crate) fn is_active(&self) -> bool {
+        self.captures.is_some()
     }
 
     pub fn attach(&self, slot: CaptureSlot, text: impl FnOnce() -> String) {
-        if self.seq != 0 {
-            self.state.attach(self.seq, slot, text());
+        let Some(captures) = &self.captures else { return };
+        let text = text();
+        if let Ok(mut record) = captures.lock() {
+            slot.apply(&mut record, text.clone());
+        }
+        if self.live {
+            self.state.attach(self.seq, slot, text);
         }
     }
+}
+
+impl Drop for Exchange {
+    fn drop(&mut self) {
+        let Some(captures) = &self.captures else { return };
+        if let Ok(record) = captures.lock() {
+            self.state.persist_detail(&record);
+        }
+    }
+}
+
+/// Pull the `seq` out of a raw JSONL log line without fully deserializing it —
+/// used to page and locate records by cursor.
+fn line_seq(line: &str) -> Option<u64> {
+    serde_json::from_str::<serde_json::Value>(line).ok()?.get("seq")?.as_u64()
 }
 
 fn now_ms() -> u64 {
@@ -405,6 +492,17 @@ mod test_support {
                 records: Vec::new(),
                 dns: Vec::new(),
                 events: Vec::new(),
+            }
+        }
+
+        /// Block until every queued log line has hit disk. Writes now happen on
+        /// a background thread, so a test reading the files must wait first.
+        pub fn flush_logs(&self) {
+            for log in [&self.request_log, &self.request_detail, &self.query_log]
+                .into_iter()
+                .flatten()
+            {
+                log.flush();
             }
         }
     }
@@ -477,7 +575,7 @@ mod tests {
     fn no_subscriber_means_no_recording_and_no_buffering() {
         let s = state();
         let ex = s.record_forwarded(doc("https://a.example/"), 200, false);
-        assert!(!ex.is_live(), "inert without a subscriber");
+        assert!(!ex.is_active(), "inert without a subscriber");
         s.log_event(EventKind::Info, "dropped");
         let mut obs = s.observe();
         assert!(obs.records().is_empty());
@@ -542,7 +640,19 @@ mod tests {
 
     #[test]
     fn capture_slots_name_real_serialized_record_fields() {
-        let v = serde_json::to_value(RequestRecord::default()).unwrap();
+        // Populate every slot so the lean serializer (which omits empty
+        // captures) still emits each key the dashboard's attach frames target.
+        let mut record = RequestRecord::default();
+        for slot in [
+            CaptureSlot::ReqBody,
+            CaptureSlot::RespBody,
+            CaptureSlot::ReqHeaders,
+            CaptureSlot::RespHeaders,
+            CaptureSlot::Scriptlets,
+        ] {
+            slot.apply(&mut record, "x".into());
+        }
+        let v = serde_json::to_value(&record).unwrap();
         for slot in [
             CaptureSlot::ReqBody,
             CaptureSlot::RespBody,
@@ -558,6 +668,10 @@ mod tests {
         }
         assert!(v.get("type").is_some(), "the dashboard keys the type column on 'type'");
         assert_eq!(v["kind"], "forwarded", "kind serializes lowercase");
+
+        // And the lean line really does drop empty captures.
+        let lean = serde_json::to_value(RequestRecord::default()).unwrap();
+        assert!(lean.get("req_body").is_none(), "empty captures stay out of the list line");
     }
 
     #[test]
@@ -595,6 +709,7 @@ mod tests {
     fn dns_records_reach_a_live_subscriber_only() {
         let s = state();
         s.record_dns(DnsRecord {
+            seq: 0,
             ts_ms: 0,
             domain: "dropped.example".into(),
             qtype: "A".into(),
@@ -610,6 +725,7 @@ mod tests {
         let mut obs = s.observe();
         assert!(obs.dns().is_empty());
         s.record_dns(DnsRecord {
+            seq: 0,
             ts_ms: 0,
             domain: "kept.example".into(),
             qtype: "HTTPS".into(),
@@ -727,9 +843,14 @@ mod tests {
         let s = Arc::new(SharedState::new(info, &logging).with_data_dir(&dir));
 
         let ex = s.record_forwarded(doc("https://kept.example/"), 200, false);
-        assert!(!ex.is_live(), "no subscriber → exchange stays inert");
-        ex.attach(CaptureSlot::ReqBody, || panic!("captures are never persisted"));
+        // Persistence keeps the exchange active even with no dashboard, so its
+        // captures land in the detail sidecar for later on-demand fetch.
+        assert!(ex.is_active(), "persistence keeps the exchange capturing");
+        let seq = ex.seq;
+        ex.attach(CaptureSlot::ReqBody, || "hello-body".into());
+        drop(ex); // flushes the detail line
         s.record_dns(DnsRecord {
+            seq: 0,
             ts_ms: now_ms(),
             domain: "kept-dns.example".into(),
             qtype: "A".into(),
@@ -742,14 +863,28 @@ mod tests {
             elapsed_ms: 1,
             proxy: false,
         });
+        s.flush_logs(); // writes land on a background thread; wait for them
         let requests = std::fs::read_to_string(dir.join("request-log.jsonl")).unwrap();
         assert!(requests.contains("https://kept.example/"), "log: {requests}");
+        // The list line stays lean — the body lives only in the sidecar.
+        assert!(!requests.contains("hello-body"), "list line must not carry the body");
+        let detail = std::fs::read_to_string(dir.join("request-detail.jsonl")).unwrap();
+        assert!(detail.contains("hello-body"), "detail: {detail}");
         let queries = std::fs::read_to_string(dir.join("query-log.jsonl")).unwrap();
         assert!(queries.contains("kept-dns.example"), "log: {queries}");
+
+        // The read accessors serve the persisted records back.
+        let page = s.request_page(None, 100);
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].url, "https://kept.example/");
+        assert!(page[0].req_body.is_empty(), "the list record carries no body");
+        assert_eq!(s.request_detail(seq).req_body, "hello-body");
+        assert_eq!(s.query_page(None, 100).len(), 1);
 
         let mut obs = s.observe();
         s.record_forwarded(doc("https://both.example/"), 200, false);
         assert_eq!(obs.records().len(), 1);
+        s.flush_logs();
         assert_eq!(
             std::fs::read_to_string(dir.join("request-log.jsonl")).unwrap().lines().count(),
             2
@@ -830,7 +965,7 @@ mod tests {
         ));
         let mut obs = s.observe();
         let ex = s.record_forwarded(doc("https://a.example/"), 200, false);
-        assert!(!ex.is_live(), "inert when log_requests is off");
+        assert!(!ex.is_active(), "inert when log_requests is off");
         ex.attach(CaptureSlot::ReqBody, || panic!("inert exchange must not render its text"));
         assert!(obs.records().is_empty());
     }
@@ -842,7 +977,7 @@ mod tests {
             let _obs = s.observe();
             s.record_forwarded(doc("https://a.example/"), 200, false).seq
         };
-        assert!(!s.record_forwarded(doc("https://b.example/"), 200, false).is_live());
+        assert!(!s.record_forwarded(doc("https://b.example/"), 200, false).is_active());
         let _obs = s.observe();
         let second = s.record_forwarded(doc("https://c.example/"), 200, false).seq;
         assert!(second > first, "seq never reuses numbers across reconnects");

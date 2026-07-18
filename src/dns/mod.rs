@@ -406,6 +406,7 @@ impl DnsService {
             RecordedAs::Error { cause } => (DnsOutcome::Error, String::new(), String::new(), Some(cause)),
         };
         self.state.record_dns(DnsRecord {
+            seq: 0, // assigned by record_dns
             ts_ms: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |d| d.as_millis() as u64),

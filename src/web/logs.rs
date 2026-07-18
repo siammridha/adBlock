@@ -1,0 +1,51 @@
+//! API handlers for the persisted request and DNS query logs.
+//!
+//! The list endpoints page backwards from the newest record (cursor = the
+//! smallest `seq` already shown), returning lean records without the heavy
+//! captured bodies. The detail endpoint fetches one request's captured
+//! headers/bodies/scriptlets on demand.
+
+use serde_json::json;
+
+use crate::stats::SharedState;
+
+use super::respond::{json_ok, json_status, parse_query};
+use super::AdminResponse;
+
+const DEFAULT_PAGE: usize = 100;
+const MAX_PAGE: usize = 500;
+
+fn cursor(query: &str) -> Option<u64> {
+    parse_query(query, "before").and_then(|s| s.parse().ok())
+}
+
+fn page_size(query: &str) -> usize {
+    parse_query(query, "limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_PAGE)
+        .clamp(1, MAX_PAGE)
+}
+
+pub(super) fn requests_page(state: &SharedState, query: &str) -> AdminResponse {
+    let limit = page_size(query);
+    let records = state.request_page(cursor(query), limit);
+    // `done` tells the client to stop paging: a short page means we hit the
+    // oldest retained record.
+    json_ok(json!({ "records": records, "done": records.len() < limit }))
+}
+
+pub(super) fn queries_page(state: &SharedState, query: &str) -> AdminResponse {
+    let limit = page_size(query);
+    let records = state.query_page(cursor(query), limit);
+    json_ok(json!({ "records": records, "done": records.len() < limit }))
+}
+
+pub(super) fn request_detail(state: &SharedState, query: &str) -> AdminResponse {
+    let Some(seq) = parse_query(query, "seq").and_then(|s| s.parse::<u64>().ok()) else {
+        return json_status(
+            hyper::StatusCode::BAD_REQUEST,
+            json!({ "error": "missing seq" }),
+        );
+    };
+    json_ok(serde_json::to_value(state.request_detail(seq)).unwrap_or_default())
+}

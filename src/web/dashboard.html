@@ -209,6 +209,60 @@
     border-radius:20px; font-size:11px; background:var(--panel2); color:var(--muted); }
   .tabs .tab .tbadge.bad { background:rgba(239,68,68,.15); color:var(--error); }
   .tabpane[hidden] { display:none; }
+  /* ---- virtual logs: fixed-height rows drawn only within the viewport ---- */
+  /* A tall spacer (.vinner) holds the full height; only ~1 screen of rows is
+     ever in the DOM, positioned by transform. Rows are one clipped line —
+     full request/response detail opens in the drawer, not inline. */
+  .vhead, .vrow { display:grid; align-items:center; gap:10px; padding:0 8px; }
+  .rqcols  { grid-template-columns:84px 46px 46px 74px minmax(0,1fr) 74px; }
+  .dnscols { grid-template-columns:84px 76px minmax(0,1.1fr) 50px minmax(0,1.1fr) 150px 40px 74px; }
+  .vhead { height:30px; color:var(--muted); font-size:11px; text-transform:uppercase;
+    letter-spacing:.06em; font-weight:600; border-bottom:1px solid var(--border);
+    background:var(--panel); flex-shrink:0; }
+  .vhead > span { overflow:hidden; text-overflow:ellipsis; }
+  .vscroll { position:relative; overflow-y:auto; }
+  .vinner { position:relative; width:100%; }
+  .vrow { position:absolute; left:0; right:0; height:30px; box-sizing:border-box;
+    border-bottom:1px solid var(--border); font-size:13px; white-space:nowrap; }
+  .vrow.click { cursor:pointer; }
+  .vrow > span { overflow:hidden; text-overflow:ellipsis; }
+  .vrow:hover { background:var(--panel2); }
+  .vrow.st-ok   { background:rgba(34,197,94,.06); }
+  .vrow.st-info { background:rgba(56,189,248,.06); }
+  .vrow.st-warn { background:rgba(249,115,22,.07); }
+  .vrow.st-err  { background:rgba(239,68,68,.08); }
+  .vrow.st-ok:hover,.vrow.st-info:hover,.vrow.st-warn:hover,.vrow.st-err:hover { background:var(--panel2); }
+  .vrow .urlcell { display:flex; align-items:center; gap:8px; overflow:hidden; min-width:0; }
+  .vrow .urlcell .u { overflow:hidden; text-overflow:ellipsis; }
+  .vrow .bb, .vrow .sj { display:inline-flex; align-items:center; gap:5px; flex-shrink:0;
+    font-size:11px; color:var(--muted); }
+  .vrow .bb .bb-rule { font:11px/1.5 ui-monospace,Menlo,Consolas,monospace; color:var(--blocked);
+    background:rgba(249,115,22,.12); border:1px solid rgba(249,115,22,.25); border-radius:5px;
+    padding:0 6px; max-width:280px; overflow:hidden; text-overflow:ellipsis; }
+  .vrow .bb .bb-list { color:var(--muted); border:1px solid var(--border); background:var(--panel2);
+    border-radius:20px; padding:0 8px; font-weight:600; }
+  .vrow .sj .sj-name { font:11px/1.5 ui-monospace,Menlo,Consolas,monospace; color:var(--accent);
+    background:rgba(99,102,241,.12); border:1px solid rgba(99,102,241,.28); border-radius:5px; padding:0 6px; }
+  .vrow .ech-tag { font:10px/1.4 ui-monospace,Menlo,Consolas,monospace; color:var(--ok);
+    background:rgba(34,197,94,.12); border:1px solid rgba(34,197,94,.3); border-radius:5px;
+    padding:0 5px; font-weight:700; flex-shrink:0; }
+  .vrow .act { text-align:right; }
+  .vrow .domcell { display:flex; align-items:center; gap:6px; overflow:hidden; min-width:0; }
+  .vrow .domcell .dom { overflow:hidden; text-overflow:ellipsis; }
+  /* ---- request detail drawer: fetched on demand when a row is clicked ---- */
+  .drawer-back { position:fixed; inset:0; background:rgba(0,0,0,.4); z-index:60; display:none; }
+  .drawer-back.open { display:block; }
+  .drawer { position:fixed; top:0; right:0; height:100%; width:min(620px,94vw); z-index:61;
+    background:var(--panel); border-left:1px solid var(--border); box-shadow:-10px 0 30px rgba(0,0,0,.4);
+    transform:translateX(100%); transition:transform .18s ease; display:flex; flex-direction:column; }
+  .drawer.open { transform:none; }
+  .drawer-head { display:flex; align-items:center; gap:10px; padding:12px 16px;
+    border-bottom:1px solid var(--border); flex-shrink:0; }
+  .drawer-head .dt { font-size:13px; font-weight:600; text-transform:uppercase; letter-spacing:.06em;
+    color:var(--muted); }
+  .drawer-x { margin-left:auto; }
+  .drawer-body { padding:14px 16px; overflow:auto; flex:1; }
+  .drawer-body .rq-detail { font-size:12px; }
 </style>
 </head>
 <body>
@@ -300,21 +354,17 @@
       <span class="chips" style="margin-left:auto">
         <span class="chip" id="rq-new" style="display:none"></span>
         <span class="searchwrap">
-          <input type="text" id="rq-search" placeholder="search url / method / status / rule…">
+          <input type="text" id="rq-search" placeholder="search loaded url / method / status / rule…">
           <span class="sx" id="rq-sx">✕</span>
         </span>
-        <button class="ghost mini" id="rq-wipe" title="delete all logged requests">clear log</button>
+        <button class="ghost mini" id="rq-reload" title="reload from the newest logged request">reload</button>
       </span>
     </h2>
-    <div class="log" id="rq-log">
-      <table>
-        <thead><tr><th style="width:92px">Time</th><th style="width:52px">Method</th>
-          <th style="width:52px">Status</th><th style="width:80px">Type</th><th>URL</th>
-          <th style="width:64px"></th></tr></thead>
-        <tbody id="requests"></tbody>
-      </table>
-      <div class="empty" id="rq-empty">no requests logged yet</div>
+    <div class="vhead rqcols">
+      <span>Time</span><span>Method</span><span>Status</span><span>Type</span><span>URL</span><span></span>
     </div>
+    <div class="log vscroll" id="rq-log"></div>
+    <div class="empty" id="rq-empty">no requests logged yet</div>
   </section>
 
   <section class="panel tabpane" id="pane-dns">
@@ -322,22 +372,18 @@
       <span class="chips" style="margin-left:auto">
         <span class="chip" id="dq-new" style="display:none"></span>
         <span class="searchwrap">
-          <input type="text" id="dq-search" placeholder="search domain / type / outcome / rule…">
+          <input type="text" id="dq-search" placeholder="search loaded domain / type / outcome / rule…">
           <span class="sx" id="dq-sx">✕</span>
         </span>
-        <button class="ghost mini" id="dq-wipe" title="delete all logged queries">clear log</button>
+        <button class="ghost mini" id="dq-reload" title="reload from the newest logged query">reload</button>
       </span>
     </h2>
-    <div class="log" id="dq-log">
-      <table>
-        <thead><tr><th style="width:92px">Time</th><th style="width:84px">Outcome</th>
-          <th>Answer</th><th style="width:56px">Type</th><th>Domain</th>
-          <th style="width:180px">Upstream</th>
-          <th style="width:44px">ms</th><th style="width:64px"></th></tr></thead>
-        <tbody id="dnslog"></tbody>
-      </table>
-      <div class="empty" id="dq-empty">no DNS queries logged yet — browse through the proxy or point a client at the DNS listener</div>
+    <div class="vhead dnscols">
+      <span>Time</span><span>Outcome</span><span>Answer</span><span>Type</span><span>Domain</span>
+      <span>Upstream</span><span>ms</span><span></span>
     </div>
+    <div class="log vscroll" id="dq-log"></div>
+    <div class="empty" id="dq-empty">no DNS queries logged yet — browse through the proxy or point a client at the DNS listener</div>
     <p class="hint" id="dns-conf">loading resolver status…</p>
   </section>
 
@@ -681,6 +727,17 @@
   </section>
 </main>
 </div>
+
+<!-- request detail drawer: the captured headers/bodies are fetched on demand
+     (GET /api/request?seq=…) the first time a request row is opened. -->
+<div class="drawer-back" id="drawer-back"></div>
+<aside class="drawer" id="drawer">
+  <div class="drawer-head">
+    <span class="dt">Request detail</span>
+    <button class="ghost mini drawer-x" id="drawer-x">✕ close</button>
+  </div>
+  <div class="drawer-body" id="drawer-body"></div>
+</aside>
 
 <script>
 const $ = id => document.getElementById(id);
@@ -1048,6 +1105,13 @@ function showTab(pane){
   if(["pane-proxycfg", "pane-dnscfg"].includes(pane)) refreshServer();
   // The proxy egress DNS/ECH policy toggles.
   if(pane === "pane-proxycfg") refreshProxyCfg();
+  // A virtual list draws nothing while its pane is hidden (zero height), so
+  // redraw once it is shown. Deferred so the very first showTab() call — which
+  // runs before the lists are constructed — still resolves them.
+  requestAnimationFrame(()=>{
+    if(pane === "pane-requests") rqVL.redraw();
+    else if(pane === "pane-dns") dqVL.redraw();
+  });
   localStorage.setItem("tab", pane);
   localStorage.setItem("tab:" + sec, pane);
 }
@@ -1210,15 +1274,13 @@ async function runRuleTest(){
 $("rt-run").addEventListener("click", runRuleTest);
 $("rt-url").addEventListener("keydown", e=>{ if(e.key==="Enter") runRuleTest(); });
 
-// ---- request log (searchable, collapsed to host/path) --------------------
-// The server keeps no log at all: records stream in over SSE only while this
-// page is connected, and captured artifacts (headers/bodies/scriptlets)
-// follow as "attach" frames that patch the record in place. The open page
-// owns the logs — search and the expand view read from the records the
-// browser already holds — and a refresh starts empty.
-let rqQuery = "";
-const RQ_MAX = 200; // most recent records kept; older rows (and their recs) evict
-const recs = new Map(); // seq → record, for patching by attach frames
+// ---- request + DNS logs (persisted, paginated, virtually rendered) --------
+// The server now keeps rotating request/DNS logs on disk. On load we fetch the
+// newest page and render it; scrolling toward the bottom pages older records in
+// on demand. Only the rows within the viewport are ever in the DOM (a virtual
+// list), so a log of any size stays cheap. Live SSE frames still prepend new
+// rows at the top. A request's heavy request/response detail (headers + bodies)
+// is fetched only when its row is opened.
 function statusColor(s){
   if(s<300) return "var(--ok)";
   if(s<400) return "var(--info)";
@@ -1227,294 +1289,12 @@ function statusColor(s){
 }
 // Drop the query string for display: "…/ads.js?id=1&x" → "…/ads.js"
 function stripQuery(u){ const i = u.indexOf("?"); return i<0 ? u : u.slice(0,i); }
+const PAGE = 100;   // records fetched per page
+const ROW_H = 30;   // fixed row height (must match .vrow height in CSS)
 
-// Render the full network-tab detail when a row is expanded: general info,
-// then request and response (headers + body) side by side. Pure client render
-// — no round-trip; the record lives in `recs` and attach frames patch it (an
-// open detail re-renders when a late artifact lands).
-function renderDetail(d, cell){
-  const st0 = d.kind==="failed" ? "failed (dropped)" : d.blocked_by ? "blocked (dropped)" : "—";
-  const gen = [["URL", d.url], ["Method", d.method],
-    ["Status", d.status || st0],
-    ["Type", d.type], ["Time", fmtTime(d.ts_ms)]];
-  if(d.blocked_by) gen.push([d.kind==="tunnel" ? "Tunnel" : d.kind==="failed" ? "Error" : "Blocked by", d.blocked_by]);
-  if(d.scriptlets) gen.push(["Scriptlets", d.scriptlets]);
-  if(d.ech) gen.push(["SNI", "hidden — Encrypted Client Hello (ECH config from DNS)"]);
-
-  cell.innerHTML =
-    `<div class="gen"></div>`+
-    `<div class="cols">`+
-      `<div><div class="lbl">Request headers</div><pre class="qh"></pre>`+
-           `<div class="lbl">Request body</div><pre class="qb"></pre></div>`+
-      `<div><div class="lbl">Response headers</div><pre class="sh"></pre>`+
-           `<div class="lbl">Response body</div><pre class="sb"></pre></div>`+
-    `</div>`;
-  const g = cell.querySelector(".gen");
-  for(const [l,v] of gen){
-    const gl = document.createElement("span"); gl.className = "gl"; gl.textContent = l;
-    const gv = document.createElement("span"); gv.className = "gv"; gv.textContent = v;
-    if(l === "Status" && d.status) gv.style.color = statusColor(d.status);
-    if(l === "Blocked by") gv.style.color = "var(--blocked)";
-    if(l === "Error") gv.style.color = "var(--error)";
-    // Tint the "excluded:" tag prefix with the block theme color, matching how
-    // blocked_by is highlighted; the domain stays in the default value color.
-    if(l === "Tunnel" && v.startsWith("excluded:")){
-      gv.textContent = "";
-      const pre = document.createElement("span");
-      pre.textContent = "excluded:"; pre.style.color = "var(--blocked)";
-      gv.append(pre, document.createTextNode(v.slice(9)));
-    }
-    g.append(gl, gv);
-  }
-  const none = d.kind==="failed" ? "(no response — upstream failed)"
-    : d.blocked_by ? "(request dropped — never sent upstream)" : "(none)";
-  cell.querySelector(".qh").textContent = d.req_headers || "(none)";
-  cell.querySelector(".qb").textContent = d.req_body || "(empty)";
-  cell.querySelector(".sh").textContent = d.resp_headers || none;
-  cell.querySelector(".sb").textContent = d.resp_body || (d.blocked_by ? none : "(empty)");
-}
-
-// While a request is being inspected (a row is expanded) or the list is
-// scrolled away from the top, new rows are buffered instead of inserted, so
-// nothing shifts under the cursor. The "N new" chip flushes them on demand.
-let rqPending = [], rqOpen = 0;
-function rqPaused(){ return rqOpen > 0 || $("rq-log").scrollTop > 4; }
-function updateNewChip(){
-  const c = $("rq-new");
-  c.style.display = rqPending.length ? "" : "none";
-  c.className = "chip new";
-  c.textContent = rqPending.length + " new ↑";
-}
-
-function buildRow(rec){
-  // The typed `kind` says what a status-0 record is: an opened tunnel, an
-  // upstream failure, or a block.
-  const isTunnel = rec.kind === "tunnel";
-  const isFailed = rec.kind === "failed";
-  let st, col, tint;
-  if(rec.status!==0){
-    st = rec.status; col = statusColor(rec.status);
-    tint = rec.status<300 ? "st-ok" : rec.status<400 ? "st-info"
-         : rec.status<500 ? "st-warn" : "st-err";
-  }
-  else if(isTunnel){ st = "OPEN"; col = "var(--muted)"; tint = ""; }
-  else if(isFailed){ st = "ERR"; col = "var(--error)"; tint = "st-err"; }
-  else { st = "BLK"; col = "var(--error)"; tint = "st-err"; }
-
-  const main = document.createElement("tr");
-  main.className = "rq " + tint;
-  main.innerHTML =
-    `<td class="ts">${fmtTime(rec.ts_ms)}</td>`+
-    `<td class="xn" style="color:var(--muted)">${esc(rec.method)}</td>`+
-    `<td class="xn" style="color:${col}">${st}</td>`+
-    `<td class="hint">${esc(rec.type)}</td>`+
-    `<td class="msg"><span class="u"></span></td>`+
-    `<td class="act"></td>`;
-  main.querySelector(".u").textContent = stripQuery(rec.url);
-  // ECH: this request's TLS connection hid its SNI using an ECH config the
-  // proxy learned from the target's HTTPS DNS record.
-  if(rec.ech){
-    const tag = document.createElement("span");
-    tag.className = "ech-tag";
-    tag.textContent = "[ECH]";
-    tag.title = "SNI hidden — Encrypted Client Hello negotiated using the ECH config from DNS";
-    main.querySelector(".msg").appendChild(tag);
-  }
-  // One-click block/unblock: appends `||host^` (or `@@||host^`) to the
-  // custom list, which rebuilds the engine immediately.
-  let host = "";
-  try { host = new URL(rec.url).hostname; } catch(e){}
-  if(host){
-    const blocked = rec.kind === "blocked";
-    const btn = document.createElement("button");
-    btn.className = "ghost mini";
-    btn.textContent = blocked ? "unblock" : "block";
-    btn.title = (blocked ? "@@||" : "||") + host + "^ → custom list";
-    btn.addEventListener("click", async e=>{
-      e.stopPropagation();
-      const rule = (blocked ? "@@||" : "||") + host + "^";
-      btn.disabled = true; btn.textContent = "…";
-      try {
-        const r = await fetch("/api/blocklists", {method:"POST",
-          headers:{"content-type":"application/json"},
-          body: JSON.stringify({name:"custom", rules: rule})});
-        if(!r.ok) throw new Error((await r.json()).error || r.status);
-        btn.textContent = "✓ " + (blocked ? "unblocked" : "blocked");
-        loadCustom();
-      } catch(err){ btn.textContent = "failed"; btn.title = err.message; btn.disabled = false; }
-    });
-    main.querySelector(".act").appendChild(btn);
-  }
-  if(rec.blocked_by){
-    // "rule — list" from the API; mechanism-only blocks have no list part.
-    // Excluded tunnels come as "excluded: <domain>", upstream failures as
-    // "upstream host: cause" — render all with the same pill+chip pair,
-    // "excluded"/"error" taking the list slot.
-    let rule, list;
-    const exc = rec.blocked_by.match(/^excluded:\s*(.*)$/);
-    if(isFailed){ list = "error"; rule = rec.blocked_by; }
-    else if(exc){ list = "excluded"; rule = exc[1]; }
-    else {
-      const sep = rec.blocked_by.lastIndexOf(" — ");
-      rule = sep < 0 ? rec.blocked_by : rec.blocked_by.slice(0, sep);
-      list = sep < 0 ? "" : rec.blocked_by.slice(sep + 3);
-      if(list === "custom") list = "custom filters";
-    }
-    // Rules can be huge (multi-domain options, regex): first line, capped.
-    // The expanded row shows the full rule.
-    rule = rule.split("\n")[0];
-    if(rule.length > 90) rule = rule.slice(0, 90) + "…";
-    const bb = document.createElement("div");
-    bb.className = "bb";
-    bb.innerHTML = (list ? `<span class="bb-list"></span>` : ``)+
-      `<span class="bb-rule"></span>`;
-    if(list) bb.querySelector(".bb-list").textContent = list + ":";
-    bb.querySelector(".bb-rule").textContent = rule;
-    main.querySelector(".msg").appendChild(bb);
-  }
-  if(rec.scriptlets) scriptletBadge(rec, main);
-
-  const detail = document.createElement("tr");
-  detail.className = "rq-detail"; detail.style.display = "none";
-  detail.innerHTML = `<td colspan="6"></td>`;
-
-  // Text this row matches search against (client-side; the server doesn't
-  // keep the records).
-  main._hay = computeHay(rec);
-  main._detail = detail;
-  main._seq = rec.seq;
-  rec._main = main; rec._detail = detail; rec._rendered = false;
-  if(rqQuery && !main._hay.includes(rqQuery)){ main.style.display = "none"; }
-
-  main.addEventListener("click", ()=>{
-    const open = detail.style.display === "none";
-    detail.style.display = open ? "" : "none";
-    rqOpen += open ? 1 : -1;
-    if(open && !rec._rendered){ rec._rendered = true; renderDetail(rec, detail.firstChild); }
-    if(!rqPaused()) flushRequests();
-  });
-  return [main, detail];
-}
-
-function computeHay(rec){
-  const st0 = rec.kind==="tunnel" ? "open" : rec.kind==="failed" ? "err error failed" : "blk blocked";
-  return [rec.method, rec.status===0 ? st0 : rec.status,
-    rec.type, rec.url, rec.blocked_by, rec.scriptlets, rec.ech ? "ech" : ""].join(" ").toLowerCase();
-}
-
-// Collapsed row shows just the first scriptlet + a count; the expanded view's
-// General grid lists them all. Called from buildRow, or from an attach frame
-// when the annotation lands after the row was built.
-function scriptletBadge(rec, main){
-  const names = rec.scriptlets.split(", ").filter(Boolean);
-  const sj = document.createElement("div");
-  sj.className = "sj";
-  sj.innerHTML = `<span>scriptlets</span><span class="sj-name"></span>`+
-    (names.length > 1 ? `<span class="hint"></span>` : ``);
-  sj.querySelector(".sj-name").textContent = names[0];
-  if(names.length > 1)
-    sj.querySelector(".hint").textContent = `+${names.length-1} more`;
-  main.querySelector(".msg").appendChild(sj);
-}
-
-// An "attach" frame: a captured artifact for a record we may already show.
-// Patch the record, then refresh whatever is rendered from it — the search
-// text, the scriptlet badge, and an already-open detail view.
-function applyAttach(seq, slot, text){
-  const rec = recs.get(seq);
-  if(!rec) return; // row evicted, or record predates this page
-  rec[slot] = text;
-  const main = rec._main;
-  if(!main) return; // still queued in rqPending; it renders with the patch
-  if(slot === "scriptlets" && !main.querySelector(".sj")) scriptletBadge(rec, main);
-  main._hay = computeHay(rec);
-  if(rqQuery) main.style.display = main._hay.includes(rqQuery) ? "" : "none";
-  if(rec._rendered) renderDetail(rec, rec._detail.firstChild);
-}
-
-// Show/hide already-rendered rows to match the search box — no server call.
-function applyFilter(){
-  const q = rqQuery;
-  for(const main of $("requests").querySelectorAll("tr.rq")){
-    const hit = !q || main._hay.includes(q);
-    main.style.display = hit ? "" : "none";
-    if(!hit && main._detail){ main._detail.style.display = "none"; }
-  }
-  $("rq-empty").style.display =
-    $("requests").querySelector("tr.rq:not([style*='display: none'])") ? "none" : "";
-}
-
-function flushRequests(){
-  const tb = $("requests");
-  for(const rec of rqPending){
-    const [main, detail] = buildRow(rec);
-    tb.insertBefore(detail, tb.firstChild);
-    tb.insertBefore(main, tb.firstChild);
-  }
-  rqPending = [];
-  // Two <tr> per record (main + detail), so RQ_MAX records = 2×RQ_MAX rows.
-  while(tb.children.length > RQ_MAX * 2){
-    const el = tb.lastChild;
-    if(el._seq !== undefined) recs.delete(el._seq); // evicted with its row
-    tb.removeChild(el);
-  }
-  $("rq-empty").style.display = tb.querySelector("tr.rq") ? "none" : "";
-  updateNewChip();
-}
-
-function resetRequests(){
-  rqPending = []; rqOpen = 0; recs.clear(); updateNewChip();
-  $("requests").innerHTML = ""; $("rq-empty").style.display = "";
-}
-$("rq-new").addEventListener("click", ()=>{
-  flushRequests(); $("rq-log").scrollTop = 0;
-});
-$("rq-log").addEventListener("scroll", ()=>{
-  if(!rqPaused() && rqPending.length) flushRequests();
-});
-$("rq-search").addEventListener("input", e=>{
-  $("rq-sx").style.display = e.target.value ? "" : "none";
-  rqQuery = e.target.value.trim().toLowerCase();
-  applyFilter();
-});
-$("rq-sx").addEventListener("click", ()=>{
-  $("rq-search").value = ""; $("rq-sx").style.display = "none";
-  rqQuery = ""; applyFilter();
-});
-$("rq-wipe").addEventListener("click", ()=>{
-  if(!confirm("Clear the request log?")) return;
-  // The page owns the log — the server keeps nothing to clear.
-  resetRequests();
-});
-
-// ---- DNS tab: resolver status + live query log -----------------------------
-// Same page-owned model as the request log: dns frames stream over SSE while
-// this page is connected; nothing is stored server-side. Rows buffer while
-// the log is scrolled away from the top ("N new" chip flushes them).
-const DQ_MAX = 200;
-let dqQuery = "", dqPending = [];
-function dqPaused(){ return $("dq-log").scrollTop > 4; }
-// Row visibility = search text. AAAA rows only stream at all when the
-// "Log IPv6 (AAAA) queries" setting (DNS settings tab) is on.
-function dqShow(tr){
-  return !dqQuery || tr._hay.includes(dqQuery);
-}
-function dqRefilter(){
-  for(const tr of $("dnslog").children) tr.style.display = dqShow(tr) ? "" : "none";
-}
-function dqChip(){
-  const c = $("dq-new");
-  c.style.display = dqPending.length ? "" : "none";
-  c.className = "chip new";
-  c.textContent = dqPending.length + " new ↑";
-}
-function dqHay(d){
-  return [d.domain, d.qtype, d.outcome, d.rcode, d.answers, d.upstream, d.blocked_by,
-          d.ech ? "ech" : "", d.proxy ? "proxy" : ""].join(" ").toLowerCase();
-}
-
-// One-click block/unblock into the custom list — same call the Requests tab
-// makes, so DNS and HTTP filtering stay one rule set.
+// One-click block/unblock into the custom list. Shared by the request rows, the
+// DNS rows, and the top-domain tables (renderTop), so all filtering stays one
+// rule set.
 function ruleButton(domain, isBlocked){
   const btn = document.createElement("button");
   btn.className = "ghost mini";
@@ -1535,88 +1315,449 @@ function ruleButton(domain, isBlocked){
   return btn;
 }
 
-function dqRow(d){
+// A windowed renderer over a fixed-height row list. `render(item, el)` fills a
+// recycled row element; `onNearBottom()` fires when the tail scrolls into view
+// (the caller pages more in). Call setItems() to swap the backing array.
+function makeVirtualList(scroller, render, onNearBottom){
+  const inner = document.createElement("div");
+  inner.className = "vinner";
+  scroller.appendChild(inner);
+  let items = [];
+  const pool = [];
+  function draw(){
+    inner.style.height = (items.length * ROW_H) + "px";
+    const top = scroller.scrollTop, vh = scroller.clientHeight || 0;
+    const start = Math.max(0, Math.floor(top / ROW_H) - 8);
+    const end = Math.min(items.length, Math.ceil((top + vh) / ROW_H) + 8);
+    const need = Math.max(0, end - start);
+    while(pool.length < need){
+      const el = document.createElement("div");
+      inner.appendChild(el);
+      pool.push(el);
+    }
+    for(let k=0;k<pool.length;k++){
+      const el = pool[k];
+      if(k < need){
+        const i = start + k;
+        el.style.transform = "translateY(" + (i*ROW_H) + "px)";
+        el.style.display = "";
+        render(items[i], el);
+      } else if(el.style.display !== "none"){
+        el.style.display = "none";
+      }
+    }
+    if(onNearBottom && vh && end >= items.length - 16) onNearBottom();
+  }
+  let raf = 0;
+  const schedule = ()=>{ if(raf) return; raf = requestAnimationFrame(()=>{ raf = 0; draw(); }); };
+  scroller.addEventListener("scroll", schedule);
+  window.addEventListener("resize", schedule);
+  return {
+    setItems(a){ items = a; draw(); },
+    redraw: draw,
+    atTop(){ return scroller.scrollTop <= 4; },
+    toTop(){ scroller.scrollTop = 0; draw(); },
+  };
+}
+
+// ==== request log ==========================================================
+let rqAll = [];             // loaded records, newest-first
+const rqBySeq = new Map();  // seq → record (dedup + drawer/attach lookup)
+let rqOldest = null;        // smallest seq pulled from history (paging cursor)
+let rqDone = false, rqLoading = false;
+let rqQuery = "";
+let rqPending = [];         // live rows buffered while scrolled away from top
+
+function rqHay(rec){
+  const st0 = rec.kind==="tunnel" ? "open" : rec.kind==="failed" ? "err error failed" : "blk blocked";
+  return [rec.method, rec.status===0 ? st0 : rec.status,
+    rec.type, rec.url, rec.blocked_by, rec.scriptlets, rec.ech ? "ech" : ""].join(" ").toLowerCase();
+}
+function rqView(){ return rqQuery ? rqAll.filter(r => rqHay(r).includes(rqQuery)) : rqAll; }
+function rqSync(){
+  rqVL.setItems(rqView());
+  $("rq-empty").style.display = rqAll.length ? "none" : "";
+}
+function rqPaused(){ return !rqVL.atTop(); }
+function rqChip(){
+  const c = $("rq-new");
+  c.style.display = rqPending.length ? "" : "none";
+  c.className = "chip new";
+  c.textContent = rqPending.length + " new ↑";
+}
+// Add a record unless its seq is already known. `end` appends (older history);
+// otherwise it prepends (newer, live).
+function rqAdd(rec, end){
+  if(rqBySeq.has(rec.seq)) return false;
+  rqBySeq.set(rec.seq, rec);
+  if(end) rqAll.push(rec); else rqAll.unshift(rec);
+  return true;
+}
+
+// Build one row's inner HTML. All dynamic text is escaped; the block button is
+// handled by delegation (rows are recycled, so no per-row listeners).
+function rqRowHTML(rec){
+  const isTunnel = rec.kind === "tunnel", isFailed = rec.kind === "failed";
+  let st, col, tint;
+  if(rec.status!==0){
+    st = rec.status; col = statusColor(rec.status);
+    tint = rec.status<300 ? "st-ok" : rec.status<400 ? "st-info" : rec.status<500 ? "st-warn" : "st-err";
+  }
+  else if(isTunnel){ st = "OPEN"; col = "var(--muted)"; tint = ""; }
+  else if(isFailed){ st = "ERR"; col = "var(--error)"; tint = "st-err"; }
+  else { st = "BLK"; col = "var(--error)"; tint = "st-err"; }
+
+  let meta = "";
+  if(rec.ech){
+    meta += `<span class="ech-tag" title="SNI hidden — Encrypted Client Hello negotiated using the ECH config from DNS">[ECH]</span>`;
+  }
+  if(rec.blocked_by){
+    // "rule — list"; excluded tunnels and upstream failures reuse the pill+chip.
+    let rule, list;
+    const exc = rec.blocked_by.match(/^excluded:\s*(.*)$/);
+    if(isFailed){ list = "error"; rule = rec.blocked_by; }
+    else if(exc){ list = "excluded"; rule = exc[1]; }
+    else {
+      const sep = rec.blocked_by.lastIndexOf(" — ");
+      rule = sep < 0 ? rec.blocked_by : rec.blocked_by.slice(0, sep);
+      list = sep < 0 ? "" : rec.blocked_by.slice(sep + 3);
+      if(list === "custom") list = "custom filters";
+    }
+    rule = rule.split("\n")[0];
+    if(rule.length > 120) rule = rule.slice(0, 120) + "…";
+    meta += `<span class="bb">`+
+      (list ? `<span class="bb-list">${esc(list)}:</span>` : ``)+
+      `<span class="bb-rule">${esc(rule)}</span></span>`;
+  }
+  if(rec.scriptlets){
+    const names = rec.scriptlets.split(", ").filter(Boolean);
+    meta += `<span class="sj"><span>scriptlets</span><span class="sj-name">${esc(names[0])}</span>`+
+      (names.length > 1 ? `<span class="hint">+${names.length-1} more</span>` : ``)+`</span>`;
+  }
+  let host = "";
+  try { host = new URL(rec.url).hostname; } catch(e){}
+  const blocked = rec.kind === "blocked";
+  const act = host
+    ? `<button class="ghost mini rq-block" data-host="${esc(host)}" data-blocked="${blocked?1:0}" `+
+      `title="${blocked?"@@||":"||"}${esc(host)}^ → custom list">${blocked?"unblock":"block"}</button>`
+    : "";
+
+  return `<span class="ts">${fmtTime(rec.ts_ms)}</span>`+
+    `<span class="xn" style="color:var(--muted)">${esc(rec.method)}</span>`+
+    `<span class="xn" style="color:${col}">${st}</span>`+
+    `<span class="hint">${esc(rec.type)}</span>`+
+    `<span class="urlcell"><span class="u">${esc(stripQuery(rec.url))}</span>${meta}</span>`+
+    `<span class="act">${act}</span>`;
+}
+function rqRender(rec, el){
+  // Row background tint mirrors the status class computed in rqRowHTML.
+  const s = rec.status;
+  let tint = "";
+  if(s!==0) tint = s<300?"st-ok":s<400?"st-info":s<500?"st-warn":"st-err";
+  else if(rec.kind!=="tunnel") tint = "st-err";
+  el.className = "vrow click rqcols" + (tint ? " " + tint : "");
+  el.dataset.seq = rec.seq;
+  el.innerHTML = rqRowHTML(rec);
+}
+
+const rqVL = makeVirtualList($("rq-log"), rqRender, ()=>rqLoadOlder());
+
+async function rqLoadNewest(){
+  try {
+    const r = await fetch("/api/requests?limit=" + PAGE);
+    const d = await r.json();
+    for(const rec of d.records){
+      if(rqAdd(rec, true)) rqOldest = rqOldest==null ? rec.seq : Math.min(rqOldest, rec.seq);
+    }
+    rqDone = d.done;
+    rqSync();
+  } catch(e){}
+}
+async function rqLoadOlder(){
+  if(rqLoading || rqDone || rqOldest==null) return;
+  rqLoading = true;
+  try {
+    const r = await fetch("/api/requests?limit=" + PAGE + "&before=" + rqOldest);
+    const d = await r.json();
+    let progressed = false;
+    for(const rec of d.records){
+      if(rqAdd(rec, true)){ progressed = true; rqOldest = Math.min(rqOldest, rec.seq); }
+    }
+    rqDone = d.done || !progressed;
+    rqSync();
+  } catch(e){} finally { rqLoading = false; }
+}
+
+// ---- live frames ----------------------------------------------------------
+function onLiveRequest(rec){
+  if(rqBySeq.has(rec.seq)) return;
+  if(rqPaused()){
+    rqPending.push(rec);
+    if(rqPending.length > 1000) rqPending.splice(0, rqPending.length - 1000);
+    rqChip();
+  } else {
+    rqAdd(rec, false);
+    rqSync();
+  }
+}
+function onLiveAttach(a){
+  const rec = rqBySeq.get(a.seq);
+  if(!rec) return;
+  rec[a.slot] = a.text;
+  rec._detail = true; // captures now live in memory; no fetch needed
+  if(rqDrawerSeq === a.seq) renderDrawer(rec);
+  rqVL.redraw(); // a scriptlet/ech annotation may have landed on a visible row
+}
+function rqFlush(){
+  for(const rec of rqPending) rqAdd(rec, false);
+  rqPending = [];
+  rqSync(); rqChip(); rqVL.toTop();
+}
+
+// ---- detail drawer (fetched on demand) ------------------------------------
+let rqDrawerSeq = null;
+function hasCaptures(rec){
+  return !!(rec.req_headers || rec.resp_headers || rec.req_body || rec.resp_body || rec.scriptlets);
+}
+function openDrawer(seq){
+  const rec = rqBySeq.get(seq);
+  if(!rec) return;
+  rqDrawerSeq = seq;
+  $("drawer").classList.add("open");
+  $("drawer-back").classList.add("open");
+  if(rec._detail || hasCaptures(rec)){ renderDrawer(rec); return; }
+  renderDrawer(rec, true); // spinner while the capture is fetched
+  fetch("/api/request?seq=" + seq).then(r=>r.json()).then(d=>{
+    for(const k of ["req_headers","resp_headers","req_body","resp_body","scriptlets"])
+      if(d[k]) rec[k] = d[k];
+    rec._detail = true;
+    if(rqDrawerSeq === seq) renderDrawer(rec);
+  }).catch(()=>{ if(rqDrawerSeq === seq) renderDrawer(rec); });
+}
+function closeDrawer(){
+  rqDrawerSeq = null;
+  $("drawer").classList.remove("open");
+  $("drawer-back").classList.remove("open");
+}
+$("drawer-x").addEventListener("click", closeDrawer);
+$("drawer-back").addEventListener("click", closeDrawer);
+document.addEventListener("keydown", e=>{ if(e.key === "Escape") closeDrawer(); });
+
+// Render the network-tab detail: general info, then request | response
+// (headers + body) side by side. `loading` shows placeholders until the
+// captured bodies arrive.
+function renderDrawer(d, loading){
+  const cell = $("drawer-body");
+  const st0 = d.kind==="failed" ? "failed (dropped)" : d.blocked_by ? "blocked (dropped)" : "—";
+  const gen = [["URL", d.url], ["Method", d.method], ["Status", d.status || st0],
+    ["Type", d.type], ["Time", fmtTime(d.ts_ms)]];
+  if(d.blocked_by) gen.push([d.kind==="tunnel" ? "Tunnel" : d.kind==="failed" ? "Error" : "Blocked by", d.blocked_by]);
+  if(d.scriptlets) gen.push(["Scriptlets", d.scriptlets]);
+  if(d.ech) gen.push(["SNI", "hidden — Encrypted Client Hello (ECH config from DNS)"]);
+
+  cell.innerHTML =
+    `<div class="rq-detail"><div class="gen"></div>`+
+    `<div class="cols">`+
+      `<div><div class="lbl">Request headers</div><pre class="qh"></pre>`+
+           `<div class="lbl">Request body</div><pre class="qb"></pre></div>`+
+      `<div><div class="lbl">Response headers</div><pre class="sh"></pre>`+
+           `<div class="lbl">Response body</div><pre class="sb"></pre></div>`+
+    `</div></div>`;
+  const g = cell.querySelector(".gen");
+  for(const [l,v] of gen){
+    const gl = document.createElement("span"); gl.className = "gl"; gl.textContent = l;
+    const gv = document.createElement("span"); gv.className = "gv"; gv.textContent = v;
+    if(l === "Status" && d.status) gv.style.color = statusColor(d.status);
+    if(l === "Blocked by") gv.style.color = "var(--blocked)";
+    if(l === "Error") gv.style.color = "var(--error)";
+    if(l === "Tunnel" && v.startsWith("excluded:")){
+      gv.textContent = "";
+      const pre = document.createElement("span");
+      pre.textContent = "excluded:"; pre.style.color = "var(--blocked)";
+      gv.append(pre, document.createTextNode(v.slice(9)));
+    }
+    g.append(gl, gv);
+  }
+  const none = d.kind==="failed" ? "(no response — upstream failed)"
+    : d.blocked_by ? "(request dropped — never sent upstream)" : "(none)";
+  const wait = loading ? "loading…" : null;
+  cell.querySelector(".qh").textContent = d.req_headers || (wait || "(none)");
+  cell.querySelector(".qb").textContent = d.req_body || (wait || "(empty)");
+  cell.querySelector(".sh").textContent = d.resp_headers || (wait || none);
+  cell.querySelector(".sb").textContent = d.resp_body || (wait || (d.blocked_by ? none : "(empty)"));
+}
+
+// Row clicks: the block button toggles a filter; anywhere else opens the drawer.
+$("rq-log").addEventListener("click", e=>{
+  const btn = e.target.closest(".rq-block");
+  if(btn){ e.stopPropagation(); rqBlockClick(btn); return; }
+  const row = e.target.closest(".vrow");
+  if(row && row.dataset.seq) openDrawer(+row.dataset.seq);
+});
+async function rqBlockClick(btn){
+  const host = btn.dataset.host, blocked = btn.dataset.blocked === "1";
+  btn.disabled = true; btn.textContent = "…";
+  try {
+    const r = await fetch("/api/blocklists", {method:"POST",
+      headers:{"content-type":"application/json"},
+      body: JSON.stringify({name:"custom", rules:(blocked?"@@||":"||")+host+"^"})});
+    if(!r.ok) throw new Error((await r.json()).error || r.status);
+    btn.textContent = "✓";
+    loadCustom();
+  } catch(err){ btn.textContent = "failed"; btn.title = err.message; btn.disabled = false; }
+}
+
+$("rq-new").addEventListener("click", rqFlush);
+$("rq-search").addEventListener("input", e=>{
+  $("rq-sx").style.display = e.target.value ? "" : "none";
+  rqQuery = e.target.value.trim().toLowerCase();
+  rqSync();
+});
+$("rq-sx").addEventListener("click", ()=>{
+  $("rq-search").value = ""; $("rq-sx").style.display = "none";
+  rqQuery = ""; rqSync();
+});
+$("rq-reload").addEventListener("click", ()=>{
+  rqAll = []; rqBySeq.clear(); rqOldest = null; rqDone = false; rqPending = [];
+  rqChip(); rqSync(); rqVL.toTop(); rqLoadNewest();
+});
+
+// ==== DNS query log ========================================================
+let dqAll = [];
+const dqBySeq = new Map();
+let dqOldest = null;
+let dqDone = false, dqLoading = false;
+let dqQuery = "", dqPending = [];
+
+function dqHay(d){
+  return [d.domain, d.qtype, d.outcome, d.rcode, d.answers, d.upstream, d.blocked_by,
+          d.ech ? "ech" : "", d.proxy ? "proxy" : ""].join(" ").toLowerCase();
+}
+function dqView(){ return dqQuery ? dqAll.filter(d => dqHay(d).includes(dqQuery)) : dqAll; }
+function dqSync(){
+  dqVL.setItems(dqView());
+  $("dq-empty").style.display = dqAll.length ? "none" : "";
+}
+function dqPaused(){ return !dqVL.atTop(); }
+function dqChip(){
+  const c = $("dq-new");
+  c.style.display = dqPending.length ? "" : "none";
+  c.className = "chip new";
+  c.textContent = dqPending.length + " new ↑";
+}
+function dqAdd(d, end){
+  if(dqBySeq.has(d.seq)) return false;
+  dqBySeq.set(d.seq, d);
+  if(end) dqAll.push(d); else dqAll.unshift(d);
+  return true;
+}
+function dqRowHTML(d){
   const pill = d.outcome==="blocked" ? "blocked" : d.outcome==="error" ? "error"
              : (d.outcome==="cached" || d.outcome==="rewritten") ? "info" : "ok";
-  const tint = d.outcome==="blocked" ? "st-warn" : d.outcome==="error" ? "st-err" : "";
-  const tr = document.createElement("tr");
-  tr.className = "rq " + tint; // reuse row styling; DNS rows don't expand
-  tr.style.cursor = "default";
-  tr.innerHTML =
-    `<td class="ts">${fmtTime(d.ts_ms)}</td>`+
-    `<td><span class="k ${pill}">${esc(d.outcome)}</span></td>`+
-    `<td class="msg ans hint"></td>`+
-    `<td class="hint">${esc(d.qtype)}</td>`+
-    `<td class="msg domcell"><span class="dom"></span></td>`+
-    `<td class="hint ups"></td>`+
-    `<td class="ts">${d.elapsed_ms}</td>`+
-    `<td class="act"></td>`;
-  tr.querySelector(".dom").textContent = d.domain;
-  if(d.proxy){
-    // The proxy's own lookup (egress resolution / ECH config), not a client's.
-    const src = document.createElement("span");
-    src.className = "k info src";
-    src.textContent = "proxy";
-    src.title = "the proxy's own lookup (egress resolution / ECH config), not a client query";
-    tr.querySelector(".domcell").appendChild(src);
-  }
-  // Answer column: the RR summary; errors show their cause, blocks their rule.
-  tr.querySelector(".ans").textContent =
-    d.outcome==="error" ? d.rcode : (d.answers || d.rcode);
-  tr.querySelector(".ups").textContent = d.upstream || (d.outcome==="cached" ? "cache" : "");
-  if(d.ech){
-    // The answer delivered an ECH config — tag the source (upstream or cache).
-    const ech = document.createElement("span");
-    ech.className = "k ok ech";
-    ech.textContent = "ECH";
-    tr.querySelector(".ups").appendChild(ech);
-  }
+  const ans = d.outcome==="error" ? d.rcode : (d.answers || d.rcode);
+  const ups = d.upstream || (d.outcome==="cached" ? "cache" : "");
+  let dom = `<span class="dom">${esc(d.domain)}</span>`;
+  if(d.proxy) dom += `<span class="k info src" title="the proxy's own lookup (egress resolution / ECH config), not a client query">proxy</span>`;
   if(d.blocked_by){
-    // Same pill+chip rendering as the Requests tab: "rule — list" splits
-    // into a source-list pill and a monospace rule chip.
     const sep = d.blocked_by.lastIndexOf(" — ");
     let rule = sep < 0 ? d.blocked_by : d.blocked_by.slice(0, sep);
     let list = sep < 0 ? "" : d.blocked_by.slice(sep + 3);
     if(list === "custom") list = "custom filters";
     rule = rule.split("\n")[0];
-    if(rule.length > 90) rule = rule.slice(0, 90) + "…";
-    const bb = document.createElement("div");
-    bb.className = "bb";
-    bb.innerHTML = (list ? `<span class="bb-list"></span>` : ``)+
-      `<span class="bb-rule"></span>`;
-    if(list) bb.querySelector(".bb-list").textContent = list + ":";
-    bb.querySelector(".bb-rule").textContent = rule;
-    tr.querySelector(".domcell").appendChild(bb);
+    if(rule.length > 120) rule = rule.slice(0, 120) + "…";
+    dom += `<span class="bb">`+(list?`<span class="bb-list">${esc(list)}:</span>`:``)+
+      `<span class="bb-rule">${esc(rule)}</span></span>`;
   }
-  if(d.domain) tr.querySelector(".act").appendChild(ruleButton(d.domain, d.outcome==="blocked"));
-  tr._hay = dqHay(d);
-  if(!dqShow(tr)) tr.style.display = "none";
-  return tr;
+  const act = d.domain
+    ? `<button class="ghost mini dq-block" data-domain="${esc(d.domain)}" data-blocked="${d.outcome==="blocked"?1:0}" `+
+      `title="${d.outcome==="blocked"?"@@||":"||"}${esc(d.domain)}^ → custom list">${d.outcome==="blocked"?"unblock":"block"}</button>`
+    : "";
+  const echTag = d.ech ? `<span class="k ok ech">ECH</span>` : "";
+  return `<span class="ts">${fmtTime(d.ts_ms)}</span>`+
+    `<span><span class="k ${pill}">${esc(d.outcome)}</span></span>`+
+    `<span class="hint">${esc(ans)}</span>`+
+    `<span class="hint">${esc(d.qtype)}</span>`+
+    `<span class="domcell">${dom}</span>`+
+    `<span class="hint">${esc(ups)}${echTag}</span>`+
+    `<span class="ts">${d.elapsed_ms}</span>`+
+    `<span class="act">${act}</span>`;
 }
+function dqRender(d, el){
+  const tint = d.outcome==="blocked" ? "st-warn" : d.outcome==="error" ? "st-err" : "";
+  el.className = "vrow dnscols" + (tint ? " " + tint : "");
+  el.innerHTML = dqRowHTML(d);
+}
+const dqVL = makeVirtualList($("dq-log"), dqRender, ()=>dqLoadOlder());
 
+async function dqLoadNewest(){
+  try {
+    const r = await fetch("/api/queries?limit=" + PAGE);
+    const d = await r.json();
+    for(const rec of d.records){
+      if(dqAdd(rec, true)) dqOldest = dqOldest==null ? rec.seq : Math.min(dqOldest, rec.seq);
+    }
+    dqDone = d.done;
+    dqSync();
+  } catch(e){}
+}
+async function dqLoadOlder(){
+  if(dqLoading || dqDone || dqOldest==null) return;
+  dqLoading = true;
+  try {
+    const r = await fetch("/api/queries?limit=" + PAGE + "&before=" + dqOldest);
+    const d = await r.json();
+    let progressed = false;
+    for(const rec of d.records){
+      if(dqAdd(rec, true)){ progressed = true; dqOldest = Math.min(dqOldest, rec.seq); }
+    }
+    dqDone = d.done || !progressed;
+    dqSync();
+  } catch(e){} finally { dqLoading = false; }
+}
+function onLiveDns(d){
+  if(d.seq != null && dqBySeq.has(d.seq)) return;
+  if(dqPaused()){
+    dqPending.push(d);
+    if(dqPending.length > 1000) dqPending.splice(0, dqPending.length - 1000);
+    dqChip();
+  } else {
+    dqAdd(d, false);
+    dqSync();
+  }
+}
 function dqFlush(){
-  const tb = $("dnslog");
-  for(const d of dqPending) tb.insertBefore(dqRow(d), tb.firstChild);
+  for(const d of dqPending) dqAdd(d, false);
   dqPending = [];
-  while(tb.children.length > DQ_MAX) tb.removeChild(tb.lastChild);
-  $("dq-empty").style.display = tb.children.length ? "none" : "";
-  dqChip();
+  dqSync(); dqChip(); dqVL.toTop();
 }
 
-$("dq-new").addEventListener("click", ()=>{ dqFlush(); $("dq-log").scrollTop = 0; });
-$("dq-log").addEventListener("scroll", ()=>{ if(!dqPaused() && dqPending.length) dqFlush(); });
+$("dq-log").addEventListener("click", async e=>{
+  const btn = e.target.closest(".dq-block");
+  if(!btn) return;
+  const domain = btn.dataset.domain, blocked = btn.dataset.blocked === "1";
+  btn.disabled = true; btn.textContent = "…";
+  try {
+    const r = await fetch("/api/blocklists", {method:"POST",
+      headers:{"content-type":"application/json"},
+      body: JSON.stringify({name:"custom", rules:(blocked?"@@||":"||")+domain+"^"})});
+    if(!r.ok) throw new Error((await r.json()).error || r.status);
+    btn.textContent = "✓";
+    loadCustom();
+  } catch(err){ btn.textContent = "failed"; btn.title = err.message; btn.disabled = false; }
+});
+$("dq-new").addEventListener("click", dqFlush);
 $("dq-search").addEventListener("input", e=>{
   $("dq-sx").style.display = e.target.value ? "" : "none";
   dqQuery = e.target.value.trim().toLowerCase();
-  dqRefilter();
+  dqSync();
 });
 $("dq-sx").addEventListener("click", ()=>{
   $("dq-search").value = ""; $("dq-sx").style.display = "none"; dqQuery = "";
-  dqRefilter();
+  dqSync();
 });
-$("dq-wipe").addEventListener("click", ()=>{
-  if(!confirm("Clear the DNS query log?")) return;
-  dqPending = []; $("dnslog").innerHTML = ""; $("dq-empty").style.display = ""; dqChip();
+$("dq-reload").addEventListener("click", ()=>{
+  dqAll = []; dqBySeq.clear(); dqOldest = null; dqDone = false; dqPending = [];
+  dqChip(); dqSync(); dqVL.toTop(); dqLoadNewest();
 });
 
 async function refreshDns(){
@@ -1894,26 +2035,9 @@ $("sl-update").addEventListener("click", async ()=>{
 const es = new EventSource("/api/stream");
 es.addEventListener("stats", e => renderStats(JSON.parse(e.data)));
 es.addEventListener("event", e => handleEvent(JSON.parse(e.data)));
-es.addEventListener("request", e => {
-  const rec = JSON.parse(e.data);
-  recs.set(rec.seq, rec);
-  rqPending.push(rec);
-  // The pending buffer honors the same cap, so a row left expanded for hours
-  // doesn't grow it unbounded — oldest pending records fall off first.
-  if(rqPending.length > RQ_MAX){
-    for(const d of rqPending.splice(0, rqPending.length - RQ_MAX)) recs.delete(d.seq);
-  }
-  if(rqPaused()) updateNewChip(); else flushRequests();
-});
-es.addEventListener("attach", e => {
-  const a = JSON.parse(e.data);
-  applyAttach(a.seq, a.slot, a.text);
-});
-es.addEventListener("dns", e => {
-  dqPending.push(JSON.parse(e.data));
-  if(dqPending.length > DQ_MAX) dqPending.splice(0, dqPending.length - DQ_MAX);
-  if(dqPaused()) dqChip(); else dqFlush();
-});
+es.addEventListener("request", e => onLiveRequest(JSON.parse(e.data)));
+es.addEventListener("attach", e => onLiveAttach(JSON.parse(e.data)));
+es.addEventListener("dns", e => onLiveDns(JSON.parse(e.data)));
 es.onerror = () => {
   $("hdr-meta").textContent = "proxy unreachable";
   $("alive").style.color = "var(--error)";
@@ -1921,6 +2045,8 @@ es.onerror = () => {
 
 refreshBlocklists(); refreshExclusions(); loadCustom(); refreshScriptlets(); refreshDns();
 refreshRewrites(); loadDnsCfg(); refreshServer(); loadErrors(); loadStatsCfg();
+// Seed the persisted request/DNS logs; live SSE frames prepend from here on.
+rqLoadNewest(); dqLoadNewest();
 </script>
 </body>
 </html>
