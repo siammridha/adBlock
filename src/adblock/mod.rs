@@ -104,7 +104,7 @@ impl BlockAttribution {
 }
 
 pub fn from_config(cfg: &AdblockConfig) -> Result<(Arc<AdBlocker>, Arc<ListCuration>)> {
-    with_store(cfg, Arc::new(DiskStore::new(cfg.lists_dir.clone())))
+    with_store(cfg, Arc::new(DiskStore::new(cfg.blocklists_dir())))
 }
 
 pub fn with_store(
@@ -336,7 +336,7 @@ mod tests {
         AdblockConfig {
             enabled: true,
             custom_rules: rules.iter().map(|s| s.to_string()).collect(),
-            lists_dir: PathBuf::from("/nonexistent-for-tests"),
+            data_dir: PathBuf::from("/nonexistent-for-tests"),
             auto_update_hours: 0,
             inject_scriptlets: false,
             scriptlet_resources: PathBuf::new(),

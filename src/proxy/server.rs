@@ -561,7 +561,7 @@ mod tests {
         let cfg = AdblockConfig {
             enabled: true,
             custom_rules: rules.iter().map(|s| s.to_string()).collect(),
-            lists_dir: std::path::PathBuf::from("/nonexistent-for-tests"),
+            data_dir: std::path::PathBuf::from("/nonexistent-for-tests"),
             auto_update_hours: 0,
             inject_scriptlets: false,
             scriptlet_resources: std::path::PathBuf::new(),
@@ -741,7 +741,7 @@ mod tests {
         let cfg = AdblockConfig {
             enabled: true,
             custom_rules: vec!["example.com##+js(sptest)".into()],
-            lists_dir: std::path::PathBuf::from("/nonexistent-for-tests"),
+            data_dir: std::path::PathBuf::from("/nonexistent-for-tests"),
             auto_update_hours: 0,
             inject_scriptlets: true,
             scriptlet_resources: res_path,

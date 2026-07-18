@@ -144,7 +144,7 @@ mod tests {
         let cfg = AdblockConfig {
             enabled: true,
             custom_rules: Vec::new(),
-            lists_dir: std::path::PathBuf::from("/nonexistent-for-tests"),
+            data_dir: std::path::PathBuf::from("/nonexistent-for-tests"),
             auto_update_hours: 0,
             inject_scriptlets: false,
             scriptlet_resources: std::path::PathBuf::new(),

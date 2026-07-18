@@ -4,6 +4,7 @@ config.toml
 ca-cert.pem
 ca-key.pem
 lists/
+data/
 models/
 .DS_Store
 .claude/

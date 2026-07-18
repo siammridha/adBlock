@@ -215,7 +215,7 @@ snippets invoked by `##+js(name, args…)` filter rules (e.g.
 it needs code running in the page.
 
 It's **on by default** (`inject_scriptlets = true`, `scriptlet_resources =
-"lists/scriptlets.json"`). Because it strips Content-Security-Policy site-wide,
+"data/scriptlets/scriptlets.json"`). Because it strips Content-Security-Policy site-wide,
 you can opt out in `config.toml`:
 
 ```toml
@@ -224,7 +224,7 @@ inject_scriptlets = false
 ```
 
 `scriptlet_resources` is a JSON array of `adblock::resources::Resource`
-objects (the adblock-rust format). A pre-generated `lists/scriptlets.json` ships
+objects (the adblock-rust format). A pre-generated `data/scriptlets/scriptlets.json` ships
 in the repo (and the Docker image), so scriptlets work out of the box.
 
 ### Refreshing the library
@@ -240,11 +240,11 @@ web-accessible stubs. Two ways to run it:
 
   ```bash
   git clone --depth 1 https://github.com/gorhill/uBlock.git /tmp/ubo
-  node tools/convert-ubo-scriptlets.mjs /tmp/ubo lists/scriptlets.json
+  node tools/convert-ubo-scriptlets.mjs /tmp/ubo data/scriptlets/scriptlets.json
   ```
 
 - **At runtime**, from the dashboard's **Scriptlets → "Update from uBO"** button,
-  or automatically by the hourly auto-updater (when `lists/scriptlets.json` is
+  or automatically by the hourly auto-updater (when `data/scriptlets/scriptlets.json` is
   older than `adblock.auto_update_hours`). The proxy downloads the uBO tarball
   through its own HTTP client, extracts it with `tar`, and runs the converter.
   That last step needs a JS runtime: the proxy uses **[LLRT](https://github.com/awslabs/llrt)**

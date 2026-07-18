@@ -18,12 +18,14 @@ use crate::adblock::{AdBlocker, ListCuration};
 use crate::dns::DnsService;
 use crate::net::egress::EgressPolicy;
 use crate::support::error::{Error, Result};
+use crate::proxy::certs::CertStore;
 use crate::proxy::exclusions::ExclusionStore;
 use crate::adblock::maintenance::BlocklistFetcher;
 use crate::web::runtime::Runtime;
 use crate::stats::SharedState;
 
 mod blocklists;
+mod certs;
 mod dns;
 mod exclusions;
 mod logs;
@@ -66,6 +68,7 @@ pub struct Admin {
     fetcher: Arc<BlocklistFetcher>,
     runtime: Arc<Runtime>,
     egress: Arc<EgressPolicy>,
+    certs: Arc<CertStore>,
 }
 
 impl Admin {
@@ -79,8 +82,19 @@ impl Admin {
         fetcher: Arc<BlocklistFetcher>,
         runtime: Arc<Runtime>,
         egress: Arc<EgressPolicy>,
+        certs: Arc<CertStore>,
     ) -> Arc<Self> {
-        Arc::new(Self { state, adblock, curation, exclusions, updater, fetcher, runtime, egress })
+        Arc::new(Self {
+            state,
+            adblock,
+            curation,
+            exclusions,
+            updater,
+            fetcher,
+            runtime,
+            egress,
+            certs,
+        })
     }
 
     pub async fn serve(self: Arc<Self>, addr: SocketAddr) -> Result<()> {
@@ -143,6 +157,8 @@ impl Admin {
             (&Method::GET, "/api/dns/rewrites") => {
                 self.with_dns(|dns| json_ok(rewrites_json(&dns)))
             }
+            (&Method::GET, "/api/certs") => json_ok(certs::certs_json(&self.certs)),
+            (&Method::GET, "/api/cert") => certs::cert_download(&self.certs, &query),
             (&Method::GET, "/ca-cert.pem") => meta::ca_cert(&self.state),
             (&Method::POST, _) => {
                 let body = match req.into_body().collect().await {
@@ -167,6 +183,7 @@ impl Admin {
             "/api/errors/clear" => meta::clear_errors(&self.state),
             "/api/server/config" => edit_server_config(&self.runtime, body).await,
             "/api/proxy/config" => edit_proxy_config(&self.state, &self.egress, body),
+            "/api/certs" => certs::edit_certs(&self.certs, &self.state, body),
             "/api/blocklists" => self.add_blocklist(body).await,
             "/api/exclusions" => edit_exclusions(&self.state, &self.exclusions, body),
             "/api/check" => check_rule(&self.adblock, body),
@@ -371,7 +388,7 @@ mod tests {
         let cfg = AdblockConfig {
             enabled: true,
             custom_rules: rules.iter().map(|s| s.to_string()).collect(),
-            lists_dir: std::path::PathBuf::from("/nonexistent-for-tests"),
+            data_dir: std::path::PathBuf::from("/nonexistent-for-tests"),
             auto_update_hours: 0,
             inject_scriptlets: false,
             scriptlet_resources: std::path::PathBuf::new(),
@@ -413,7 +430,13 @@ mod tests {
             dns_slot,
         )
         .unwrap();
-        Admin::new(state, adblock, curation, exclusions, updater, fetcher, runtime, egress)
+        let certs = Arc::new(CertStore::load(
+            std::path::PathBuf::from("/nonexistent-for-tests/certs"),
+            dns_dir.join("active-ca.json"),
+            std::path::PathBuf::from("/nonexistent-for-tests/ca-cert.pem"),
+            std::path::PathBuf::from("/nonexistent-for-tests/ca-key.pem"),
+        ));
+        Admin::new(state, adblock, curation, exclusions, updater, fetcher, runtime, egress, certs)
     }
 
     fn admin(rules: &[&str], downloader: Arc<dyn Downloader>) -> Arc<Admin> {

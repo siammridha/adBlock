@@ -295,6 +295,7 @@
     <button class="tab" data-pane="pane-scriptlets"><span class="ticon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg></span>Scriptlets<span class="tbadge" id="sl-badge">0</span></button>
     <button class="tab" data-pane="pane-tester"><span class="ticon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2v7.5L4.7 20.6a1 1 0 0 0 .9 1.4h12.8a1 1 0 0 0 .9-1.4L14 9.5V2"/><path d="M8.5 2h7"/><path d="M7 16h10"/></svg></span>Rule tester</button>
     <button class="tab" data-pane="pane-setup"><span class="ticon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></span>Setup</button>
+    <button class="tab" data-pane="pane-certs"><span class="ticon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg></span>Certificates</button>
   </nav>
 
   <section class="panel tabpane" id="pane-overview">
@@ -717,12 +718,63 @@
     </div>
     <p class="hint">The statistics window lives in memory and restarts with the process.
       Request and DNS query records append to <code>request-log.jsonl</code> /
-      <code>query-log.jsonl</code> next to the blocklists; when a file gets older than the
+      <code>query-log.jsonl</code> under <code>data/logs/</code>; when a file gets older than the
       rotation period it is moved to its <code>.old</code> sibling (replacing the previous
       one), so records are kept for one to two rotation periods.</p>
     <div class="actions">
       <button id="st-save">Save statistics settings</button>
       <span class="hint" id="st-status"></span>
+    </div>
+  </section>
+
+  <section class="tabpane" id="pane-certs">
+    <div class="panel">
+      <h2>Signing certificate authority</h2>
+      <p class="hint">The proxy signs a fresh leaf certificate for every HTTPS host it inspects,
+        using the active CA below. Install the active CA's certificate in your clients' trust store
+        (download link on each row) so those leaves are trusted. Switching the active CA takes effect
+        on the <b>next restart</b> — the running proxy keeps using the CA it started with.</p>
+      <div class="log" style="margin-top:12px">
+        <table>
+          <thead><tr>
+            <th>Name</th><th>Subject</th><th style="width:150px">Expires</th>
+            <th style="width:90px">Status</th><th style="width:210px"></th>
+          </tr></thead>
+          <tbody id="certs-rows"></tbody>
+        </table>
+        <div class="empty" id="certs-empty" style="display:none">no certificates</div>
+      </div>
+      <span class="hint" id="certs-status"></span>
+    </div>
+
+    <div class="panel">
+      <h2>Add an existing CA</h2>
+      <p class="hint">Paste a CA <b>certificate and its private key</b> in PEM form. Both are required —
+        a signing CA cannot mint leaves without its key. The pair is validated before it is stored.</p>
+      <div style="display:flex;flex-direction:column;gap:10px;max-width:720px">
+        <input type="text" id="ca-add-name" placeholder="Name (letters, digits, dash, underscore, dot)" spellcheck="false">
+        <textarea id="ca-add-cert" rows="6" spellcheck="false" placeholder="-----BEGIN CERTIFICATE-----&#10;…&#10;-----END CERTIFICATE-----"></textarea>
+        <textarea id="ca-add-key" rows="6" spellcheck="false" placeholder="-----BEGIN PRIVATE KEY-----&#10;…&#10;-----END PRIVATE KEY-----"></textarea>
+      </div>
+      <div class="actions">
+        <button id="ca-add-btn">Add certificate</button>
+        <span class="hint" id="ca-add-status"></span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Generate a new root CA</h2>
+      <p class="hint">Create a fresh self-signed root CA and store it. The private key is generated
+        here and kept under <code>data/certs/</code>. After generating, download its certificate and
+        install it in your clients.</p>
+      <div style="display:flex;flex-direction:column;gap:10px;max-width:720px">
+        <input type="text" id="ca-gen-name" placeholder="Name (letters, digits, dash, underscore, dot)" spellcheck="false">
+        <input type="text" id="ca-gen-cn" placeholder="Common name (optional, e.g. My Proxy Root CA)" spellcheck="false">
+      </div>
+      <div class="actions">
+        <button id="ca-gen-btn">Generate root CA</button>
+        <span class="hint" id="ca-gen-status"></span>
+      </div>
     </div>
   </section>
 </main>
@@ -957,6 +1009,86 @@ $("eg-save").addEventListener("click", async ()=>{
   } catch(e){ el.textContent = "failed: " + e.message; }
 });
 
+// ---- certificates tab -----------------------------------------------------
+async function refreshCerts(){
+  const status = $("certs-status");
+  try {
+    const r = await fetch("/api/certs"); const d = await r.json();
+    if(d.error) throw new Error(d.error);
+    const rows = d.certs || [];
+    $("certs-empty").style.display = rows.length ? "none" : "";
+    $("certs-rows").innerHTML = rows.map(c=>{
+      const name = esc(c.name);
+      const label = c.source === "config" ? "config.toml" : name;
+      const badge = c.active
+        ? `<span class="chip" style="border-color:var(--ok,#3fb950);color:var(--ok,#3fb950)">active</span>`
+        : (c.expired ? `<span class="chip" style="border-color:var(--bad,#f85149);color:var(--bad,#f85149)">expired</span>` : "");
+      const activateBtn = c.active
+        ? `<button class="ghost mini" disabled>active</button>`
+        : `<button class="ghost mini ca-act" data-name="${name}">activate</button>`;
+      const dl = `<a class="ghost mini" href="/api/cert?name=${encodeURIComponent(c.name)}" download style="text-decoration:none">⬇ cert</a>`;
+      const del = c.source === "config"
+        ? ""
+        : ` <button class="ghost mini ca-del" data-name="${name}">del</button>`;
+      const expires = c.not_after ? esc(c.not_after) : "—";
+      return `<tr><td>${esc(label)}</td><td class="msg">${esc(c.subject)}</td>`+
+        `<td style="white-space:nowrap">${expires}</td>`+
+        `<td>${badge}</td>`+
+        `<td style="white-space:nowrap">${activateBtn} ${dl}${del}</td></tr>`;
+    }).join("");
+    for(const b of document.querySelectorAll(".ca-act"))
+      b.addEventListener("click", ()=>certAction({action:"activate", name:b.dataset.name},
+        "activating "+b.dataset.name+"…", status, true));
+    for(const b of document.querySelectorAll(".ca-del"))
+      b.addEventListener("click", ()=>{
+        if(!confirm("Delete stored CA \""+b.dataset.name+"\"?")) return;
+        certAction({action:"delete", name:b.dataset.name}, "deleting…", status, false);
+      });
+    status.textContent = "";
+  } catch(e){ status.textContent = "failed: " + e.message; }
+}
+
+async function certAction(body, busyMsg, statusEl, restartHint){
+  statusEl.textContent = busyMsg;
+  try {
+    const r = await fetch("/api/certs", {method:"POST",
+      headers:{"content-type":"application/json"}, body: JSON.stringify(body)});
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.error || r.status);
+    statusEl.textContent = restartHint ? "done ✓ — restart the proxy to apply" : "done ✓";
+    refreshCerts();
+    return d;
+  } catch(e){ statusEl.textContent = "failed: " + e.message; throw e; }
+}
+
+$("ca-add-btn").addEventListener("click", async ()=>{
+  const status = $("ca-add-status");
+  try {
+    await certAction({action:"add", name:$("ca-add-name").value,
+      cert:$("ca-add-cert").value, key:$("ca-add-key").value}, "validating + saving…", status, false);
+    $("ca-add-name").value = ""; $("ca-add-cert").value = ""; $("ca-add-key").value = "";
+  } catch(e){}
+});
+
+$("ca-gen-btn").addEventListener("click", async ()=>{
+  const status = $("ca-gen-status");
+  const name = $("ca-gen-name").value;
+  try {
+    const d = await certAction({action:"generate", name, common_name:$("ca-gen-cn").value},
+      "generating…", status, false);
+    $("ca-gen-name").value = ""; $("ca-gen-cn").value = "";
+    // Offer the new certificate for download right away.
+    if(d && d.cert){
+      const blob = new Blob([d.cert], {type:"application/x-pem-file"});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = name + ".pem"; a.click();
+      URL.revokeObjectURL(url);
+      status.textContent = "generated ✓ — certificate downloaded; activate it to use it (needs restart)";
+    }
+  } catch(e){}
+});
+
 $("dns-enabled").addEventListener("change", ()=>{ $("dns-listen").disabled = !$("dns-enabled").checked; });
 $("dns-svc-save").addEventListener("click", ()=>{
   const enabled = $("dns-enabled").checked;
@@ -1082,7 +1214,7 @@ const SECTIONS = {
   "sec-proxy":     ["pane-requests", "pane-errors", "pane-exclusions", "pane-proxycfg"],
   "sec-dns":       ["pane-dns", "pane-dnsrw", "pane-dnscfg"],
   "sec-adblock":   ["pane-custom", "pane-blocklists", "pane-scriptlets", "pane-tester"],
-  "sec-settings":  ["pane-setup"],
+  "sec-settings":  ["pane-setup", "pane-certs"],
 };
 function sectionOf(pane){
   for(const [s, ps] of Object.entries(SECTIONS)) if(ps.includes(pane)) return s;
@@ -1105,6 +1237,8 @@ function showTab(pane){
   if(["pane-proxycfg", "pane-dnscfg"].includes(pane)) refreshServer();
   // The proxy egress DNS/ECH policy toggles.
   if(pane === "pane-proxycfg") refreshProxyCfg();
+  // The managed CA list.
+  if(pane === "pane-certs") refreshCerts();
   // A virtual list draws nothing while its pane is hidden (zero height), so
   // redraw once it is shown. Deferred so the very first showTab() call — which
   // runs before the lists are constructed — still resolves them.

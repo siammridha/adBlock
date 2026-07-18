@@ -166,17 +166,24 @@ impl SharedState {
         self
     }
 
+    /// Wire persistence under a data root: rotating logs go to `<dir>/logs/`,
+    /// the stats settings file to `<dir>/settings/`. Both subfolders are created
+    /// up front so the log writer threads have somewhere to append.
     pub fn with_data_dir(mut self, dir: &std::path::Path) -> Self {
-        self = self.with_error_log(dir.join("error-log.jsonl"));
-        let store = OverrideStore::new(dir.join("stats-settings.json"));
+        let logs = dir.join("logs");
+        let settings = dir.join("settings");
+        let _ = std::fs::create_dir_all(&logs);
+        let _ = std::fs::create_dir_all(&settings);
+        self = self.with_error_log(logs.join("error-log.jsonl"));
+        let store = OverrideStore::new(settings.join("stats-settings.json"));
         let saved: StatsOverrides = store.load();
         let retention = saved.retention_hours.unwrap_or(DEFAULT_RETENTION_HOURS);
         let rotate = saved.log_rotate_hours.unwrap_or(DEFAULT_LOG_ROTATE_HOURS);
         self.history.set_retention_hours(retention);
         self.log_rotate_hours = std::sync::atomic::AtomicU32::new(rotate);
-        self.request_log = Some(RotatingLog::open(dir.join("request-log.jsonl"), rotate));
-        self.request_detail = Some(RotatingLog::open(dir.join("request-detail.jsonl"), rotate));
-        self.query_log = Some(RotatingLog::open(dir.join("query-log.jsonl"), rotate));
+        self.request_log = Some(RotatingLog::open(logs.join("request-log.jsonl"), rotate));
+        self.request_detail = Some(RotatingLog::open(logs.join("request-detail.jsonl"), rotate));
+        self.query_log = Some(RotatingLog::open(logs.join("query-log.jsonl"), rotate));
         self.settings_store = Some(store);
         self
     }
@@ -864,13 +871,14 @@ mod tests {
             proxy: false,
         });
         s.flush_logs(); // writes land on a background thread; wait for them
-        let requests = std::fs::read_to_string(dir.join("request-log.jsonl")).unwrap();
+        let logs = dir.join("logs");
+        let requests = std::fs::read_to_string(logs.join("request-log.jsonl")).unwrap();
         assert!(requests.contains("https://kept.example/"), "log: {requests}");
         // The list line stays lean — the body lives only in the sidecar.
         assert!(!requests.contains("hello-body"), "list line must not carry the body");
-        let detail = std::fs::read_to_string(dir.join("request-detail.jsonl")).unwrap();
+        let detail = std::fs::read_to_string(logs.join("request-detail.jsonl")).unwrap();
         assert!(detail.contains("hello-body"), "detail: {detail}");
-        let queries = std::fs::read_to_string(dir.join("query-log.jsonl")).unwrap();
+        let queries = std::fs::read_to_string(logs.join("query-log.jsonl")).unwrap();
         assert!(queries.contains("kept-dns.example"), "log: {queries}");
 
         // The read accessors serve the persisted records back.
@@ -886,7 +894,7 @@ mod tests {
         assert_eq!(obs.records().len(), 1);
         s.flush_logs();
         assert_eq!(
-            std::fs::read_to_string(dir.join("request-log.jsonl")).unwrap().lines().count(),
+            std::fs::read_to_string(logs.join("request-log.jsonl")).unwrap().lines().count(),
             2
         );
     }

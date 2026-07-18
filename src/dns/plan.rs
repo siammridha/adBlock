@@ -74,7 +74,7 @@ mod tests {
         let cfg = AdblockConfig {
             enabled: true,
             custom_rules: rules.iter().map(|s| s.to_string()).collect(),
-            lists_dir: PathBuf::from("/nonexistent-for-tests"),
+            data_dir: PathBuf::from("/nonexistent-for-tests"),
             auto_update_hours: 0,
             inject_scriptlets: false,
             scriptlet_resources: PathBuf::new(),

@@ -11,7 +11,7 @@ RUN cargo build --release
 
 # ---- LLRT (scriptlet-refresh runtime) --------------------------------------
 # The admin UI's "Update from uBO" button and the hourly auto-updater
-# regenerate lists/scriptlets.json by running tools/convert-ubo-scriptlets.mjs,
+# regenerate data/scriptlets/scriptlets.json by running tools/convert-ubo-scriptlets.mjs,
 # which must *evaluate* uBO's ESM modules — a JS job. We ship AWS LLRT (a ~14 MB
 # QuickJS runtime) instead of full Node (~40-150 MB). Arch-matched to the build
 # platform; override the pin with --build-arg LLRT_VERSION=...
@@ -48,7 +48,10 @@ COPY --from=builder /build/target/release/proxy /usr/local/bin/proxy
 COPY --from=llrt /usr/local/bin/llrt /usr/local/bin/llrt
 COPY tools /app/tools
 COPY config.toml /app/config.toml
-COPY lists /app/lists
+# Ship the pre-generated scriptlet library so scriptlets work out of the box.
+# Everything else the proxy persists (blocklists, settings, logs, certs) is
+# created at runtime under /app/data. Blocklists download on first start.
+COPY lists/scriptlets.json /app/data/scriptlets/scriptlets.json
 
 # config.toml binds 127.0.0.1 for local dev; inside a container loopback is
 # unreachable from a published port or a reverse proxy. Rebind to 0.0.0.0.
@@ -57,8 +60,9 @@ RUN sed -i 's/127\.0\.0\.1:/0.0.0.0:/g' /app/config.toml
 # proxy + admin dashboard.
 EXPOSE 8080 8081
 
-# Persist across restarts: runtime-added blocklists.
-VOLUME ["/app/lists"]
+# Persist across restarts: blocklists, settings, logs, scriptlets, and managed
+# CAs all live under this one data root.
+VOLUME ["/app/data"]
 
 # --- MITM signing CA (REQUIRED) --------------------------------------------
 # The proxy signs per-host leaf certs with ca_cert/ca_key (config.toml →

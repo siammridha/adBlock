@@ -5,9 +5,9 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use rcgen::{Certificate, CertificateParams, DnType, KeyPair};
-#[cfg(test)]
-use rcgen::{BasicConstraints, IsCa, KeyUsagePurpose};
+use rcgen::{
+    BasicConstraints, Certificate, CertificateParams, DnType, IsCa, KeyPair, KeyUsagePurpose,
+};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::ServerConfig;
 use tokio::sync::Mutex;
@@ -113,6 +113,26 @@ impl CertAuthority {
             cache: Mutex::new(HashMap::new()),
         })
     }
+}
+
+/// Generate a fresh self-signed root CA, returning its `(cert_pem, key_pem)`.
+/// The cert can be handed to clients to install as trusted; the key is what
+/// lets this proxy sign per-host leaves, so it must be stored securely.
+pub fn generate_root_ca(common_name: &str) -> Result<(String, String)> {
+    let key = KeyPair::generate().map_err(|e| Error::Tls(format!("ca keygen: {e}")))?;
+    let mut params =
+        CertificateParams::new(vec![]).map_err(|e| Error::Tls(format!("ca params: {e}")))?;
+    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    params.distinguished_name.push(DnType::CommonName, common_name);
+    params.key_usages = vec![
+        KeyUsagePurpose::KeyCertSign,
+        KeyUsagePurpose::CrlSign,
+        KeyUsagePurpose::DigitalSignature,
+    ];
+    let ca_cert = params
+        .self_signed(&key)
+        .map_err(|e| Error::Tls(format!("ca self-sign: {e}")))?;
+    Ok((ca_cert.pem(), key.serialize_pem()))
 }
 
 fn pem_cert_to_der(pem: &str) -> Result<CertificateDer<'static>> {

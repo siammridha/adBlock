@@ -14,6 +14,7 @@ use proxy::proxy::exclusions::ExclusionStore;
 use proxy::net::http_client::HttpClient;
 use proxy::adblock::maintenance::{self, BlocklistFetcher};
 use proxy::proxy::ca::CertAuthority;
+use proxy::proxy::certs::CertStore;
 use proxy::proxy::Proxy;
 use proxy::web::runtime::Runtime;
 use proxy::stats::{SharedState, StaticInfo};
@@ -46,11 +47,38 @@ async fn main() -> Result<()> {
 
     init_logging(&config.logging.level);
 
+    // Everything the proxy persists lives under one data root, split into
+    // blocklists/, settings/, logs/, scriptlets/, and certs/. Create them up
+    // front so first writes (and the log-writer threads) always have a home.
+    let settings_dir = config.adblock.settings_dir();
+    for dir in [
+        config.adblock.blocklists_dir(),
+        settings_dir.clone(),
+        config.adblock.logs_dir(),
+        config.adblock.scriptlets_dir(),
+        config.adblock.certs_dir(),
+    ] {
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            eprintln!("creating {}: {e}", dir.display());
+        }
+    }
+
     let (adblock, curation) = proxy::adblock::from_config(&config.adblock)?;
-    let ca = Arc::new(CertAuthority::load(&config.tls.ca_cert, &config.tls.ca_key)?);
+
+    // The active CA (from the certificates tab) wins over the config CA; when
+    // nothing is selected, active_paths() returns the config paths. Switching is
+    // applied here at startup, so a change takes effect on the next run.
+    let certs = Arc::new(CertStore::load(
+        config.adblock.certs_dir(),
+        settings_dir.join("active-ca.json"),
+        config.tls.ca_cert.clone(),
+        config.tls.ca_key.clone(),
+    ));
+    let (ca_cert_path, ca_key_path) = certs.active_paths();
+    let ca = Arc::new(CertAuthority::load(&ca_cert_path, &ca_key_path)?);
 
     let exclusions = Arc::new(ExclusionStore::load(
-        config.adblock.lists_dir.join("excluded-domains.conf"),
+        settings_dir.join("excluded-domains.conf"),
     ));
 
     let info = StaticInfo {
@@ -61,7 +89,7 @@ async fn main() -> Result<()> {
         started: Instant::now(),
     };
     let state =
-        Arc::new(SharedState::new(info, &config.logging).with_data_dir(&config.adblock.lists_dir));
+        Arc::new(SharedState::new(info, &config.logging).with_data_dir(&config.adblock.data_dir));
 
     tracing::info!(
         "starting proxy: adblock={} dns={}",
@@ -71,7 +99,7 @@ async fn main() -> Result<()> {
 
     let dns_slot: DnsSlot = Arc::new(RwLock::new(None));
     let egress = EgressPolicy::load(
-        config.adblock.lists_dir.join("proxy-settings.json"),
+        settings_dir.join("proxy-settings.json"),
         dns_slot.clone(),
     );
 
@@ -94,12 +122,12 @@ async fn main() -> Result<()> {
     );
     let runtime = Runtime::new(
         state.clone(),
-        config.adblock.lists_dir.join("server-settings.json"),
+        settings_dir.join("server-settings.json"),
         Some(std::sync::Arc::new(proxy)),
         &config.server.listen,
         config.server.enabled,
         config.dns.clone(),
-        config.adblock.lists_dir.clone(),
+        settings_dir.clone(),
         adblock.clone(),
         dns_slot,
     )?;
@@ -116,6 +144,7 @@ async fn main() -> Result<()> {
             fetcher.clone(),
             runtime.clone(),
             egress.clone(),
+            certs.clone(),
         );
         tokio::spawn(async move {
             if let Err(e) = admin.serve(addr).await {
