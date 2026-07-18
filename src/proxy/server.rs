@@ -25,7 +25,7 @@ use crate::proxy::{capture, pipeline};
 use crate::stats::{CaptureSlot, EventKind, Exchange, RequestFacts, SharedState};
 
 fn request_facts(plan: &pipeline::RequestPlan) -> RequestFacts<'_> {
-    RequestFacts { method: &plan.method, req_type: &plan.req_type, url: &plan.url }
+    RequestFacts { method: &plan.method, req_type: &plan.req_type, url: &plan.url, host: &plan.host }
 }
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -244,13 +244,22 @@ impl Proxy {
             |host| self.inner.exclusions.matching(host),
         );
         if let pipeline::ConnectVerdict::Deny { blocked_by } = &plan.verdict {
-            let facts =
-                RequestFacts { method: "CONNECT", req_type: "blocked", url: &plan.url };
+            let facts = RequestFacts {
+                method: "CONNECT",
+                req_type: "blocked",
+                url: &plan.url,
+                host: &plan.host,
+            };
             return Err(self.deny(facts, &plan.host, blocked_by, None));
         }
 
         state.record_tunnel(
-            RequestFacts { method: "CONNECT", req_type: plan.record_label(), url: &plan.url },
+            RequestFacts {
+                method: "CONNECT",
+                req_type: plan.record_label(),
+                url: &plan.url,
+                host: &plan.host,
+            },
             &plan.record_tag(),
         );
         let blind = matches!(plan.verdict, pipeline::ConnectVerdict::BlindTunnel { .. });

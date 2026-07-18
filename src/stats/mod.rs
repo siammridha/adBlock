@@ -15,11 +15,13 @@ use crate::support::persist::OverrideStore;
 use history::{History, Metric};
 
 mod errors;
+mod exclude;
 pub mod history;
 mod logs;
 mod records;
 
 use errors::ErrorLog;
+pub use exclude::StatsExclusions;
 use logs::RotatingLog;
 pub use records::{
     CaptureSlot, DnsOutcome, DnsRecord, RequestDetail, RequestKind, RequestRecord, UiMsg,
@@ -30,6 +32,8 @@ pub struct RequestFacts<'a> {
     pub method: &'a str,
     pub req_type: &'a str,
     pub url: &'a str,
+    /// The target host, used to honor the stats-exclusion list.
+    pub host: &'a str,
 }
 
 #[derive(Default)]
@@ -138,6 +142,7 @@ pub struct SharedState {
     query_log: Option<RotatingLog>,
     settings_store: Option<OverrideStore<StatsOverrides>>,
     log_rotate_hours: std::sync::atomic::AtomicU32,
+    stats_exclusions: Option<StatsExclusions>,
     pub info: StaticInfo,
 }
 
@@ -157,6 +162,7 @@ impl SharedState {
             query_log: None,
             settings_store: None,
             log_rotate_hours: std::sync::atomic::AtomicU32::new(DEFAULT_LOG_ROTATE_HOURS),
+            stats_exclusions: None,
             info,
         }
     }
@@ -185,7 +191,21 @@ impl SharedState {
         self.request_detail = Some(RotatingLog::open(logs.join("request-detail.jsonl"), rotate));
         self.query_log = Some(RotatingLog::open(logs.join("query-log.jsonl"), rotate));
         self.settings_store = Some(store);
+        self.stats_exclusions =
+            Some(StatsExclusions::load(settings.join("stats-excluded-domains.conf")));
         self
+    }
+
+    /// True if `host` is on the stats-exclusion list — its traffic must not be
+    /// counted, recorded, or broadcast.
+    pub fn stats_excluded(&self, host: &str) -> bool {
+        self.stats_exclusions.as_ref().is_some_and(|s| s.excludes(host))
+    }
+
+    /// The stats-exclusion store, if persistence is wired up (it is whenever the
+    /// data dir was set). Used by the admin API to list/add/remove domains.
+    pub fn stats_exclusions(&self) -> Option<&StatsExclusions> {
+        self.stats_exclusions.as_ref()
     }
 
     pub fn stats_settings(&self) -> StatsOverrides {
@@ -234,10 +254,16 @@ impl SharedState {
             !matches!(metric, Metric::Blocked | Metric::DnsBlocked),
             "denials go through count_block, which pairs the traffic bump"
         );
+        if self.stats_excluded(domain) {
+            return;
+        }
         self.bump(metric, domain);
     }
 
     pub fn count_block(&self, blocked: Metric, domain: &str) {
+        if self.stats_excluded(domain) {
+            return;
+        }
         let traffic = match blocked {
             Metric::Blocked => Metric::Requests,
             Metric::DnsBlocked => Metric::DnsQueries,
@@ -321,7 +347,7 @@ impl SharedState {
     }
 
     pub fn record_dns(&self, mut record: DnsRecord) {
-        if !self.log_requests {
+        if !self.log_requests || self.stats_excluded(&record.domain) {
             return;
         }
         record.seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
@@ -356,7 +382,7 @@ impl SharedState {
     ) -> Exchange {
         let live = self.ui_connected();
         let persist = self.request_log.is_some();
-        if !self.log_requests || (!live && !persist) {
+        if !self.log_requests || (!live && !persist) || self.stats_excluded(facts.host) {
             return Exchange { state: self.clone(), seq: 0, live: false, captures: None };
         }
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
@@ -559,7 +585,8 @@ mod tests {
     use super::*;
 
     fn doc(url: &str) -> RequestFacts<'_> {
-        RequestFacts { method: "GET", req_type: "document", url }
+        let host = url.split("://").nth(1).and_then(|r| r.split('/').next()).unwrap_or("");
+        RequestFacts { method: "GET", req_type: "document", url, host }
     }
 
     fn state() -> Arc<SharedState> {
@@ -595,11 +622,11 @@ mod tests {
         let mut obs = s.observe();
         s.record_forwarded(doc("https://ok.example/"), 200, false);
         s.record_blocked(
-            RequestFacts { method: "GET", req_type: "image", url: "https://ads.example/x" },
+            RequestFacts { method: "GET", req_type: "image", url: "https://ads.example/x", host: "ads.example" },
             "||ads.example^",
         );
         s.record_tunnel(
-            RequestFacts { method: "CONNECT", req_type: "tunnel-mitm", url: "https://t.example/" },
+            RequestFacts { method: "CONNECT", req_type: "tunnel-mitm", url: "https://t.example/", host: "t.example" },
             "",
         );
         s.record_failed(doc("https://down.example/"), "upstream down.example: dns");
@@ -897,6 +924,73 @@ mod tests {
             std::fs::read_to_string(logs.join("request-log.jsonl")).unwrap().lines().count(),
             2
         );
+    }
+
+    #[test]
+    fn excluded_domains_stay_out_of_counters_history_and_logs() {
+        let dir = std::env::temp_dir().join("proxy-stats-exclude-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let info = StaticInfo {
+            version: "test".into(),
+            listen: String::new(),
+            admin_listen: String::new(),
+            ca_pem: String::new(),
+            started: Instant::now(),
+        };
+        let logging =
+            LoggingConfig { level: "info".into(), log_actions: true, log_requests: true };
+        let s = Arc::new(SharedState::new(info, &logging).with_data_dir(&dir));
+        s.stats_exclusions().unwrap().add("noise.example").unwrap();
+
+        // Counters skip the excluded host (and its subdomains) but keep the rest.
+        s.count(Metric::Requests, "api.noise.example"); // excluded → ignored
+        s.count(Metric::Requests, "kept.example");
+        assert_eq!(s.metrics.requests_total.load(Ordering::Relaxed), 1);
+
+        // A block on the excluded host is dropped whole — no traffic bump either.
+        s.count_block(Metric::Blocked, "noise.example");
+        assert_eq!(s.metrics.blocked_total.load(Ordering::Relaxed), 0);
+        assert_eq!(s.metrics.requests_total.load(Ordering::Relaxed), 1);
+        // A block on a kept host still pairs a traffic bump with the block bump.
+        s.count_block(Metric::Blocked, "ads.example");
+        assert_eq!(s.metrics.blocked_total.load(Ordering::Relaxed), 1);
+        assert_eq!(s.metrics.requests_total.load(Ordering::Relaxed), 2);
+
+        // Top-domain tables omit the excluded host.
+        let snap = s.history.snapshot();
+        assert!(snap.top_queried.iter().any(|(d, _)| d == "kept.example"));
+        assert!(snap.top_queried.iter().all(|(d, _)| d != "api.noise.example"));
+
+        // Neither the request log nor the query log records the excluded host.
+        drop(s.record_forwarded(
+            RequestFacts { method: "GET", req_type: "document", url: "https://noise.example/x", host: "noise.example" },
+            200,
+            false,
+        ));
+        s.record_forwarded(doc("https://kept.example/"), 200, false);
+        for domain in ["noise.example", "keep.example"] {
+            s.record_dns(DnsRecord {
+                seq: 0,
+                ts_ms: now_ms(),
+                domain: domain.into(),
+                qtype: "A".into(),
+                outcome: DnsOutcome::Resolved,
+                rcode: "NOERROR".into(),
+                answers: String::new(),
+                upstream: "1.1.1.1".into(),
+                ech: false,
+                blocked_by: String::new(),
+                elapsed_ms: 1,
+                proxy: false,
+            });
+        }
+        s.flush_logs();
+        let logs = dir.join("logs");
+        let requests = std::fs::read_to_string(logs.join("request-log.jsonl")).unwrap();
+        assert!(requests.contains("kept.example") && !requests.contains("noise.example"), "req log: {requests}");
+        let queries = std::fs::read_to_string(logs.join("query-log.jsonl")).unwrap();
+        assert!(queries.contains("keep.example") && !queries.contains("noise.example"), "query log: {queries}");
     }
 
     #[test]

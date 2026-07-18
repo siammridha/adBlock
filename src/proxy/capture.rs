@@ -155,7 +155,7 @@ mod tests {
         let state = state();
         let mut obs = state.observe();
         let ex = state.record_forwarded(
-            RequestFacts { method: "GET", req_type: "document", url: "https://a.example/" },
+            RequestFacts { method: "GET", req_type: "document", url: "https://a.example/", host: "a.example" },
             200,
             false,
         );
@@ -172,7 +172,7 @@ mod tests {
         let state = state();
         let mut obs = state.observe();
         let ex = state.record_forwarded(
-            RequestFacts { method: "GET", req_type: "script", url: "https://a.example/app.js" },
+            RequestFacts { method: "GET", req_type: "script", url: "https://a.example/app.js", host: "a.example" },
             200,
             false,
         );
@@ -187,7 +187,7 @@ mod tests {
         use http_body_util::{BodyExt, Full};
         let state = state();
         let ex = state.record_forwarded(
-            RequestFacts { method: "GET", req_type: "script", url: "https://a.example/app.js" },
+            RequestFacts { method: "GET", req_type: "script", url: "https://a.example/app.js", host: "a.example" },
             200,
             false,
         );

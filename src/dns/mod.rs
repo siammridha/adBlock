@@ -299,7 +299,7 @@ impl DnsService {
             }
             plan::Verdict::Resolve(key) => {
                 if let Some(mut cached) = self.cache.get(&key) {
-                    self.state.count(Metric::DnsCached, "");
+                    self.state.count(Metric::DnsCached, &domain);
                     if self.base.strip_ech {
                         strip_ech_params(&mut cached);
                     }

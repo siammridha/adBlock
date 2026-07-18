@@ -44,29 +44,29 @@
     #sidebar .side-item { justify-content:center; padding:9px 0; gap:0; }
     #sidebar .side-item .sl, #sidebar .sbadge { display:none; }
   }
-  /* DNS settings pane: a stack of panels, not one .panel itself */
-  #pane-dnscfg, #pane-dnsrw { display:flex; flex-direction:column; gap:20px; }
-  #pane-dnscfg[hidden], #pane-dnsrw[hidden] { display:none; }
-  #pane-dnscfg input, #pane-dnscfg textarea, #pane-dnscfg select, #pane-dnsrw input {
-    background:var(--panel2);
-    border:1px solid var(--border); border-radius:8px; color:var(--fg); padding:8px 12px; }
-  #pane-dnscfg textarea { width:100%; resize:vertical;
-    font:12px/1.5 ui-monospace,Menlo,Consolas,monospace; }
-  #pane-dnscfg label, #pane-dnsrw label { color:var(--muted); font-size:12px; font-weight:600; }
+  /* Multi-panel tabs (a stack of .panel sections, not one .panel themselves)
+     space their sections evenly. Single-panel tabs (.panel.tabpane) opt out. */
+  .tabpane:not(.panel) { display:flex; flex-direction:column; gap:20px; }
+  .tabpane:not(.panel)[hidden] { display:none; }
+  #pane-dnscfg label, #pane-dnsrw label,
+  #pane-setup .actions label, #pane-stats .actions label { color:var(--muted); font-size:12px; font-weight:600; }
+  /* One shared look for every text/number/url input, textarea, and select:
+     the dark field the proxy-service listener uses — thin border, small radius,
+     monospace. Width/layout stays on the individual elements. */
+  input[type=text], input[type=number], input[type=url], input[type=search],
+  textarea, select {
+    background:var(--bg); border:1px solid var(--border); color:var(--fg);
+    border-radius:6px; padding:6px 9px;
+    font:13px ui-monospace,Menlo,Consolas,monospace; }
+  input:disabled, textarea:disabled, select:disabled { opacity:.45; }
+  textarea { width:100%; resize:vertical; line-height:1.5; }
+  input[type=number] { width:90px; font-variant-numeric:tabular-nums; }
   /* service on/off + listen-address control (proxy on Dashboard, DNS on DNS→Settings) */
   .svcctl { display:flex; align-items:center; gap:12px; flex-wrap:wrap;
     background:var(--panel2); border:1px solid var(--border); border-radius:10px;
     padding:11px 14px; margin:0 0 16px; }
   .svcctl .sw { display:flex; align-items:center; gap:7px; color:var(--fg); font-weight:600; }
-  .svcctl input[type=text] { background:var(--bg); border:1px solid var(--border);
-    color:var(--fg); border-radius:6px; padding:6px 9px; width:160px;
-    font:13px ui-monospace,Menlo,Consolas,monospace; }
-  .svcctl input[type=text]:disabled { opacity:.45; }
-  /* Statistics & logs (Setup pane): hour inputs */
-  #pane-setup .actions label { color:var(--muted); font-size:12px; font-weight:600; }
-  #pane-setup input[type=number] { background:var(--panel2); border:1px solid var(--border);
-    border-radius:8px; color:var(--fg); padding:8px 12px; width:90px;
-    font:13px ui-monospace,Menlo,Consolas,monospace; font-variant-numeric:tabular-nums; }
+  .svcctl input[type=text] { width:160px; }
   /* dashboard overview cards */
   .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; }
   .cards .card { background:var(--panel2); border:1px solid var(--border);
@@ -139,8 +139,8 @@
     border-radius:20px; padding:2px 10px; font-size:11px; font-weight:600; cursor:pointer; }
   .chip.new { border-color:var(--accent); color:var(--accent); }
   .searchwrap { position:relative; display:inline-flex; }
-  .searchwrap input { background:var(--panel2); border:1px solid var(--border);
-    border-radius:8px; color:var(--fg); padding:5px 26px 5px 10px; min-width:380px; font-size:12px; }
+  /* search fields share the common look; extra right padding leaves room for the ✕ */
+  .searchwrap input { padding:6px 26px 6px 9px; min-width:380px; }
   .searchwrap .sx { position:absolute; right:8px; top:50%; transform:translateY(-50%);
     color:var(--muted); cursor:pointer; font-size:12px; display:none; }
   .searchwrap .sx:hover { color:var(--fg); }
@@ -295,6 +295,7 @@
     <button class="tab" data-pane="pane-scriptlets"><span class="ticon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg></span>Scriptlets<span class="tbadge" id="sl-badge">0</span></button>
     <button class="tab" data-pane="pane-tester"><span class="ticon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2v7.5L4.7 20.6a1 1 0 0 0 .9 1.4h12.8a1 1 0 0 0 .9-1.4L14 9.5V2"/><path d="M8.5 2h7"/><path d="M7 16h10"/></svg></span>Rule tester</button>
     <button class="tab" data-pane="pane-setup"><span class="ticon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></span>Setup</button>
+    <button class="tab" data-pane="pane-stats"><span class="ticon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg></span>Statistics</button>
     <button class="tab" data-pane="pane-certs"><span class="ticon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg></span>Certificates</button>
   </nav>
 
@@ -580,9 +581,7 @@
     <h2>Custom filters
       <span class="hint">one rule per line — EasyList/uBO syntax, saved to <code>custom.txt</code></span>
     </h2>
-    <textarea id="cf-text" spellcheck="false" style="width:100%;height:320px;font:12px/1.4
-      ui-monospace,Menlo,Consolas,monospace;background:var(--panel2);border:1px solid var(--border);
-      border-radius:8px;color:var(--fg);padding:10px;resize:vertical"></textarea>
+    <textarea id="cf-text" spellcheck="false" style="height:320px"></textarea>
     <div class="actions">
       <button id="cf-save">Save rules</button>
       <button class="ghost" id="cf-reload">Reload</button>
@@ -600,8 +599,7 @@
     </div>
     <p class="hint" id="bl-total"></p>
     <div class="actions">
-      <input type="url" id="bl-url" placeholder="https://…/list.txt" style="flex:1;min-width:180px;
-        background:var(--panel2);border:1px solid var(--border);border-radius:8px;color:var(--fg);padding:8px 12px">
+      <input type="url" id="bl-url" placeholder="https://…/list.txt" style="flex:1;min-width:180px">
       <button id="bl-add">Add list</button>
     </div>
     <p class="hint">Lists come from URLs and auto-update when older than
@@ -619,8 +617,7 @@
       </table>
     </div>
     <div class="actions">
-      <input type="text" id="ex-domain" placeholder="bank.example.com" style="flex:1;min-width:180px;
-        background:var(--panel2);border:1px solid var(--border);border-radius:8px;color:var(--fg);padding:8px 12px">
+      <input type="text" id="ex-domain" placeholder="bank.example.com" style="flex:1;min-width:180px">
       <button id="ex-add">Add domain</button>
     </div>
     <p class="hint">Tunneled blind (no TLS interception) — for cert-pinned apps that
@@ -634,8 +631,7 @@
     <p class="hint">Library source: <a id="sl-source" href="#" target="_blank" rel="noopener"></a>
       <span id="sl-updated"></span></p>
     <div class="actions" style="margin-top:0">
-      <input type="text" id="sl-filter" placeholder="filter scriptlets…" style="flex:1;min-width:180px;
-        background:var(--panel2);border:1px solid var(--border);border-radius:8px;color:var(--fg);padding:8px 12px">
+      <input type="text" id="sl-filter" placeholder="filter scriptlets…" style="flex:1;min-width:180px">
       <button id="sl-update">Update from uBO</button>
     </div>
     <div class="log" id="sl-log">
@@ -652,10 +648,8 @@
     <h2>Rule tester <span class="hint">— check a URL against the current rules without sending traffic</span></h2>
     <div class="actions" style="margin-top:0;flex-wrap:wrap">
       <input type="text" id="rt-url" placeholder="weather-analytics-events.apple.com/report — or a host, or just /ads.js"
-        style="flex:1;min-width:260px;background:var(--panel2);border:1px solid var(--border);
-        border-radius:8px;color:var(--fg);padding:8px 12px">
-      <select id="rt-type" style="background:var(--panel2);border:1px solid var(--border);
-        border-radius:8px;color:var(--fg);padding:8px 10px">
+        style="flex:1;min-width:260px">
+      <select id="rt-type">
         <option value="other">other</option>
         <option value="script">script</option>
         <option value="image">image</option>
@@ -706,24 +700,46 @@
               browse to <a href="https://tls-ech.dev" target="_blank" rel="noopener">tls-ech.dev</a>
               through the proxy — it reports whether the connection used ECH.</td></tr>
     </table>
+  </section>
 
-    <h2 style="margin-top:22px">Statistics &amp; logs</h2>
-    <div class="actions" style="flex-wrap:wrap">
-      <label for="st-retention">Statistics retention in hours (dashboard cards, sparklines, top domains)</label>
-      <input type="number" id="st-retention" min="1" max="168" step="1">
+  <section class="tabpane" id="pane-stats">
+    <div class="panel">
+      <h2>Statistics &amp; logs</h2>
+      <div class="actions" style="flex-wrap:wrap">
+        <label for="st-retention">Statistics retention in hours (dashboard cards, sparklines, top domains)</label>
+        <input type="number" id="st-retention" min="1" max="168" step="1">
+      </div>
+      <div class="actions" style="flex-wrap:wrap">
+        <label for="st-rotate">Request / query log rotation in hours (on-disk JSONL logs)</label>
+        <input type="number" id="st-rotate" min="1" max="2160" step="1">
+      </div>
+      <p class="hint">The statistics window lives in memory and restarts with the process.
+        Request and DNS query records append to <code>request-log.jsonl</code> /
+        <code>query-log.jsonl</code> under <code>data/logs/</code>; when a file gets older than the
+        rotation period it is moved to its <code>.old</code> sibling (replacing the previous
+        one), so records are kept for one to two rotation periods.</p>
+      <div class="actions">
+        <button id="st-save">Save statistics settings</button>
+        <span class="hint" id="st-status"></span>
+      </div>
     </div>
-    <div class="actions" style="flex-wrap:wrap">
-      <label for="st-rotate">Request / query log rotation in hours (on-disk JSONL logs)</label>
-      <input type="number" id="st-rotate" min="1" max="2160" step="1">
-    </div>
-    <p class="hint">The statistics window lives in memory and restarts with the process.
-      Request and DNS query records append to <code>request-log.jsonl</code> /
-      <code>query-log.jsonl</code> under <code>data/logs/</code>; when a file gets older than the
-      rotation period it is moved to its <code>.old</code> sibling (replacing the previous
-      one), so records are kept for one to two rotation periods.</p>
-    <div class="actions">
-      <button id="st-save">Save statistics settings</button>
-      <span class="hint" id="st-status"></span>
+
+    <div class="panel">
+      <h2>Excluded from statistics <span class="hint" id="sx-count"></span></h2>
+      <div class="log" id="sx-log">
+        <table>
+          <thead><tr><th>Domain</th><th style="width:70px"></th></tr></thead>
+          <tbody id="stats-exclusions"></tbody>
+        </table>
+      </div>
+      <div class="actions">
+        <input type="text" id="sx-domain" placeholder="noise.example.com" style="flex:1;min-width:180px">
+        <button id="sx-add">Add domain</button>
+      </div>
+      <p class="hint">Traffic to these hosts is not counted, not shown in the 24-hour history or
+        top-domain lists, and not written to the request/query logs. Matches the exact host or any
+        subdomain. Applies going forward; existing records are unaffected. Persisted.</p>
+      <p class="hint" id="sx-status"></p>
     </div>
   </section>
 
@@ -1214,7 +1230,7 @@ const SECTIONS = {
   "sec-proxy":     ["pane-requests", "pane-errors", "pane-exclusions", "pane-proxycfg"],
   "sec-dns":       ["pane-dns", "pane-dnsrw", "pane-dnscfg"],
   "sec-adblock":   ["pane-custom", "pane-blocklists", "pane-scriptlets", "pane-tester"],
-  "sec-settings":  ["pane-setup", "pane-certs"],
+  "sec-settings":  ["pane-setup", "pane-stats", "pane-certs"],
 };
 function sectionOf(pane){
   for(const [s, ps] of Object.entries(SECTIONS)) if(ps.includes(pane)) return s;
@@ -1239,6 +1255,8 @@ function showTab(pane){
   if(pane === "pane-proxycfg") refreshProxyCfg();
   // The managed CA list.
   if(pane === "pane-certs") refreshCerts();
+  // Statistics settings + the stats-exclusion list.
+  if(pane === "pane-stats"){ loadStatsCfg(); refreshStatsExclusions(); }
   // A virtual list draws nothing while its pane is hidden (zero height), so
   // redraw once it is shown. Deferred so the very first showTab() call — which
   // runs before the lists are constructed — still resolves them.
@@ -1382,6 +1400,43 @@ $("ex-add").addEventListener("click", ()=>{
   if(domain) postExclusion({domain}, "adding " + domain + "…");
 });
 $("ex-domain").addEventListener("keydown", e=>{ if(e.key==="Enter") $("ex-add").click(); });
+
+// ---- excluded from statistics --------------------------------------------
+async function refreshStatsExclusions(){
+  try {
+    const r = await fetch("/api/stats/exclusions"); const d = await r.json();
+    const domains = d.domains || [];
+    $("stats-exclusions").innerHTML = domains.map(dom=>{
+      const n = esc(dom);
+      return `<tr><td>${n}</td>`+
+        `<td><button class="ghost mini sx-del" data-domain="${n}">del</button></td></tr>`;
+    }).join("") || `<tr><td colspan="2" class="hint">no excluded domains</td></tr>`;
+    $("sx-count").textContent = `(${domains.length})`;
+    for(const b of document.querySelectorAll(".sx-del"))
+      b.addEventListener("click", ()=>postStatsExclusion({domain:b.dataset.domain, delete:true},
+        "removing " + b.dataset.domain + "…"));
+  } catch(e){}
+}
+
+async function postStatsExclusion(body, busyMsg){
+  $("sx-status").textContent = busyMsg;
+  $("sx-add").disabled = true;
+  try {
+    const r = await fetch("/api/stats/exclusions",{method:"POST",
+      headers:{"content-type":"application/json"}, body:JSON.stringify(body)});
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.error || r.status);
+    $("sx-status").textContent = "done ✓";
+    $("sx-domain").value = "";
+    refreshStatsExclusions();
+  } catch(e){ $("sx-status").textContent = "failed: " + e.message; }
+  $("sx-add").disabled = false;
+}
+$("sx-add").addEventListener("click", ()=>{
+  const domain = $("sx-domain").value.trim();
+  if(domain) postStatsExclusion({domain}, "adding " + domain + "…");
+});
+$("sx-domain").addEventListener("keydown", e=>{ if(e.key==="Enter") $("sx-add").click(); });
 
 async function runRuleTest(){
   const url = $("rt-url").value.trim();

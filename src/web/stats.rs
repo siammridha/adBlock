@@ -64,6 +64,45 @@ pub(super) fn config(state: &SharedState, body: &[u8]) -> AdminResponse {
     json_ok(stats_json(state))
 }
 
+pub(super) fn exclusions_json(state: &SharedState) -> Value {
+    let domains = state.stats_exclusions().map(|s| s.list()).unwrap_or_default();
+    json!({ "domains": domains })
+}
+
+/// Add or delete a stats-excluded domain. Body: `{"domain": "...", "delete"?: true}`.
+pub(super) fn edit_exclusions(state: &SharedState, body: &[u8]) -> AdminResponse {
+    use hyper::StatusCode;
+    let v: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return super::respond::json_status(StatusCode::BAD_REQUEST, json!({"error": e.to_string()})),
+    };
+    let Some(domain) = v.get("domain").and_then(Value::as_str).map(str::trim) else {
+        return super::respond::json_status(StatusCode::BAD_REQUEST, json!({"error": "expected 'domain'"}));
+    };
+    let Some(store) = state.stats_exclusions() else {
+        return super::respond::json_status(
+            StatusCode::BAD_REQUEST,
+            json!({"error": "stats persistence is not configured"}),
+        );
+    };
+    let deleting = v.get("delete").and_then(Value::as_bool) == Some(true);
+    let outcome = if deleting {
+        store.remove(domain).map(|removed| {
+            if removed {
+                state.log_event(EventKind::Info, format!("stats exclusion removed: {domain}"));
+            }
+        })
+    } else {
+        store.add(domain).map(|_| {
+            state.log_event(EventKind::Info, format!("stats exclusion added: {domain}"));
+        })
+    };
+    match outcome {
+        Ok(()) => json_ok(exclusions_json(state)),
+        Err(e) => super::respond::json_status(StatusCode::BAD_REQUEST, json!({"error": e.to_string()})),
+    }
+}
+
 pub(super) fn reset(state: &SharedState, runtime: &Runtime) -> AdminResponse {
     state.reset_stats();
     if let Some(dns) = runtime.dns() {

@@ -145,6 +145,7 @@ impl Admin {
                 json_ok(blocklist_text_json(&self.curation, &query))
             }
             (&Method::GET, "/api/exclusions") => json_ok(exclusions_json(&self.exclusions)),
+            (&Method::GET, "/api/stats/exclusions") => json_ok(stats::exclusions_json(&self.state)),
             (&Method::GET, "/api/server") => {
                 json_ok(serde_json::to_value(self.runtime.status().await).unwrap_or_default())
             }
@@ -180,6 +181,7 @@ impl Admin {
             }
             "/api/stats/reset" => stats::reset(&self.state, &self.runtime),
             "/api/stats/config" => stats::config(&self.state, body),
+            "/api/stats/exclusions" => stats::edit_exclusions(&self.state, body),
             "/api/errors/clear" => meta::clear_errors(&self.state),
             "/api/server/config" => edit_server_config(&self.runtime, body).await,
             "/api/proxy/config" => edit_proxy_config(&self.state, &self.egress, body),
