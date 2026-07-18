@@ -34,6 +34,14 @@ adblock = { version = "0.9", default-features = false, features = ["embedded-dom
 # Pin transitive `rmp` to a version compatible with adblock's rmp-serde 0.15.
 rmp = "=0.8.11"
 
+# Body decompression for the request inspector: captured response bodies are
+# usually gzip/br/deflate/zstd; decode them on demand when a request is opened.
+# Pure-Rust decoders (no C toolchain): flate2 defaults to miniz_oxide, and
+# ruzstd is decode-only zstd.
+flate2 = "1"
+brotli = "7"
+ruzstd = "0.7"
+
 # Config / serde
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

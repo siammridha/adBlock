@@ -487,6 +487,17 @@ impl Exchange {
             self.state.attach(self.seq, slot, text);
         }
     }
+
+    /// Like [`attach`](Self::attach) but keeps the value off the live SSE
+    /// stream — it lands only on the record (and so the persisted sidecar).
+    /// Used for the raw compressed body prefixes, which are large and only read
+    /// on demand by the decode endpoint.
+    pub fn attach_quiet(&self, slot: CaptureSlot, text: impl FnOnce() -> String) {
+        let Some(captures) = &self.captures else { return };
+        if let Ok(mut record) = captures.lock() {
+            slot.apply(&mut record, text());
+        }
+    }
 }
 
 impl Drop for Exchange {

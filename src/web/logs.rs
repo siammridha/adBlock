@@ -7,6 +7,7 @@
 
 use serde_json::json;
 
+use crate::proxy::capture::decode_captured;
 use crate::stats::SharedState;
 
 use super::respond::{json_ok, json_status, parse_query};
@@ -47,5 +48,41 @@ pub(super) fn request_detail(state: &SharedState, query: &str) -> AdminResponse 
             json!({ "error": "missing seq" }),
         );
     };
-    json_ok(serde_json::to_value(state.request_detail(seq)).unwrap_or_default())
+    // The raw compressed prefixes can be large; they're for the decode endpoint
+    // only, so strip them from the detail response. The display bodies carry a
+    // `[compressed body — …]` placeholder that tells the UI a decode is offered.
+    let mut detail = state.request_detail(seq);
+    detail.req_body_raw.clear();
+    detail.resp_body_raw.clear();
+    json_ok(serde_json::to_value(detail).unwrap_or_default())
+}
+
+/// Decode one captured body on demand. `slot` is `req` or `resp`. Returns the
+/// decompressed text, or an explanatory note when there's nothing to decode.
+pub(super) fn request_body_decode(state: &SharedState, query: &str) -> AdminResponse {
+    let Some(seq) = parse_query(query, "seq").and_then(|s| s.parse::<u64>().ok()) else {
+        return json_status(
+            hyper::StatusCode::BAD_REQUEST,
+            json!({ "error": "missing seq" }),
+        );
+    };
+    let slot = parse_query(query, "slot").unwrap_or_default();
+    let detail = state.request_detail(seq);
+    let raw = match slot {
+        "req" => detail.req_body_raw,
+        "resp" => detail.resp_body_raw,
+        _ => {
+            return json_status(
+                hyper::StatusCode::BAD_REQUEST,
+                json!({ "error": "slot must be req or resp" }),
+            );
+        }
+    };
+    if raw.is_empty() {
+        return json_status(
+            hyper::StatusCode::NOT_FOUND,
+            json!({ "error": "no compressed body captured for this request" }),
+        );
+    }
+    json_ok(json!({ "text": decode_captured(&raw) }))
 }

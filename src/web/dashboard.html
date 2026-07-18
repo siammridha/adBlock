@@ -263,6 +263,17 @@
   .drawer-x { margin-left:auto; }
   .drawer-body { padding:14px 16px; overflow:auto; flex:1; }
   .drawer-body .rq-detail { font-size:12px; }
+  /* skeleton shimmer: shown in the drawer while a request's detail loads */
+  .skel { display:block; border-radius:6px;
+    background:linear-gradient(90deg,var(--panel2) 25%,var(--border) 37%,var(--panel2) 63%);
+    background-size:400% 100%; animation:skel 1.2s ease-in-out infinite; }
+  .skel-line { height:11px; margin:7px 0; }
+  .skel-box { height:120px; margin:2px 0; }
+  @keyframes skel { 0%{background-position:100% 50%} 100%{background-position:0 50%} }
+  @media (prefers-reduced-motion: reduce){ .skel{ animation:none } }
+  /* a body label carrying its "decompress" control on the right */
+  .rq-detail .lbl.row { display:flex; align-items:center; gap:8px; }
+  .rq-detail .lbl .decomp { margin-left:auto; }
 </style>
 </head>
 <body>
@@ -1733,8 +1744,9 @@ $("drawer-back").addEventListener("click", closeDrawer);
 document.addEventListener("keydown", e=>{ if(e.key === "Escape") closeDrawer(); });
 
 // Render the network-tab detail: general info, then request | response
-// (headers + body) side by side. `loading` shows placeholders until the
-// captured bodies arrive.
+// (headers + body) side by side. `loading` swaps in skeleton blocks until the
+// captured data arrives. A compressed body shows a "decompress" button that
+// decodes it on demand (GET /api/request/body).
 function renderDrawer(d, loading){
   const cell = $("drawer-body");
   const st0 = d.kind==="failed" ? "failed (dropped)" : d.blocked_by ? "blocked (dropped)" : "—";
@@ -1748,9 +1760,9 @@ function renderDrawer(d, loading){
     `<div class="rq-detail"><div class="gen"></div>`+
     `<div class="cols">`+
       `<div><div class="lbl">Request headers</div><pre class="qh"></pre>`+
-           `<div class="lbl">Request body</div><pre class="qb"></pre></div>`+
+           `<div class="lbl row">Request body<span class="qb-tools"></span></div><pre class="qb"></pre></div>`+
       `<div><div class="lbl">Response headers</div><pre class="sh"></pre>`+
-           `<div class="lbl">Response body</div><pre class="sb"></pre></div>`+
+           `<div class="lbl row">Response body<span class="sb-tools"></span></div><pre class="sb"></pre></div>`+
     `</div></div>`;
   const g = cell.querySelector(".gen");
   for(const [l,v] of gen){
@@ -1767,13 +1779,50 @@ function renderDrawer(d, loading){
     }
     g.append(gl, gv);
   }
+
+  if(loading){
+    cell.querySelector(".qh").innerHTML = skelLines(3);
+    cell.querySelector(".sh").innerHTML = skelLines(3);
+    cell.querySelector(".qb").innerHTML = skelBox();
+    cell.querySelector(".sb").innerHTML = skelBox();
+    return;
+  }
+
   const none = d.kind==="failed" ? "(no response — upstream failed)"
     : d.blocked_by ? "(request dropped — never sent upstream)" : "(none)";
-  const wait = loading ? "loading…" : null;
-  cell.querySelector(".qh").textContent = d.req_headers || (wait || "(none)");
-  cell.querySelector(".qb").textContent = d.req_body || (wait || "(empty)");
-  cell.querySelector(".sh").textContent = d.resp_headers || (wait || none);
-  cell.querySelector(".sb").textContent = d.resp_body || (wait || (d.blocked_by ? none : "(empty)"));
+  cell.querySelector(".qh").textContent = d.req_headers || "(none)";
+  cell.querySelector(".sh").textContent = d.resp_headers || none;
+  fillBody(d.seq, "req", cell.querySelector(".qb"), cell.querySelector(".qb-tools"), d.req_body || "(empty)");
+  fillBody(d.seq, "resp", cell.querySelector(".sb"), cell.querySelector(".sb-tools"),
+    d.resp_body || (d.blocked_by ? none : "(empty)"));
+}
+
+function skelLines(n){
+  let s = "";
+  for(let i=0;i<n;i++) s += `<span class="skel skel-line" style="width:${60+Math.floor(Math.random()*35)}%"></span>`;
+  return s;
+}
+function skelBox(){ return `<span class="skel skel-box"></span>`; }
+
+// A compressed body is stored as a short placeholder; the raw bytes stay on the
+// backend and are decoded only when this button is clicked.
+const COMPRESSED_RE = /^\[compressed body — /;
+function fillBody(seq, slot, pre, tools, text){
+  pre.textContent = text;
+  tools.textContent = "";
+  if(!COMPRESSED_RE.test(text)) return;
+  const btn = document.createElement("button");
+  btn.className = "ghost mini decomp";
+  btn.textContent = "decompress";
+  btn.addEventListener("click", ()=>decompressBody(seq, slot, pre, btn));
+  tools.appendChild(btn);
+}
+function decompressBody(seq, slot, pre, btn){
+  btn.disabled = true; btn.textContent = "decompressing…";
+  fetch(`/api/request/body?seq=${seq}&slot=${slot}`).then(r=>r.json()).then(j=>{
+    if(typeof j.text === "string"){ pre.textContent = j.text; btn.remove(); }
+    else { btn.disabled = false; btn.textContent = "retry"; btn.title = j.error || "decode failed"; }
+  }).catch(e=>{ btn.disabled = false; btn.textContent = "retry"; btn.title = String(e); });
 }
 
 // Row clicks: the block button toggles a filter; anywhere else opens the drawer.

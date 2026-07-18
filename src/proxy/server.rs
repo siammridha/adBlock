@@ -362,6 +362,7 @@ impl Proxy {
         let req_bytes = body.collect().await.map_err(Into::into)?.to_bytes();
         parts.headers.remove(hyper::header::TRANSFER_ENCODING);
         parts.headers.remove(hyper::header::CONTENT_LENGTH);
+        let req_enc = capture::BodyEncoding::from_headers(&parts.headers);
         let req_hdrs = capture::headers_text(&parts.headers);
         let fwd = Request::from_parts(parts, Full::new(req_bytes.clone()));
 
@@ -378,7 +379,7 @@ impl Proxy {
                 tracing::debug!(url = %plan.url, error = %cause, "upstream send failed");
                 let exchange = state.record_failed(request_facts(&plan), &cause);
                 if !req_bytes.is_empty() {
-                    capture::request_body(&exchange, &req_bytes);
+                    capture::request_body(&exchange, &req_bytes, req_enc);
                 }
                 exchange.attach(CaptureSlot::ReqHeaders, || req_hdrs);
                 return Err(e);
@@ -387,7 +388,7 @@ impl Proxy {
         let exchange =
             state.record_forwarded(request_facts(&plan), upstream.status().as_u16(), ech);
         if !req_bytes.is_empty() {
-            capture::request_body(&exchange, &req_bytes);
+            capture::request_body(&exchange, &req_bytes, req_enc);
         }
         exchange.attach(CaptureSlot::ReqHeaders, || req_hdrs);
         exchange.attach(CaptureSlot::RespHeaders, || {
@@ -420,8 +421,9 @@ impl Proxy {
                 self.inner.config.performance.max_inspect_bytes,
             );
             let (mut parts, body) = resp.into_parts();
+            let resp_enc = capture::BodyEncoding::from_headers(&parts.headers);
             let collected = body.collect().await?.to_bytes();
-            capture::response_body(&exchange, &collected);
+            capture::response_body(&exchange, &collected, resp_enc);
             let mutated = plan.apply(&mut parts, &collected, script, |classes, ids| {
                 self.inner.adblock.cosmetic_css(url, classes, ids)
             });
@@ -436,7 +438,8 @@ impl Proxy {
         }
 
         let (parts, body) = resp.into_parts();
-        let captured = capture::stream_response(exchange, body);
+        let resp_enc = capture::BodyEncoding::from_headers(&parts.headers);
+        let captured = capture::stream_response(exchange, body, resp_enc);
         Ok(Response::from_parts(parts, captured.boxed()))
     }
 }

@@ -133,6 +133,7 @@ impl Admin {
             (&Method::GET, "/api/stream") => sse_stream(self.state.clone()),
             (&Method::GET, "/api/requests") => logs::requests_page(&self.state, &query),
             (&Method::GET, "/api/request") => logs::request_detail(&self.state, &query),
+            (&Method::GET, "/api/request/body") => logs::request_body_decode(&self.state, &query),
             (&Method::GET, "/api/queries") => logs::queries_page(&self.state, &query),
             (&Method::GET, "/api/stats") => json_ok(stats_json(&self.state)),
             (&Method::GET, "/api/errors") => meta::error_log(&self.state),
@@ -748,6 +749,20 @@ mod tests {
         // A detail request without a seq is a client error.
         let resp = admin.route(get("/api/request")).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn body_decode_endpoint_validates_and_reports_missing_captures() {
+        let admin = admin(&[], Arc::new(CannedDownloader("")));
+        // Missing seq is a client error.
+        let resp = admin.route(get("/api/request/body?slot=resp")).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        // An unknown slot is a client error.
+        let resp = admin.route(get("/api/request/body?seq=1&slot=nope")).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        // Well-formed, but nothing was captured (no data dir) → not found.
+        let resp = admin.route(get("/api/request/body?seq=1&slot=resp")).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

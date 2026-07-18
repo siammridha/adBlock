@@ -34,6 +34,13 @@ pub struct RequestRecord {
     pub req_body: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub resp_body: String,
+    // Raw compressed body prefix (`"<encoding>\n<base64>"`) kept for on-demand
+    // decoding when the body is gzip/br/deflate/zstd. Empty for identity bodies.
+    // Not streamed live; read only by the decode endpoint from the sidecar.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub req_body_raw: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub resp_body_raw: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub req_headers: String,
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -59,6 +66,13 @@ pub struct RequestDetail {
     pub req_body: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub resp_body: String,
+    // Raw compressed prefixes, persisted so the decode endpoint can decompress
+    // on demand. Stripped from the `/api/request` detail response — only the
+    // decode endpoint reads them.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub req_body_raw: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub resp_body_raw: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub scriptlets: String,
 }
@@ -81,6 +95,8 @@ impl RequestDetail {
             resp_headers: r.resp_headers.clone(),
             req_body: r.req_body.clone(),
             resp_body: r.resp_body.clone(),
+            req_body_raw: r.req_body_raw.clone(),
+            resp_body_raw: r.resp_body_raw.clone(),
             scriptlets: r.scriptlets.clone(),
         })
     }
@@ -90,6 +106,8 @@ impl RequestDetail {
 pub enum CaptureSlot {
     ReqBody,
     RespBody,
+    ReqBodyRaw,
+    RespBodyRaw,
     ReqHeaders,
     RespHeaders,
     Scriptlets,
@@ -100,6 +118,8 @@ impl CaptureSlot {
         match self {
             CaptureSlot::ReqBody => "req_body",
             CaptureSlot::RespBody => "resp_body",
+            CaptureSlot::ReqBodyRaw => "req_body_raw",
+            CaptureSlot::RespBodyRaw => "resp_body_raw",
             CaptureSlot::ReqHeaders => "req_headers",
             CaptureSlot::RespHeaders => "resp_headers",
             CaptureSlot::Scriptlets => "scriptlets",
@@ -110,6 +130,8 @@ impl CaptureSlot {
         *match self {
             CaptureSlot::ReqBody => &mut record.req_body,
             CaptureSlot::RespBody => &mut record.resp_body,
+            CaptureSlot::ReqBodyRaw => &mut record.req_body_raw,
+            CaptureSlot::RespBodyRaw => &mut record.resp_body_raw,
             CaptureSlot::ReqHeaders => &mut record.req_headers,
             CaptureSlot::RespHeaders => &mut record.resp_headers,
             CaptureSlot::Scriptlets => &mut record.scriptlets,
