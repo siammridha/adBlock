@@ -23,6 +23,14 @@
 			"source": "devcontainer-claude-config-${devcontainerId}",
 			"target": "/home/vscode/.claude",
 			"type": "volume"
+		},
+		// Bind the host git config so name/email survive rebuilds. SSH keys are
+		// not mounted: VS Code forwards the host SSH agent into the container
+		// automatically, so the key never leaves the host.
+		{
+			"source": "${localEnv:HOME}/.gitconfig",
+			"target": "/home/vscode/.gitconfig",
+			"type": "bind"
 		}
 	],
 
