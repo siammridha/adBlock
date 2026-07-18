@@ -28,10 +28,6 @@ fn request_facts(plan: &pipeline::RequestPlan) -> RequestFacts<'_> {
     RequestFacts { method: &plan.method, req_type: &plan.req_type, url: &plan.url }
 }
 
-/// A forwarded request slower than this logs a per-phase timing breakdown at
-/// info level. Fast requests stay silent so the log isn't flooded.
-const SLOW_REQUEST_THRESHOLD: std::time::Duration = std::time::Duration::from_millis(150);
-
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type BodyError = std::io::Error;
 type ResBody = BoxBody<Bytes, BodyError>;
@@ -328,7 +324,6 @@ impl Proxy {
         B::Error: Into<BoxError>,
     {
         let state = &self.inner.state;
-        let t_start = std::time::Instant::now();
 
         let mut req = req;
         let plan = pipeline::plan_request(&req, secure, self.inner.adblock.enabled())?;
@@ -347,12 +342,10 @@ impl Proxy {
             let by = decision.attribution.display();
             return Err(self.deny_request(&plan, &by, Some(req.headers())));
         }
-        let t_check = t_start.elapsed();
 
         if self.inner.blackhole.is_blackholed(&plan.host, plan.port).await {
             return Err(self.deny_request(&plan, "DNS blackhole", Some(req.headers())));
         }
-        let t_blackhole = t_start.elapsed();
 
         state.count(Metric::Requests, &plan.host);
 
@@ -363,7 +356,6 @@ impl Proxy {
         let req_hdrs = capture::headers_text(&parts.headers);
         let fwd = Request::from_parts(parts, Full::new(req_bytes.clone()));
 
-        let t_collect = t_start.elapsed();
         let (upstream, ech) = match self
             .inner
             .client
@@ -383,7 +375,6 @@ impl Proxy {
                 return Err(e);
             }
         };
-        let t_send = t_start.elapsed();
         let exchange =
             state.record_forwarded(request_facts(&plan), upstream.status().as_u16(), ech);
         if !req_bytes.is_empty() {
@@ -402,24 +393,6 @@ impl Proxy {
             .inspect_response(upstream, &plan.url, plan.injection_target, exchange)
             .await?;
 
-        // Timing probe: only slow requests log, so normal traffic stays quiet.
-        // Each field is the time spent in that one phase (not cumulative).
-        // `send` is time-to-first-byte from upstream (DNS + TCP + TLS + wait);
-        // for streamed (non-HTML) bodies the download itself runs after this
-        // returns and is not counted here.
-        let total = t_start.elapsed();
-        if total >= SLOW_REQUEST_THRESHOLD {
-            tracing::info!(
-                url = %plan.url,
-                total_ms = total.as_millis(),
-                check_ms = t_check.as_millis(),
-                blackhole_ms = t_blackhole.saturating_sub(t_check).as_millis(),
-                collect_ms = t_collect.saturating_sub(t_blackhole).as_millis(),
-                send_ms = t_send.saturating_sub(t_collect).as_millis(),
-                inspect_ms = total.saturating_sub(t_send).as_millis(),
-                "slow request"
-            );
-        }
         Ok(response)
     }
 
