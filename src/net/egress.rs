@@ -2,16 +2,60 @@
 //! controls ECH, IPv6, and resolver-only mode.
 
 use std::net::IpAddr;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
+use lru::LruCache;
 use serde::{Deserialize, Serialize};
 
 use crate::dns::DnsService;
 use crate::support::persist::OverrideStore;
 
 pub type DnsSlot = Arc<RwLock<Option<Arc<DnsService>>>>;
+
+/// How long a resolved host stays in the egress-side cache. This sits in front
+/// of the DNS answer cache purely to skip the resolve pipeline (filter match,
+/// message clone, query logging) for the burst of connections a page opens to
+/// the same host. Kept short so DNS TTL and filter changes are picked up soon;
+/// [`EgressPolicy::apply`] clears it outright when settings change.
+const RESOLVE_CACHE_TTL: Duration = Duration::from_secs(10);
+const RESOLVE_CACHE_CAP: usize = 1024;
+
+/// Tiny per-host cache with a fixed TTL, backed by an LRU so it stays bounded.
+struct TtlCache<T> {
+    map: Mutex<LruCache<String, (T, Instant)>>,
+}
+
+impl<T: Clone> TtlCache<T> {
+    fn new(cap: usize) -> Self {
+        let cap = NonZeroUsize::new(cap).expect("egress cache capacity is non-zero");
+        Self { map: Mutex::new(LruCache::new(cap)) }
+    }
+
+    fn get(&self, host: &str) -> Option<T> {
+        let mut map = self.map.lock().expect("egress cache lock");
+        match map.get(host) {
+            Some((v, expires)) if *expires > Instant::now() => Some(v.clone()),
+            Some(_) => {
+                map.pop(host);
+                None
+            }
+            None => None,
+        }
+    }
+
+    fn put(&self, host: String, value: T) {
+        let mut map = self.map.lock().expect("egress cache lock");
+        map.put(host, (value, Instant::now() + RESOLVE_CACHE_TTL));
+    }
+
+    fn clear(&self) {
+        self.map.lock().expect("egress cache lock").clear();
+    }
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -34,6 +78,8 @@ pub struct EgressPolicy {
     use_ech: AtomicBool,
     disable_ipv6: AtomicBool,
     store: OverrideStore<EgressOverrides>,
+    addr_cache: TtlCache<Vec<IpAddr>>,
+    ech_cache: TtlCache<Option<Vec<u8>>>,
 }
 
 impl EgressPolicy {
@@ -46,6 +92,8 @@ impl EgressPolicy {
             use_ech: AtomicBool::new(o.use_ech.unwrap_or(true)),
             disable_ipv6: AtomicBool::new(o.disable_ipv6.unwrap_or(true)),
             store,
+            addr_cache: TtlCache::new(RESOLVE_CACHE_CAP),
+            ech_cache: TtlCache::new(RESOLVE_CACHE_CAP),
         })
     }
 
@@ -88,24 +136,38 @@ impl EgressPolicy {
         if let Err(e) = self.store.save(&persisted) {
             tracing::warn!(error = %e, "persisting proxy egress settings");
         }
+        // Settings like disable_ipv6 and use_ech change what a resolve returns,
+        // so drop anything cached under the old settings.
+        self.addr_cache.clear();
+        self.ech_cache.clear();
         snap
     }
 
     pub async fn resolve(&self, host: &str) -> std::io::Result<Vec<IpAddr>> {
+        if let Some(addrs) = self.addr_cache.get(host) {
+            return Ok(addrs);
+        }
         let dns = self.dns.read().expect("egress dns lock").clone();
         let Some(dns) = dns else {
             return Err(std::io::Error::other(
                 "resolver-only egress is on but the built-in DNS resolver is unavailable",
             ));
         };
-        dns.resolve(host, !self.disable_ipv6()).await
+        let addrs = dns.resolve(host, !self.disable_ipv6()).await?;
+        self.addr_cache.put(host.to_string(), addrs.clone());
+        Ok(addrs)
     }
 
     pub async fn ech_config_list(&self, host: &str) -> Option<Vec<u8>> {
         if !self.use_ech() {
             return None;
         }
+        if let Some(list) = self.ech_cache.get(host) {
+            return list;
+        }
         let dns = self.dns.read().expect("egress dns lock").clone()?;
-        dns.ech_config_list(host).await
+        let list = dns.ech_config_list(host).await;
+        self.ech_cache.put(host.to_string(), list.clone());
+        list
     }
 }

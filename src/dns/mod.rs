@@ -686,6 +686,15 @@ mod tests {
         assert_eq!(addrs, vec![std::net::IpAddr::V4(std::net::Ipv4Addr::new(9, 9, 9, 9))]);
         assert_eq!(m.dns_queries_total.load(Ordering::Relaxed), 1);
 
+        // A repeat resolve for the same host is served from the egress cache,
+        // so it never re-enters the DNS pipeline.
+        egress.resolve("fine.example.com").await.unwrap();
+        assert_eq!(m.dns_queries_total.load(Ordering::Relaxed), 1);
+        assert_eq!(m.dns_cached_total.load(Ordering::Relaxed), 0);
+
+        // Saving egress settings clears that cache; the next resolve goes back
+        // through the pipeline and is served by the DNS answer cache.
+        egress.apply(&crate::net::egress::EgressOverrides::default());
         egress.resolve("fine.example.com").await.unwrap();
         assert_eq!(m.dns_queries_total.load(Ordering::Relaxed), 2);
         assert_eq!(m.dns_cached_total.load(Ordering::Relaxed), 1);
