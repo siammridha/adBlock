@@ -16,7 +16,7 @@ use tokio::net::TcpListener;
 use crate::adblock::updater::ScriptletUpdater;
 use crate::adblock::{AdBlocker, ListCuration};
 use crate::dns::DnsService;
-use crate::net::egress::EgressPolicy;
+use crate::proxy::egress::EgressPolicy;
 use crate::support::error::{Error, Result};
 use crate::proxy::certs::CertStore;
 use crate::proxy::exclusions::ExclusionStore;
@@ -154,7 +154,7 @@ impl Admin {
                 json_ok(serde_json::to_value(self.egress.settings()).unwrap_or_default())
             }
             (&Method::GET, "/api/dns") => {
-                json_ok(dns_json(&self.state, self.runtime.dns().as_deref()))
+                json_ok(dns_json(&self.state, &self.runtime.dns()))
             }
             (&Method::GET, "/api/dns/rewrites") => {
                 self.with_dns(|dns| json_ok(rewrites_json(&dns)))
@@ -205,11 +205,10 @@ impl Admin {
         }
     }
 
+    // The DNS resolver is always available, listener up or not, so rewrites,
+    // settings, and cache management keep working while DNS is disabled.
     fn with_dns(&self, f: impl FnOnce(Arc<DnsService>) -> AdminResponse) -> AdminResponse {
-        match self.runtime.dns() {
-            Some(dns) => f(dns),
-            None => json_status(StatusCode::BAD_REQUEST, json!({"error": "dns is disabled"})),
-        }
+        f(self.runtime.dns())
     }
 }
 
@@ -415,11 +414,12 @@ mod tests {
             crate::net::http_client::HttpClient::new(),
         )));
         let fetcher = Arc::new(BlocklistFetcher::new(curation.clone(), downloader));
-        let dns_slot: crate::net::egress::DnsSlot =
-            Arc::new(std::sync::RwLock::new(None));
-        let egress = crate::net::egress::EgressPolicy::load(
+        let dns_cfg = DnsConfig::default();
+        let dns_svc =
+            DnsService::new(&dns_cfg, dns_dir, adblock.clone(), state.clone()).unwrap();
+        let egress = crate::proxy::egress::EgressPolicy::load(
             dns_dir.join("proxy-settings.json"),
-            dns_slot.clone(),
+            dns_svc.clone(),
         );
         let runtime = Runtime::new(
             state.clone(),
@@ -427,10 +427,9 @@ mod tests {
             None,
             "127.0.0.1:8080",
             true,
-            DnsConfig::default(),
-            dns_dir.to_path_buf(),
-            adblock.clone(),
-            dns_slot,
+            dns_svc,
+            &dns_cfg.listen,
+            dns_cfg.enabled,
         )
         .unwrap();
         let certs = Arc::new(CertStore::load(
@@ -657,11 +656,15 @@ mod tests {
             .route(post("/api/server/config", r#"{"dns_enabled": false}"#))
             .await;
         assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(body_json(resp).await["dns_enabled"], false);
-        assert_eq!(body_json(admin.route(get("/api/dns")).await).await["enabled"], false);
+        let v = body_json(resp).await;
+        assert_eq!(v["dns_enabled"], false);
+        assert_eq!(v["dns_running"], false);
+        // Disabling only stops the listener. The resolver stays up for the
+        // proxy, so the DNS status and cache management keep working.
+        assert_eq!(body_json(admin.route(get("/api/dns")).await).await["enabled"], true);
         assert_eq!(
             admin.route(post("/api/dns/flush", "")).await.status(),
-            StatusCode::BAD_REQUEST
+            StatusCode::OK
         );
     }
 

@@ -76,7 +76,7 @@ pub struct DnsService {
     rewrites: RewriteStore,
     settings: settings::SettingsStore,
     base: DnsConfig,
-    listen: SocketAddr,
+    listen: RwLock<SocketAddr>,
 }
 
 struct LiveDns {
@@ -128,12 +128,16 @@ impl DnsService {
             rewrites: RewriteStore::load(data_dir.join("dns-rewrites.conf")),
             settings,
             base: cfg.clone(),
-            listen,
+            listen: RwLock::new(listen),
         }))
     }
 
-    pub async fn start(self: &Arc<Self>) -> Result<DnsHandles> {
-        let (udp, tcp) = server::bind(self.listen).await?;
+    /// Bind the UDP/TCP listeners on `listen` and start serving. The service
+    /// itself (resolver, cache, rewrites, settings) is independent of the
+    /// listeners: it keeps answering in-process callers when they are down.
+    pub async fn start(self: &Arc<Self>, listen: SocketAddr) -> Result<DnsHandles> {
+        let (udp, tcp) = server::bind(listen).await?;
+        *self.listen.write().expect("dns listen lock") = listen;
         let (udp, tcp) = server::spawn_listeners(self.clone(), udp, tcp);
         let probe = self.spawn_ech_probe();
         Ok(DnsHandles { udp, tcp, probe })
@@ -190,7 +194,7 @@ impl DnsService {
     pub fn status(&self) -> DnsStatus {
         let live = self.live();
         DnsStatus {
-            listen: self.listen.to_string(),
+            listen: self.listen.read().expect("dns listen lock").to_string(),
             upstreams: live.settings.upstreams.clone(),
             upstream_mode: live.settings.upstream_mode.as_str(),
             upstream_stats: live.resolver.upstream_stats(),
@@ -664,11 +668,10 @@ mod tests {
         addr
     }
 
-    fn egress_for(tag: &str, svc: &Arc<DnsService>) -> Arc<crate::net::egress::EgressPolicy> {
-        let slot: crate::net::egress::DnsSlot = Arc::new(RwLock::new(Some(svc.clone())));
+    fn egress_for(tag: &str, svc: &Arc<DnsService>) -> Arc<crate::proxy::egress::EgressPolicy> {
         let path = std::env::temp_dir().join(format!("proxy-egress-{tag}.json"));
         let _ = std::fs::remove_file(&path);
-        crate::net::egress::EgressPolicy::load(path, slot)
+        crate::proxy::egress::EgressPolicy::load(path, svc.clone())
     }
 
     #[tokio::test]
@@ -694,7 +697,7 @@ mod tests {
 
         // Saving egress settings clears that cache; the next resolve goes back
         // through the pipeline and is served by the DNS answer cache.
-        egress.apply(&crate::net::egress::EgressOverrides::default());
+        egress.apply(&crate::proxy::egress::EgressOverrides::default());
         egress.resolve("fine.example.com").await.unwrap();
         assert_eq!(m.dns_queries_total.load(Ordering::Relaxed), 2);
         assert_eq!(m.dns_cached_total.load(Ordering::Relaxed), 1);

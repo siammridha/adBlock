@@ -20,7 +20,7 @@ pub(crate) trait Resolver: Send + Sync {
     fn resolve(&self, host: &str, port: u16) -> BoxFuture<'static, std::io::Result<Vec<SocketAddr>>>;
 }
 
-pub(crate) struct EgressResolver(pub(crate) Arc<crate::net::egress::EgressPolicy>);
+pub(crate) struct EgressResolver(pub(crate) Arc<crate::proxy::egress::EgressPolicy>);
 
 impl Resolver for EgressResolver {
     fn resolve(&self, host: &str, port: u16) -> BoxFuture<'static, std::io::Result<Vec<SocketAddr>>> {

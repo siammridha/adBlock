@@ -5,11 +5,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use std::sync::RwLock;
-
 use proxy::adblock::updater::ScriptletUpdater;
 use proxy::support::config::Config;
-use proxy::net::egress::{DnsSlot, EgressPolicy};
+use proxy::dns::DnsService;
+use proxy::proxy::egress::EgressPolicy;
 use proxy::proxy::exclusions::ExclusionStore;
 use proxy::net::http_client::HttpClient;
 use proxy::adblock::maintenance::{self, BlocklistFetcher};
@@ -97,10 +96,13 @@ async fn main() -> Result<()> {
         config.dns.enabled
     );
 
-    let dns_slot: DnsSlot = Arc::new(RwLock::new(None));
+    // The DNS service always exists so the proxy can resolve through it even
+    // while the DNS listener is disabled; enable/disable only touches the
+    // listener.
+    let dns = DnsService::new(&config.dns, &settings_dir, adblock.clone(), state.clone())?;
     let egress = EgressPolicy::load(
         settings_dir.join("proxy-settings.json"),
-        dns_slot.clone(),
+        dns.clone(),
     );
 
     let client = Arc::new(
@@ -126,10 +128,9 @@ async fn main() -> Result<()> {
         Some(std::sync::Arc::new(proxy)),
         &config.server.listen,
         config.server.enabled,
-        config.dns.clone(),
-        settings_dir.clone(),
-        adblock.clone(),
-        dns_slot,
+        dns,
+        &config.dns.listen,
+        config.dns.enabled,
     )?;
 
     let admin_listen = config.server.admin_listen.clone();

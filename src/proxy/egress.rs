@@ -5,7 +5,7 @@ use std::net::IpAddr;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use lru::LruCache;
@@ -13,8 +13,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::dns::DnsService;
 use crate::support::persist::OverrideStore;
-
-pub type DnsSlot = Arc<RwLock<Option<Arc<DnsService>>>>;
 
 /// How long a resolved host stays in the egress-side cache. This sits in front
 /// of the DNS answer cache purely to skip the resolve pipeline (filter match,
@@ -73,7 +71,7 @@ pub struct EgressSettings {
 }
 
 pub struct EgressPolicy {
-    dns: DnsSlot,
+    dns: Arc<DnsService>,
     resolver_only: AtomicBool,
     use_ech: AtomicBool,
     disable_ipv6: AtomicBool,
@@ -83,7 +81,7 @@ pub struct EgressPolicy {
 }
 
 impl EgressPolicy {
-    pub fn load(store_path: PathBuf, dns: DnsSlot) -> Arc<Self> {
+    pub fn load(store_path: PathBuf, dns: Arc<DnsService>) -> Arc<Self> {
         let store: OverrideStore<EgressOverrides> = OverrideStore::new(store_path);
         let o = store.load();
         Arc::new(Self {
@@ -147,13 +145,7 @@ impl EgressPolicy {
         if let Some(addrs) = self.addr_cache.get(host) {
             return Ok(addrs);
         }
-        let dns = self.dns.read().expect("egress dns lock").clone();
-        let Some(dns) = dns else {
-            return Err(std::io::Error::other(
-                "resolver-only egress is on but the built-in DNS resolver is unavailable",
-            ));
-        };
-        let addrs = dns.resolve(host, !self.disable_ipv6()).await?;
+        let addrs = self.dns.resolve(host, !self.disable_ipv6()).await?;
         self.addr_cache.put(host.to_string(), addrs.clone());
         Ok(addrs)
     }
@@ -165,8 +157,7 @@ impl EgressPolicy {
         if let Some(list) = self.ech_cache.get(host) {
             return list;
         }
-        let dns = self.dns.read().expect("egress dns lock").clone()?;
-        let list = dns.ech_config_list(host).await;
+        let list = self.dns.ech_config_list(host).await;
         self.ech_cache.put(host.to_string(), list.clone());
         list
     }

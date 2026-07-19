@@ -14,7 +14,7 @@ use hyper::{Method, Request, Response};
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpStream;
 
-use crate::net::egress::EgressPolicy;
+use crate::proxy::egress::EgressPolicy;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type Sender = hyper::client::conn::http1::SendRequest<Full<Bytes>>;

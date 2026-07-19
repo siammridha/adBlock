@@ -105,9 +105,7 @@ pub(super) fn edit_exclusions(state: &SharedState, body: &[u8]) -> AdminResponse
 
 pub(super) fn reset(state: &SharedState, runtime: &Runtime) -> AdminResponse {
     state.reset_stats();
-    if let Some(dns) = runtime.dns() {
-        dns.reset_upstream_stats();
-    }
+    runtime.dns().reset_upstream_stats();
     state.log_event(EventKind::Info, "statistics reset");
     json_ok(stats_json(state))
 }

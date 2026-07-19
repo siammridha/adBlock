@@ -2,17 +2,14 @@
 //! reconfigure them without restarting the process.
 
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
-use crate::adblock::AdBlocker;
-use crate::support::config::DnsConfig;
 use crate::dns::{DnsHandles, DnsService};
-use crate::net::egress::DnsSlot;
 use crate::support::error::{Error, Result};
 use crate::support::persist::OverrideStore;
 use crate::proxy::Proxy;
@@ -60,9 +57,6 @@ struct Inner {
     proxy_listen: SocketAddr,
     proxy_task: Option<JoinHandle<()>>,
 
-    dns_base: DnsConfig,
-    dns_data_dir: PathBuf,
-    dns_adblock: Arc<AdBlocker>,
     dns_enabled: bool,
     dns_listen: SocketAddr,
     dns_handles: Option<DnsHandles>,
@@ -73,20 +67,10 @@ struct Inner {
 pub struct Runtime {
     state: Arc<SharedState>,
     store: OverrideStore<ServerOverrides>,
-    dns_current: DnsSlot,
+    // The DNS service outlives its listeners: disabling DNS only stops the
+    // UDP/TCP servers, in-process resolution (the proxy's egress) keeps going.
+    dns: Arc<DnsService>,
     inner: Mutex<Inner>,
-}
-
-fn build_dns(
-    base: &DnsConfig,
-    listen: SocketAddr,
-    data_dir: &Path,
-    adblock: &Arc<AdBlocker>,
-    state: &Arc<SharedState>,
-) -> Result<Arc<DnsService>> {
-    let mut cfg = base.clone();
-    cfg.listen = listen.to_string();
-    DnsService::new(&cfg, data_dir, adblock.clone(), state.clone())
 }
 
 impl Runtime {
@@ -97,10 +81,9 @@ impl Runtime {
         proxy: Option<Arc<dyn ProxyControl>>,
         proxy_cfg_listen: &str,
         proxy_cfg_enabled: bool,
-        dns_base: DnsConfig,
-        dns_data_dir: PathBuf,
-        dns_adblock: Arc<AdBlocker>,
-        dns_slot: DnsSlot,
+        dns: Arc<DnsService>,
+        dns_cfg_listen: &str,
+        dns_cfg_enabled: bool,
     ) -> Result<Arc<Self>> {
         let store: OverrideStore<ServerOverrides> = OverrideStore::new(store_path);
         let overrides = store.load();
@@ -117,31 +100,21 @@ impl Runtime {
         let dns_listen_s = overrides
             .dns_listen
             .clone()
-            .unwrap_or_else(|| dns_base.listen.clone());
+            .unwrap_or_else(|| dns_cfg_listen.to_string());
         let dns_listen = dns_listen_s
             .parse()
             .map_err(|e| Error::Config(format!("invalid dns listen '{dns_listen_s}': {e}")))?;
-        let dns_enabled = overrides.dns_enabled.unwrap_or(dns_base.enabled);
+        let dns_enabled = overrides.dns_enabled.unwrap_or(dns_cfg_enabled);
 
-        let dns_current = if dns_enabled {
-            Some(build_dns(&dns_base, dns_listen, &dns_data_dir, &dns_adblock, &state)?)
-        } else {
-            None
-        };
-
-        *dns_slot.write().expect("dns_current lock") = dns_current;
         Ok(Arc::new(Self {
             state,
             store,
-            dns_current: dns_slot,
+            dns,
             inner: Mutex::new(Inner {
                 proxy,
                 proxy_enabled,
                 proxy_listen,
                 proxy_task: None,
-                dns_base,
-                dns_data_dir,
-                dns_adblock,
                 dns_enabled,
                 dns_listen,
                 dns_handles: None,
@@ -157,9 +130,8 @@ impl Runtime {
                 inner.proxy_task = Some(proxy.bind_and_serve(inner.proxy_listen).await?);
             }
         }
-        let svc = self.dns_current.read().expect("dns_current lock").clone();
-        if let Some(svc) = svc {
-            match svc.start().await {
+        if inner.dns_enabled {
+            match self.dns.start(inner.dns_listen).await {
                 Ok(h) => inner.dns_handles = Some(h),
                 Err(e) => {
                     tracing::error!(error = %e, "dns server");
@@ -171,8 +143,8 @@ impl Runtime {
         Ok(())
     }
 
-    pub fn dns(&self) -> Option<Arc<DnsService>> {
-        self.dns_current.read().expect("dns_current lock").clone()
+    pub fn dns(&self) -> Arc<DnsService> {
+        self.dns.clone()
     }
 
     pub async fn status(&self) -> ServerStatus {
@@ -251,24 +223,10 @@ impl Runtime {
         if let Some(h) = inner.dns_handles.take() {
             h.shutdown().await;
         }
-        let realized = if enabled {
-            let bound = match build_dns(
-                &inner.dns_base,
-                listen,
-                &inner.dns_data_dir,
-                &inner.dns_adblock,
-                &self.state,
-            ) {
-                Ok(svc) => match svc.start().await {
-                    Ok(handles) => Ok((svc, handles)),
-                    Err(e) => Err(e),
-                },
-                Err(e) => Err(e),
-            };
-            match bound {
-                Ok(r) => Some(r),
+        let handles = if enabled {
+            match self.dns.start(listen).await {
+                Ok(h) => Some(h),
                 Err(e) => {
-                    *self.dns_current.write().expect("dns_current lock") = None;
                     inner.dns_enabled = false;
                     self.state
                         .log_event(EventKind::Error, format!("dns bind {listen}: {e}"));
@@ -278,8 +236,6 @@ impl Runtime {
         } else {
             None
         };
-        let (svc, handles) = realized.map_or((None, None), |(s, h)| (Some(s), Some(h)));
-        *self.dns_current.write().expect("dns_current lock") = svc;
         inner.dns_handles = handles;
         inner.dns_enabled = enabled;
         inner.dns_listen = listen;
@@ -340,8 +296,9 @@ fn parse_opt_addr(
 mod tests {
     use super::*;
     use crate::adblock::MemoryListStore;
-    use crate::support::config::{AdblockConfig, LoggingConfig};
+    use crate::support::config::{AdblockConfig, DnsConfig, LoggingConfig};
     use crate::stats::StaticInfo;
+    use std::path::Path;
 
     struct TcpBinder;
 
@@ -371,9 +328,13 @@ mod tests {
     }
 
     fn runtime_in(dir: &Path, cfg_enabled: bool) -> Arc<Runtime> {
+        runtime_with(dir, cfg_enabled, &[])
+    }
+
+    fn runtime_with(dir: &Path, cfg_enabled: bool, rules: &[&str]) -> Arc<Runtime> {
         let cfg = AdblockConfig {
             enabled: true,
-            custom_rules: Vec::new(),
+            custom_rules: rules.iter().map(|s| s.to_string()).collect(),
             data_dir: PathBuf::from("/nonexistent-for-tests"),
             auto_update_hours: 0,
             inject_scriptlets: false,
@@ -391,16 +352,18 @@ mod tests {
             },
             &LoggingConfig { level: "info".into(), log_actions: true, log_requests: true },
         ));
+        let dns_cfg = DnsConfig::default();
+        let dns =
+            DnsService::new(&dns_cfg, dir, adblock, state.clone()).unwrap();
         Runtime::new(
             state,
             dir.join("server-settings.json"),
             Some(Arc::new(TcpBinder)),
             "127.0.0.1:0",
             cfg_enabled,
-            DnsConfig::default(),
-            dir.to_path_buf(),
-            adblock,
-            Arc::new(std::sync::RwLock::new(None)),
+            dns,
+            &dns_cfg.listen,
+            false,
         )
         .unwrap()
     }
@@ -500,6 +463,50 @@ mod tests {
             rt.apply(update(|u| u.proxy_listen = Some(wide.clone()))).await.unwrap();
         assert!(status.proxy_running);
         assert_eq!(status.proxy_listen, wide);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[tokio::test]
+    async fn dns_disable_stops_listener_but_resolver_keeps_answering() {
+        use hickory_proto::op::{Message, Query};
+        use hickory_proto::rr::rdata::A;
+        use hickory_proto::rr::{Name, RData, RecordType};
+        use std::str::FromStr;
+
+        let dir = temp_dir("dns-off");
+        let rt = runtime_with(&dir, false, &["||ads.example.com^"]);
+
+        let addr = free_addr();
+        let status = rt
+            .apply(update(|u| {
+                u.dns_enabled = Some(true);
+                u.dns_listen = Some(addr.to_string());
+            }))
+            .await
+            .unwrap();
+        assert!(status.dns_running && status.dns_enabled);
+
+        let before = rt.dns();
+        let status = rt.apply(update(|u| u.dns_enabled = Some(false))).await.unwrap();
+        assert!(!status.dns_running && !status.dns_enabled);
+
+        // Same service instance: the proxy's egress handle stays valid and the
+        // resolver keeps answering in-process queries with the listener down.
+        let after = rt.dns();
+        assert!(Arc::ptr_eq(&before, &after));
+        let mut msg = Message::query();
+        msg.metadata.id = 7;
+        msg.metadata.recursion_desired = true;
+        msg.add_query(Query::query(
+            Name::from_str("ads.example.com.").unwrap(),
+            RecordType::A,
+        ));
+        let resp = after.handle_proxy(&msg).await;
+        assert_eq!(
+            resp.answers[0].data,
+            RData::A(A(std::net::Ipv4Addr::UNSPECIFIED)),
+            "blocked domain must still get the null-IP answer while the listener is off"
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 }

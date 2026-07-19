@@ -120,7 +120,7 @@ impl Proxy {
         ca: Arc<CertAuthority>,
         state: Arc<SharedState>,
         client: Arc<HttpClient>,
-        egress: Arc<crate::net::egress::EgressPolicy>,
+        egress: Arc<crate::proxy::egress::EgressPolicy>,
     ) -> Self {
         let resolver = Arc::new(EgressResolver(egress));
         Self::with_seams(config, adblock, exclusions, ca, state, client, resolver)

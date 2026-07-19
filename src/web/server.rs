@@ -5,7 +5,7 @@ use std::sync::Arc;
 use hyper::StatusCode;
 use serde_json::{json, Value};
 
-use crate::net::egress::{EgressOverrides, EgressPolicy};
+use crate::proxy::egress::{EgressOverrides, EgressPolicy};
 use crate::web::runtime::{Runtime, ServerOverrides};
 use crate::stats::SharedState;
 

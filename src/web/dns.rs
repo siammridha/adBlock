@@ -20,10 +20,9 @@ struct DnsResponse {
     metrics: Value,
 }
 
-pub(super) fn dns_json(state: &SharedState, dns: Option<&DnsService>) -> Value {
-    let Some(dns) = dns else {
-        return json!({ "enabled": false });
-    };
+pub(super) fn dns_json(state: &SharedState, dns: &DnsService) -> Value {
+    // `enabled` refers to the resolver, which is always on; the listener's
+    // on/off state lives in the server status.
     let resp = DnsResponse { enabled: true, status: dns.status(), metrics: state.metrics.dns_view() };
     serde_json::to_value(resp).unwrap_or_else(|_| json!({ "enabled": false }))
 }
@@ -187,7 +186,7 @@ pub(super) fn edit_dns_config(
     match outcome {
         Ok(msg) => {
             state.log_event(crate::stats::EventKind::Info, msg);
-            json_ok(dns_json(state, Some(dns)))
+            json_ok(dns_json(state, dns))
         }
         Err(e) => json_status(StatusCode::BAD_REQUEST, json!({"error": e})),
     }

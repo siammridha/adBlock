@@ -2,6 +2,7 @@
 
 pub(crate) mod blackhole;
 pub mod ca;
+pub mod egress;
 pub(crate) mod capture;
 pub mod certs;
 pub mod exclusions;
