@@ -2,6 +2,7 @@
 //! and forwards the rest to upstream resolvers.
 
 mod cache;
+pub mod control;
 mod lookup;
 mod plan;
 mod response;

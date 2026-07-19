@@ -3,7 +3,7 @@
 use serde_json::{json, Value};
 
 use crate::stats::history::Metric;
-use crate::web::runtime::Runtime;
+use crate::dns::DnsService;
 use crate::stats::{EventKind, SharedState};
 
 use super::respond::json_ok;
@@ -103,9 +103,9 @@ pub(super) fn edit_exclusions(state: &SharedState, body: &[u8]) -> AdminResponse
     }
 }
 
-pub(super) fn reset(state: &SharedState, runtime: &Runtime) -> AdminResponse {
+pub(super) fn reset(state: &SharedState, dns: &DnsService) -> AdminResponse {
     state.reset_stats();
-    runtime.dns().reset_upstream_stats();
+    dns.reset_upstream_stats();
     state.log_event(EventKind::Info, "statistics reset");
     json_ok(stats_json(state))
 }

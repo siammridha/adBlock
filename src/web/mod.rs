@@ -15,13 +15,14 @@ use tokio::net::TcpListener;
 
 use crate::adblock::updater::ScriptletUpdater;
 use crate::adblock::{AdBlocker, ListCuration};
+use crate::dns::control::DnsRuntime;
 use crate::dns::DnsService;
+use crate::proxy::control::ProxyRuntime;
 use crate::proxy::egress::EgressPolicy;
 use crate::support::error::{Error, Result};
 use crate::proxy::certs::CertStore;
 use crate::proxy::exclusions::ExclusionStore;
 use crate::adblock::maintenance::BlocklistFetcher;
-use crate::web::runtime::Runtime;
 use crate::stats::SharedState;
 
 mod blocklists;
@@ -31,7 +32,6 @@ mod exclusions;
 mod logs;
 mod meta;
 mod respond;
-pub mod runtime;
 mod server;
 mod sse;
 mod stats;
@@ -66,7 +66,8 @@ pub struct Admin {
     exclusions: Arc<ExclusionStore>,
     updater: Arc<ScriptletUpdater>,
     fetcher: Arc<BlocklistFetcher>,
-    runtime: Arc<Runtime>,
+    proxy_runtime: Arc<ProxyRuntime>,
+    dns_runtime: Arc<DnsRuntime>,
     egress: Arc<EgressPolicy>,
     certs: Arc<CertStore>,
 }
@@ -80,7 +81,8 @@ impl Admin {
         exclusions: Arc<ExclusionStore>,
         updater: Arc<ScriptletUpdater>,
         fetcher: Arc<BlocklistFetcher>,
-        runtime: Arc<Runtime>,
+        proxy_runtime: Arc<ProxyRuntime>,
+        dns_runtime: Arc<DnsRuntime>,
         egress: Arc<EgressPolicy>,
         certs: Arc<CertStore>,
     ) -> Arc<Self> {
@@ -91,7 +93,8 @@ impl Admin {
             exclusions,
             updater,
             fetcher,
-            runtime,
+            proxy_runtime,
+            dns_runtime,
             egress,
             certs,
         })
@@ -148,13 +151,13 @@ impl Admin {
             (&Method::GET, "/api/exclusions") => json_ok(exclusions_json(&self.exclusions)),
             (&Method::GET, "/api/stats/exclusions") => json_ok(stats::exclusions_json(&self.state)),
             (&Method::GET, "/api/server") => {
-                json_ok(serde_json::to_value(self.runtime.status().await).unwrap_or_default())
+                json_ok(server::server_status_json(&self.proxy_runtime, &self.dns_runtime).await)
             }
             (&Method::GET, "/api/proxy") => {
                 json_ok(serde_json::to_value(self.egress.settings()).unwrap_or_default())
             }
             (&Method::GET, "/api/dns") => {
-                json_ok(dns_json(&self.state, &self.runtime.dns()))
+                json_ok(dns_json(&self.state, &self.dns_runtime.service()))
             }
             (&Method::GET, "/api/dns/rewrites") => {
                 self.with_dns(|dns| json_ok(rewrites_json(&dns)))
@@ -180,11 +183,13 @@ impl Admin {
             "/api/scriptlets/update" => {
                 blocklists::update_scriptlets(&self.state, &self.updater, &self.curation).await
             }
-            "/api/stats/reset" => stats::reset(&self.state, &self.runtime),
+            "/api/stats/reset" => stats::reset(&self.state, &self.dns_runtime.service()),
             "/api/stats/config" => stats::config(&self.state, body),
             "/api/stats/exclusions" => stats::edit_exclusions(&self.state, body),
             "/api/errors/clear" => meta::clear_errors(&self.state),
-            "/api/server/config" => edit_server_config(&self.runtime, body).await,
+            "/api/server/config" => {
+                edit_server_config(&self.proxy_runtime, &self.dns_runtime, body).await
+            }
             "/api/proxy/config" => edit_proxy_config(&self.state, &self.egress, body),
             "/api/certs" => certs::edit_certs(&self.certs, &self.state, body),
             "/api/blocklists" => self.add_blocklist(body).await,
@@ -208,7 +213,7 @@ impl Admin {
     // The DNS resolver is always available, listener up or not, so rewrites,
     // settings, and cache management keep working while DNS is disabled.
     fn with_dns(&self, f: impl FnOnce(Arc<DnsService>) -> AdminResponse) -> AdminResponse {
-        f(self.runtime.dns())
+        f(self.dns_runtime.service())
     }
 }
 
@@ -365,7 +370,6 @@ mod tests {
     use crate::adblock::MemoryListStore;
     use crate::support::config::{AdblockConfig, DnsConfig, LoggingConfig};
     use crate::adblock::maintenance::{BlocklistFetcher, Downloader};
-    use crate::web::runtime::Runtime;
     use crate::stats::StaticInfo;
 
     struct CannedDownloader(&'static str);
@@ -421,12 +425,19 @@ mod tests {
             dns_dir.join("proxy-settings.json"),
             dns_svc.clone(),
         );
-        let runtime = Runtime::new(
+        let proxy_runtime = ProxyRuntime::new(
             state.clone(),
-            dns_dir.join("server-settings.json"),
+            dns_dir.join("proxy-server.json"),
+            None,
             None,
             "127.0.0.1:8080",
             true,
+        )
+        .unwrap();
+        let dns_runtime = DnsRuntime::new(
+            state.clone(),
+            dns_dir.join("dns-server.json"),
+            None,
             dns_svc,
             &dns_cfg.listen,
             dns_cfg.enabled,
@@ -438,7 +449,18 @@ mod tests {
             std::path::PathBuf::from("/nonexistent-for-tests/ca-cert.pem"),
             std::path::PathBuf::from("/nonexistent-for-tests/ca-key.pem"),
         ));
-        Admin::new(state, adblock, curation, exclusions, updater, fetcher, runtime, egress, certs)
+        Admin::new(
+            state,
+            adblock,
+            curation,
+            exclusions,
+            updater,
+            fetcher,
+            proxy_runtime,
+            dns_runtime,
+            egress,
+            certs,
+        )
     }
 
     fn admin(rules: &[&str], downloader: Arc<dyn Downloader>) -> Arc<Admin> {

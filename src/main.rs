@@ -14,8 +14,9 @@ use proxy::proxy::http_client::HttpClient;
 use proxy::adblock::maintenance::{self, BlocklistFetcher};
 use proxy::proxy::ca::CertAuthority;
 use proxy::proxy::certs::CertStore;
+use proxy::dns::control::DnsRuntime;
+use proxy::proxy::control::ProxyRuntime;
 use proxy::proxy::Proxy;
-use proxy::web::runtime::Runtime;
 use proxy::stats::{SharedState, StaticInfo};
 use proxy::web;
 use proxy::Result;
@@ -129,12 +130,22 @@ async fn main() -> Result<()> {
         client,
         egress.clone(),
     );
-    let runtime = Runtime::new(
+    // Each service owns its lifecycle behind its settings interface; the old
+    // combined server-settings.json seeds them once if their own files are
+    // missing.
+    let legacy_settings = settings_dir.join("server-settings.json");
+    let proxy_runtime = ProxyRuntime::new(
         state.clone(),
-        settings_dir.join("server-settings.json"),
+        settings_dir.join("proxy-server.json"),
+        Some(legacy_settings.clone()),
         Some(std::sync::Arc::new(proxy)),
         &config.server.listen,
         config.server.enabled,
+    )?;
+    let dns_runtime = DnsRuntime::new(
+        state.clone(),
+        settings_dir.join("dns-server.json"),
+        Some(legacy_settings),
         dns,
         &config.dns.listen,
         config.dns.enabled,
@@ -150,7 +161,8 @@ async fn main() -> Result<()> {
             exclusions.clone(),
             updater.clone(),
             fetcher.clone(),
-            runtime.clone(),
+            proxy_runtime.clone(),
+            dns_runtime.clone(),
             egress.clone(),
             certs.clone(),
         );
@@ -169,7 +181,8 @@ async fn main() -> Result<()> {
         config.adblock.auto_update_hours,
     );
 
-    runtime.start_initial().await?;
+    proxy_runtime.start_initial().await?;
+    dns_runtime.start_initial().await?;
     std::future::pending::<()>().await;
     Ok(())
 }
