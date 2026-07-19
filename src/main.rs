@@ -10,7 +10,7 @@ use proxy::support::config::Config;
 use proxy::dns::DnsService;
 use proxy::proxy::egress::EgressPolicy;
 use proxy::proxy::exclusions::ExclusionStore;
-use proxy::net::http_client::HttpClient;
+use proxy::proxy::http_client::HttpClient;
 use proxy::adblock::maintenance::{self, BlocklistFetcher};
 use proxy::proxy::ca::CertAuthority;
 use proxy::proxy::certs::CertStore;
@@ -105,13 +105,20 @@ async fn main() -> Result<()> {
         dns.clone(),
     );
 
+    // Each module owns its outbound networking: the proxy's pooled client
+    // dials through the egress policy, adblock fetches lists with its own
+    // client.
     let client = Arc::new(
         HttpClient::new()
             .with_connect_timeout(config.performance.upstream_timeout_ms)
             .with_egress(egress.clone()),
     );
-    let updater = Arc::new(ScriptletUpdater::ubo(client.clone()));
-    let fetcher = Arc::new(BlocklistFetcher::new(curation.clone(), client.clone()));
+    let fetch_client = Arc::new(
+        proxy::adblock::fetch::HttpClient::new()
+            .with_connect_timeout(config.performance.upstream_timeout_ms),
+    );
+    let updater = Arc::new(ScriptletUpdater::ubo(fetch_client.clone()));
+    let fetcher = Arc::new(BlocklistFetcher::new(curation.clone(), fetch_client));
 
     let proxy = Proxy::new(
         config.clone(),

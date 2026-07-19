@@ -411,7 +411,7 @@ mod tests {
             "/nonexistent-for-tests/excluded-domains.conf",
         )));
         let updater = Arc::new(ScriptletUpdater::ubo(Arc::new(
-            crate::net::http_client::HttpClient::new(),
+            crate::adblock::fetch::HttpClient::new(),
         )));
         let fetcher = Arc::new(BlocklistFetcher::new(curation.clone(), downloader));
         let dns_cfg = DnsConfig::default();

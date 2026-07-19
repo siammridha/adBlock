@@ -3,7 +3,6 @@
 
 pub mod adblock;
 pub mod dns;
-pub mod net;
 pub mod proxy;
 pub mod stats;
 pub mod support;

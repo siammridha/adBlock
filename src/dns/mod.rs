@@ -8,6 +8,7 @@ mod response;
 mod rewrites;
 mod server;
 mod settings;
+mod tls;
 mod upstream;
 
 use std::net::SocketAddr;

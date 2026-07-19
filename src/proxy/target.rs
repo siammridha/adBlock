@@ -62,19 +62,6 @@ impl HttpTarget {
     }
 }
 
-pub(crate) fn normalize_test_url(input: &str) -> String {
-    let s = input.trim();
-    if s.starts_with("http://") || s.starts_with("https://") {
-        s.to_string()
-    } else if let Some(rest) = s.strip_prefix("//") {
-        format!("https://{rest}")
-    } else if s.starts_with('/') {
-        format!("https://any-host.invalid{s}")
-    } else {
-        format!("https://{s}")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,13 +91,4 @@ mod tests {
         assert!(HttpTarget::parse("/no/host").is_err());
     }
 
-    #[test]
-    fn tester_input_is_lax() {
-        assert_eq!(normalize_test_url("https://a.com/x"), "https://a.com/x");
-        assert_eq!(normalize_test_url("http://a.com"), "http://a.com");
-        assert_eq!(normalize_test_url("a.com"), "https://a.com");
-        assert_eq!(normalize_test_url(" ads.host.com/pixel?id=1 "), "https://ads.host.com/pixel?id=1");
-        assert_eq!(normalize_test_url("//cdn.a.com/x.js"), "https://cdn.a.com/x.js");
-        assert_eq!(normalize_test_url("/ads.js"), "https://any-host.invalid/ads.js");
-    }
 }

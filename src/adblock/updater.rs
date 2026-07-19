@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::net::http_client::HttpClient;
+use super::fetch::HttpClient;
 
 use super::ListCuration;
 

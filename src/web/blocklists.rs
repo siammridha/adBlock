@@ -101,7 +101,7 @@ pub(super) fn check_rule(adblock: &AdBlocker, body: &[u8]) -> AdminResponse {
         Err(e) => return json_status(StatusCode::BAD_REQUEST, json!({"error": e.to_string()})),
     };
     let url = match v.get("url").and_then(Value::as_str) {
-        Some(u) if !u.trim().is_empty() => crate::net::target::normalize_test_url(u),
+        Some(u) if !u.trim().is_empty() => crate::adblock::normalize_test_url(u),
         _ => return json_status(StatusCode::BAD_REQUEST, json!({"error": "missing 'url'"})),
     };
     let req_type = v.get("type").and_then(Value::as_str).unwrap_or("other");

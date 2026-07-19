@@ -6,7 +6,7 @@ use std::time::Duration;
 use crate::adblock::updater::ScriptletUpdater;
 use crate::adblock::{ListCuration, ListEntry};
 use crate::support::error::Error;
-use crate::net::http_client::HttpClient;
+use super::fetch::HttpClient;
 use crate::stats::{EventKind, SharedState};
 
 type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;

@@ -77,7 +77,7 @@ impl CertAuthority {
         let key_der =
             PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf_key.serialize_der()));
 
-        crate::net::http_client::ensure_crypto_provider();
+        crate::proxy::http_client::ensure_crypto_provider();
         ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(chain, key_der)

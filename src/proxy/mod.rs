@@ -7,7 +7,9 @@ pub(crate) mod capture;
 pub mod certs;
 pub mod exclusions;
 pub(crate) mod html;
+pub mod http_client;
 pub(crate) mod pipeline;
 pub mod server;
+pub(crate) mod target;
 
 pub use server::Proxy;

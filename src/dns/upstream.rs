@@ -244,7 +244,7 @@ impl Resolver {
             mode,
             bootstrap,
             timeout: Duration::from_millis(timeout_ms.max(100)),
-            tls: tokio_rustls::TlsConnector::from(crate::net::http_client::default_client_config()),
+            tls: tokio_rustls::TlsConnector::from(super::tls::client_config()),
             preferred: AtomicUsize::new(0),
         })
     }

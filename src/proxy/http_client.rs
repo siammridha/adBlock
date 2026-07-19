@@ -1,5 +1,5 @@
-//! HTTP/1.1 client with per-host connection pooling and optional TLS/ECH.
-//! Used both as the proxy upstream and for blocklist downloads.
+//! The proxy's upstream HTTP/1.1 client: per-host connection pooling,
+//! optional TLS/ECH, and egress-policy-aware dialing.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -14,7 +14,7 @@ use hyper::{Method, Request, Response};
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpStream;
 
-use crate::proxy::egress::EgressPolicy;
+use super::egress::EgressPolicy;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type Sender = hyper::client::conn::http1::SendRequest<Full<Bytes>>;
@@ -286,7 +286,7 @@ impl HttpClient {
 
         let mut url = url.to_string();
         for _ in 0..=MAX_REDIRECTS {
-            let t = crate::net::target::HttpTarget::parse(&url)?;
+            let t = super::target::HttpTarget::parse(&url)?;
 
             let req = Request::builder()
                 .method(Method::GET)

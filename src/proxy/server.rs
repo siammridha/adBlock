@@ -18,7 +18,7 @@ use crate::support::config::Config;
 use crate::support::error::{Error, Result};
 use crate::proxy::exclusions::ExclusionStore;
 use crate::stats::history::Metric;
-use crate::net::http_client::HttpClient;
+use super::http_client::HttpClient;
 use crate::proxy::blackhole::{BlackholeProbe, EgressResolver, Resolver};
 use crate::proxy::ca::CertAuthority;
 use crate::proxy::{capture, pipeline};
@@ -310,7 +310,7 @@ impl Proxy {
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
-        let (host, port) = crate::net::target::split_host_port(authority, 443);
+        let (host, port) = crate::proxy::target::split_host_port(authority, 443);
         let mut upstream = self
             .inner
             .client

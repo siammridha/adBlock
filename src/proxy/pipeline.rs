@@ -110,7 +110,7 @@ pub(crate) fn response_is_injectable(status: StatusCode, headers: &HeaderMap) ->
 fn target_of<B>(
     req: &Request<B>,
     secure: bool,
-) -> std::result::Result<crate::net::target::HttpTarget, BoxError> {
+) -> std::result::Result<crate::proxy::target::HttpTarget, BoxError> {
     let uri = req.uri();
     let path = uri
         .path_and_query()
@@ -122,8 +122,8 @@ fn target_of<B>(
         let host = authority.host().to_string();
         let port = authority
             .port_u16()
-            .unwrap_or(crate::net::target::default_port(&scheme));
-        Ok(crate::net::target::HttpTarget { scheme, host, port, path })
+            .unwrap_or(crate::proxy::target::default_port(&scheme));
+        Ok(crate::proxy::target::HttpTarget { scheme, host, port, path })
     } else {
         let host_header = req
             .headers()
@@ -132,8 +132,8 @@ fn target_of<B>(
             .ok_or("request without Host header")?;
         let scheme = if secure { "https" } else { "http" }.to_string();
         let (host, port) =
-            crate::net::target::split_host_port(host_header, crate::net::target::default_port(&scheme));
-        Ok(crate::net::target::HttpTarget { scheme, host, port, path })
+            crate::proxy::target::split_host_port(host_header, crate::proxy::target::default_port(&scheme));
+        Ok(crate::proxy::target::HttpTarget { scheme, host, port, path })
     }
 }
 

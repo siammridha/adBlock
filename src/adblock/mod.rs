@@ -12,6 +12,7 @@ use crate::support::config::AdblockConfig;
 use crate::support::error::Result;
 
 mod curation;
+pub mod fetch;
 pub mod maintenance;
 mod scriptlets;
 mod store;
@@ -25,6 +26,22 @@ use scriptlets::ScriptletLibrary as Scriptlets;
 
 pub const CUSTOM_LIST: &str = "custom";
 const CUSTOM_SOURCE: &str = "config + ui";
+
+/// Loosen rule-tester input into a full URL: the tester accepts bare hosts,
+/// protocol-relative URLs, and bare paths. Owned by adblock because the rule
+/// tester is adblock's; callers pass raw input through.
+pub fn normalize_test_url(input: &str) -> String {
+    let s = input.trim();
+    if s.starts_with("http://") || s.starts_with("https://") {
+        s.to_string()
+    } else if let Some(rest) = s.strip_prefix("//") {
+        format!("https://{rest}")
+    } else if s.starts_with('/') {
+        format!("https://any-host.invalid{s}")
+    } else {
+        format!("https://{s}")
+    }
+}
 
 struct EngineCore {
     enabled: bool,
@@ -728,5 +745,15 @@ mod tests {
         );
         let plain = "https://easylist.to/easylist/easylist.txt";
         assert_eq!(normalize_list_url(plain), plain);
+    }
+
+    #[test]
+    fn tester_input_is_lax() {
+        assert_eq!(normalize_test_url("https://a.com/x"), "https://a.com/x");
+        assert_eq!(normalize_test_url("http://a.com"), "http://a.com");
+        assert_eq!(normalize_test_url("a.com"), "https://a.com");
+        assert_eq!(normalize_test_url(" ads.host.com/pixel?id=1 "), "https://ads.host.com/pixel?id=1");
+        assert_eq!(normalize_test_url("//cdn.a.com/x.js"), "https://cdn.a.com/x.js");
+        assert_eq!(normalize_test_url("/ads.js"), "https://any-host.invalid/ads.js");
     }
 }
