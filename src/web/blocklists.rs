@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 
 use crate::adblock::updater::{ScriptletUpdater, UBO_TARBALL_PAGE};
 use crate::adblock::{AdBlocker, ListCuration, ListEntry, RulesUpdate};
-use crate::support::error::Result;
+use crate::adblock::error::Result;
 use crate::adblock::maintenance::{event_list_change, event_scriptlets, RefreshError};
 use crate::stats::{EventKind, SharedState};
 

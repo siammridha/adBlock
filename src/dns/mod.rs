@@ -2,8 +2,11 @@
 //! and forwards the rest to upstream resolvers.
 
 mod cache;
+pub mod config;
 pub mod control;
+pub mod error;
 mod lookup;
+mod persist;
 mod plan;
 mod response;
 mod rewrites;
@@ -23,8 +26,8 @@ use hickory_proto::rr::{Name, RData, Record, RecordType};
 use serde::Serialize;
 
 use crate::adblock::AdBlocker;
-use crate::support::config::{BlockingMode, DnsConfig};
-use crate::support::error::{Error, Result};
+use error::{Error, Result};
+pub use config::{BlockingMode, DnsConfig, UpstreamMode};
 use crate::stats::history::Metric;
 use crate::stats::{DnsOutcome, DnsRecord, EventKind, SharedState};
 
@@ -185,7 +188,7 @@ impl DnsService {
     }
 
     #[cfg(test)]
-    fn upstream_mode(&self) -> crate::support::config::UpstreamMode {
+    fn upstream_mode(&self) -> crate::dns::config::UpstreamMode {
         self.live().settings.upstream_mode
     }
 
@@ -453,8 +456,8 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     use crate::adblock::{with_store, MemoryListStore};
-    use crate::support::config::AdblockConfig;
-    use crate::support::config::LoggingConfig;
+    use crate::adblock::AdblockConfig;
+    use crate::stats::LoggingConfig;
     use crate::stats::StaticInfo;
     use hickory_proto::op::OpCode;
     use hickory_proto::rr::rdata::svcb::{EchConfigList, SvcParamKey, SvcParamValue, SVCB};
@@ -891,14 +894,14 @@ mod tests {
 
         svc.apply_settings(DnsOverrides {
             upstreams: Some(vec!["udp://127.0.0.2:53".into()]),
-            upstream_mode: Some(crate::support::config::UpstreamMode::Parallel),
+            upstream_mode: Some(crate::dns::config::UpstreamMode::Parallel),
             cache_size: Some(2),
             min_ttl_secs: Some(5),
             ..Default::default()
         })
         .unwrap();
         assert_eq!(svc.upstream_specs(), vec!["udp://127.0.0.2:53".to_string()]);
-        assert_eq!(svc.upstream_mode(), crate::support::config::UpstreamMode::Parallel);
+        assert_eq!(svc.upstream_mode(), crate::dns::config::UpstreamMode::Parallel);
         assert_eq!(svc.cache().capacity(), 2);
         assert_eq!(svc.cache().min_ttl(), 5);
 
@@ -909,12 +912,12 @@ mod tests {
         };
         let svc2 = DnsService::new(&cfg, &dir, svc.adblock.clone(), svc.state.clone()).unwrap();
         assert_eq!(svc2.upstream_specs(), vec!["udp://127.0.0.2:53".to_string()]);
-        assert_eq!(svc2.upstream_mode(), crate::support::config::UpstreamMode::Parallel);
+        assert_eq!(svc2.upstream_mode(), crate::dns::config::UpstreamMode::Parallel);
         assert_eq!(svc2.cache().capacity(), 2);
 
         svc2.reset_settings().unwrap();
         assert_eq!(svc2.upstream_specs(), base_upstreams);
-        assert_eq!(svc2.upstream_mode(), crate::support::config::UpstreamMode::Failover);
+        assert_eq!(svc2.upstream_mode(), crate::dns::config::UpstreamMode::Failover);
         assert_eq!(svc2.cache().capacity(), cfg.cache_size);
         let svc3 = DnsService::new(&cfg, &dir, svc.adblock.clone(), svc.state.clone()).unwrap();
         assert_eq!(svc3.upstream_specs(), base_upstreams);

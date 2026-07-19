@@ -11,8 +11,8 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 
 use super::{DnsHandles, DnsService};
-use crate::support::error::{Error, Result};
-use crate::support::persist::OverrideStore;
+use crate::dns::error::{Error, Result};
+use crate::dns::persist::OverrideStore;
 use crate::stats::{EventKind, SharedState};
 
 /// Persisted overrides for the DNS listener (its own settings file).
@@ -231,7 +231,9 @@ fn legacy_overrides(path: Option<&std::path::Path>) -> DnsServerOverrides {
 mod tests {
     use super::*;
     use crate::adblock::MemoryListStore;
-    use crate::support::config::{AdblockConfig, DnsConfig, LoggingConfig};
+    use crate::adblock::AdblockConfig;
+    use crate::dns::DnsConfig;
+    use crate::stats::LoggingConfig;
     use crate::stats::StaticInfo;
     use std::path::Path;
 

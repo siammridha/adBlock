@@ -5,8 +5,8 @@ use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 
-use crate::support::error::{Error, Result};
-use crate::support::persist::{Entry, PersistedSet};
+use crate::dns::error::{Error, Result};
+use crate::dns::persist::{Entry, PersistedSet};
 
 const FILE_HEADER: &str = "# DNS rewrites (local records). Managed by the admin UI; one\n\
                            # \"domain answer\" per line. *.domain covers the domain and subdomains.";

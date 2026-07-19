@@ -160,7 +160,7 @@ impl ScriptletUpdater {
 mod tests {
     use super::*;
     use crate::adblock::MemoryListStore;
-    use crate::support::config::AdblockConfig;
+    use crate::adblock::AdblockConfig;
     use base64::{engine::general_purpose::STANDARD, Engine as _};
 
     struct CannedSource(std::result::Result<Vec<u8>, String>);

@@ -12,7 +12,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::ServerConfig;
 use tokio::sync::Mutex;
 
-use crate::support::error::{Error, Result};
+use crate::proxy::error::{Error, Result};
 
 pub struct CertAuthority {
     ca_cert: Certificate,

@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use crate::adblock::updater::ScriptletUpdater;
 use crate::adblock::{ListCuration, ListEntry};
-use crate::support::error::Error;
+use crate::adblock::error::Error;
 use super::fetch::HttpClient;
 use crate::stats::{EventKind, SharedState};
 
@@ -128,7 +128,8 @@ pub fn spawn_blocklist_updater(
 mod tests {
     use super::*;
     use crate::adblock::MemoryListStore;
-    use crate::support::config::{AdblockConfig, LoggingConfig};
+    use crate::adblock::AdblockConfig;
+    use crate::stats::LoggingConfig;
     use crate::stats::StaticInfo;
 
     struct CannedDownloader(std::result::Result<&'static str, &'static str>);

@@ -2,13 +2,16 @@
 
 pub(crate) mod blackhole;
 pub mod ca;
-pub mod control;
-pub mod egress;
 pub(crate) mod capture;
 pub mod certs;
+pub mod config;
+pub mod control;
+pub mod egress;
+pub mod error;
 pub mod exclusions;
 pub(crate) mod html;
 pub mod http_client;
+pub(crate) mod persist;
 pub(crate) mod pipeline;
 pub mod server;
 pub(crate) mod target;

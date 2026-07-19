@@ -9,7 +9,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
 
 use super::DnsService;
-use crate::support::error::{Error, Result};
+use crate::dns::error::{Error, Result};
 
 const CLASSIC_UDP_LIMIT: u16 = 512;
 const TCP_IDLE: Duration = Duration::from_secs(30);

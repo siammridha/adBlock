@@ -8,15 +8,17 @@ use adblock::request::Request;
 use adblock::resources::Resource;
 use adblock::Engine;
 
-use crate::support::config::AdblockConfig;
-use crate::support::error::Result;
+use error::Result;
 
+pub mod config;
 mod curation;
+pub mod error;
 pub mod fetch;
 pub mod maintenance;
 mod scriptlets;
 mod store;
 pub mod updater;
+pub use config::AdblockConfig;
 pub use curation::{ListCuration, RulesUpdate};
 pub(crate) use curation::normalize_list_url;
 pub use scriptlets::{ScriptletInfo, ScriptletInjection, ScriptletLibrary};

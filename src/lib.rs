@@ -2,11 +2,12 @@
 //! and a web admin UI.
 
 pub mod adblock;
+mod config;
 pub mod dns;
+mod error;
 pub mod proxy;
 pub mod stats;
-pub mod support;
 pub mod web;
 
-pub use support::config::Config;
-pub use support::error::{Error, Result};
+pub use config::Config;
+pub use error::{Error, Result};

@@ -7,8 +7,8 @@ use std::sync::{Arc, RwLock};
 
 use adblock::resources::Resource;
 
-use crate::support::config::AdblockConfig;
-use crate::support::error::{Error, Result};
+use crate::adblock::AdblockConfig;
+use crate::adblock::error::{Error, Result};
 
 pub struct ScriptletInjection {
     pub js: String,

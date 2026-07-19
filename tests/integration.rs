@@ -5,7 +5,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use proxy::adblock::{AdBlocker, ListCuration, MemoryListStore};
-use proxy::support::config::{AdblockConfig, Config};
+use proxy::adblock::AdblockConfig;
+use proxy::Config;
 use proxy::proxy::exclusions::ExclusionStore;
 
 fn blocker(rules: &[&str]) -> Arc<AdBlocker> {

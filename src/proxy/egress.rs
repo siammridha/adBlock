@@ -12,7 +12,7 @@ use lru::LruCache;
 use serde::{Deserialize, Serialize};
 
 use crate::dns::DnsService;
-use crate::support::persist::OverrideStore;
+use crate::proxy::persist::OverrideStore;
 
 /// How long a resolved host stays in the egress-side cache. This sits in front
 /// of the DNS answer cache purely to skip the resolve pipeline (filter match,

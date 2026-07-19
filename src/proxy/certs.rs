@@ -10,8 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::proxy::ca::{generate_root_ca, CertAuthority};
-use crate::support::error::{Error, Result};
-use crate::support::persist::OverrideStore;
+use crate::proxy::error::{Error, Result};
+use crate::proxy::persist::OverrideStore;
 
 const CERT_FILE: &str = "cert.pem";
 const KEY_FILE: &str = "key.pem";

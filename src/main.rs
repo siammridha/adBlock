@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use proxy::adblock::updater::ScriptletUpdater;
-use proxy::support::config::Config;
+use proxy::Config;
 use proxy::dns::DnsService;
 use proxy::proxy::egress::EgressPolicy;
 use proxy::proxy::exclusions::ExclusionStore;
@@ -122,7 +122,7 @@ async fn main() -> Result<()> {
     let fetcher = Arc::new(BlocklistFetcher::new(curation.clone(), fetch_client));
 
     let proxy = Proxy::new(
-        config.clone(),
+        config.performance.max_inspect_bytes,
         adblock.clone(),
         exclusions.clone(),
         ca,

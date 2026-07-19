@@ -4,12 +4,23 @@
 
 use std::path::PathBuf;
 
-use crate::support::error::{Error, Result};
-use crate::support::persist::PersistedSet;
+use crate::stats::error::{Error, Result};
+use crate::stats::persist::{Entry, PersistedSet};
 
 const FILE_HEADER: &str = "# Domains excluded from statistics and logging. Managed by the admin UI;\n\
                            # one host per line. Matches the exact host or any subdomain (a leading\n\
                            # *. is accepted and means the same thing).";
+
+impl Entry for String {
+    fn parse(line: &str) -> Option<Self> {
+        let d = normalize(line);
+        (!d.is_empty()).then_some(d)
+    }
+
+    fn format(&self) -> String {
+        self.clone()
+    }
+}
 
 pub struct StatsExclusions {
     domains: PersistedSet<String>,

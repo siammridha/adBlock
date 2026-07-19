@@ -1,4 +1,4 @@
-//! Crate-wide `Error` enum and `Result` alias.
+//! Proxy's own error type.
 
 pub type Result<T> = std::result::Result<T, Error>;
 

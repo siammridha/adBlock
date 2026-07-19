@@ -19,7 +19,6 @@ use crate::dns::control::DnsRuntime;
 use crate::dns::DnsService;
 use crate::proxy::control::ProxyRuntime;
 use crate::proxy::egress::EgressPolicy;
-use crate::support::error::{Error, Result};
 use crate::proxy::certs::CertStore;
 use crate::proxy::exclusions::ExclusionStore;
 use crate::adblock::maintenance::BlocklistFetcher;
@@ -54,6 +53,32 @@ pub(crate) use self::dns::{DnsConfigCommand, RewriteCommand};
 pub(crate) use self::exclusions::ExclusionCommand;
 
 type AdminResponse = Response<BoxBody<Bytes, Infallible>>;
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+/// The web app's own error: bad admin listen address or a serving I/O error.
+#[derive(Debug)]
+pub enum Error {
+    Config(String),
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::Config(m) => write!(f, "web error: {m}"),
+            Error::Io(e) => write!(f, "web io error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+impl From<std::io::Error> for Error {
+    fn from(e: std::io::Error) -> Self {
+        Error::Io(e)
+    }
+}
 
 pub(crate) trait AdminCommand: Sized {
     fn parse(body: &[u8]) -> std::result::Result<Self, String>;
@@ -368,7 +393,9 @@ mod tests {
     }
 
     use crate::adblock::MemoryListStore;
-    use crate::support::config::{AdblockConfig, DnsConfig, LoggingConfig};
+    use crate::adblock::AdblockConfig;
+    use crate::dns::DnsConfig;
+    use crate::stats::LoggingConfig;
     use crate::adblock::maintenance::{BlocklistFetcher, Downloader};
     use crate::stats::StaticInfo;
 

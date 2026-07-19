@@ -14,8 +14,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
 
 use crate::adblock::AdBlocker;
-use crate::support::config::Config;
-use crate::support::error::{Error, Result};
+use crate::proxy::error::{Error, Result};
 use crate::proxy::exclusions::ExclusionStore;
 use crate::stats::history::Metric;
 use super::http_client::HttpClient;
@@ -103,7 +102,7 @@ pub struct Proxy {
 }
 
 struct Inner {
-    config: Config,
+    max_inspect_bytes: usize,
     adblock: Arc<AdBlocker>,
     exclusions: Arc<ExclusionStore>,
     ca: Arc<CertAuthority>,
@@ -114,7 +113,7 @@ struct Inner {
 
 impl Proxy {
     pub fn new(
-        config: Config,
+        max_inspect_bytes: usize,
         adblock: Arc<AdBlocker>,
         exclusions: Arc<ExclusionStore>,
         ca: Arc<CertAuthority>,
@@ -123,11 +122,11 @@ impl Proxy {
         egress: Arc<crate::proxy::egress::EgressPolicy>,
     ) -> Self {
         let resolver = Arc::new(EgressResolver(egress));
-        Self::with_seams(config, adblock, exclusions, ca, state, client, resolver)
+        Self::with_seams(max_inspect_bytes, adblock, exclusions, ca, state, client, resolver)
     }
 
     pub(crate) fn with_seams(
-        config: Config,
+        max_inspect_bytes: usize,
         adblock: Arc<AdBlocker>,
         exclusions: Arc<ExclusionStore>,
         ca: Arc<CertAuthority>,
@@ -137,7 +136,7 @@ impl Proxy {
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
-                config,
+                max_inspect_bytes,
                 adblock,
                 exclusions,
                 ca,
@@ -418,7 +417,7 @@ impl Proxy {
             let script = injection.as_ref().map(|i| i.js.as_str()).unwrap_or("");
             let plan = pipeline::plan_inspection(
                 self.inner.adblock.scriptlets_enabled(),
-                self.inner.config.performance.max_inspect_bytes,
+                self.inner.max_inspect_bytes,
             );
             let (mut parts, body) = resp.into_parts();
             let resp_enc = capture::BodyEncoding::from_headers(&parts.headers);
@@ -481,7 +480,9 @@ mod tests {
 
     use crate::proxy::blackhole::BLACKHOLE_TTL;
     use crate::adblock::MemoryListStore;
-    use crate::support::config::{AdblockConfig, LoggingConfig};
+    use crate::adblock::AdblockConfig;
+    use crate::proxy::config::PerformanceConfig;
+    use crate::stats::LoggingConfig;
     use crate::stats::StaticInfo;
     use hyper::StatusCode;
 
@@ -607,7 +608,7 @@ mod tests {
             std::path::PathBuf::from("/nonexistent-for-tests/excluded-domains.conf"),
         ));
         let proxy = Proxy::with_seams(
-            Config::default(),
+            PerformanceConfig::default().max_inspect_bytes,
             adblock,
             exclusions,
             ca,

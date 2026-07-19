@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::support::config::{DnsConfig, UpstreamMode};
+use super::config::{DnsConfig, UpstreamMode};
 
 macro_rules! dns_tunables {
     ($( $field:ident : $ty:ty ),+ $(,)?) => {
@@ -50,7 +50,7 @@ dns_tunables! {
     log_ipv6: bool,
 }
 
-pub type SettingsStore = crate::support::persist::OverrideStore<DnsOverrides>;
+pub type SettingsStore = crate::dns::persist::OverrideStore<DnsOverrides>;
 
 impl EffectiveDnsSettings {
 

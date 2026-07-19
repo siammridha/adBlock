@@ -17,7 +17,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::Mutex;
 
-pub use crate::support::config::UpstreamMode;
+pub use super::config::UpstreamMode;
 
 type TlsStream = tokio_rustls::client::TlsStream<TcpStream>;
 type HttpSender = hyper::client::conn::http1::SendRequest<Full<Bytes>>;

@@ -64,7 +64,7 @@ pub(super) fn plan_query(
 mod tests {
     use super::*;
     use crate::adblock::{with_store, MemoryListStore};
-    use crate::support::config::AdblockConfig;
+    use crate::adblock::AdblockConfig;
     use hickory_proto::rr::Name;
     use std::path::PathBuf;
     use std::str::FromStr;

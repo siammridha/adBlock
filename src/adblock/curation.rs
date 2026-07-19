@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use crate::support::error::{Error, Result};
+use crate::adblock::error::{Error, Result};
 
 use super::scriptlets::ScriptletLibrary;
 use super::store::{ListId, ListStore, StoredList};

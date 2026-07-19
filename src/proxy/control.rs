@@ -11,8 +11,8 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
-use crate::support::error::Result;
-use crate::support::persist::OverrideStore;
+use crate::proxy::error::Result;
+use crate::proxy::persist::OverrideStore;
 use crate::proxy::Proxy;
 use crate::stats::{EventKind, SharedState};
 
@@ -105,7 +105,7 @@ impl ProxyRuntime {
             .clone()
             .unwrap_or_else(|| cfg_listen.to_string());
         let listen = listen_s.parse().map_err(|e| {
-            crate::support::error::Error::Config(format!("invalid proxy listen '{listen_s}': {e}"))
+            crate::proxy::error::Error::Config(format!("invalid proxy listen '{listen_s}': {e}"))
         })?;
         let enabled = overrides.enabled.unwrap_or(cfg_enabled);
 
@@ -248,8 +248,8 @@ fn legacy_overrides(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::support::config::LoggingConfig;
-    use crate::support::error::Error;
+    use crate::stats::LoggingConfig;
+    use crate::proxy::error::Error;
     use crate::stats::StaticInfo;
     use std::path::Path;
 

@@ -9,18 +9,21 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use serde_json::json;
 use tokio::sync::broadcast;
 
-use crate::support::config::LoggingConfig;
-use crate::support::persist::OverrideStore;
+use crate::stats::persist::OverrideStore;
 
 use history::{History, Metric};
 
+pub mod config;
 mod errors;
+pub mod error;
 mod exclude;
 pub mod history;
 mod logs;
+mod persist;
 mod records;
 
 use errors::ErrorLog;
+pub use config::LoggingConfig;
 pub use exclude::StatsExclusions;
 use logs::RotatingLog;
 pub use records::{

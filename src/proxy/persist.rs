@@ -1,5 +1,6 @@
-//! Small persistence helpers: a line-based set file (`PersistedSet`) and a
-//! JSON settings-override file (`OverrideStore`).
+//! Proxy's persistence helpers: a line-based set file (`PersistedSet`) and
+//! a JSON settings-override file (`OverrideStore`). Each module keeps its own
+//! copy — no shared helpers.
 
 use std::path::PathBuf;
 use std::sync::RwLock;
@@ -7,7 +8,7 @@ use std::sync::RwLock;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-use crate::support::error::{Error, Result};
+use super::error::{Error, Result};
 
 pub trait Entry: Sized {
     fn parse(line: &str) -> Option<Self>;
@@ -90,13 +91,6 @@ impl<T: Default + Serialize + DeserializeOwned> OverrideStore<T> {
             .map_err(|e| format!("writing {}: {e}", self.path.display()))
     }
 
-    pub fn reset(&self) -> std::result::Result<(), String> {
-        match std::fs::remove_file(&self.path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(format!("removing {}: {e}", self.path.display())),
-        }
-    }
 }
 
 fn parse_lines<T: Entry>(text: &str) -> Vec<T> {
@@ -218,9 +212,5 @@ mod tests {
 
         std::fs::write(&path, "{ not json").unwrap();
         assert_eq!(store.load(), Knobs::default(), "corrupt file = no overrides, not a crash");
-
-        store.reset().unwrap();
-        store.reset().unwrap();
-        assert!(!path.exists());
     }
 }

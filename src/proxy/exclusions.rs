@@ -3,8 +3,8 @@
 
 use std::path::PathBuf;
 
-use crate::support::error::{Error, Result};
-use crate::support::persist::{Entry, PersistedSet};
+use crate::proxy::error::{Error, Result};
+use crate::proxy::persist::{Entry, PersistedSet};
 
 const FILE_HEADER: &str = "# Domains that bypass MITM inspection (blind tunnel). Managed by the\n\
                            # admin UI; one host per line. Matches the exact host or any subdomain\n\

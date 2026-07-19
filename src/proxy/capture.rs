@@ -352,7 +352,7 @@ mod tests {
     }
 
     fn bare_state() -> crate::stats::SharedState {
-        use crate::support::config::LoggingConfig;
+        use crate::stats::LoggingConfig;
         use crate::stats::{SharedState, StaticInfo};
         SharedState::new(
             StaticInfo {
