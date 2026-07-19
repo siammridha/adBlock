@@ -6,11 +6,15 @@ use http_body_util::{BodyExt, Full};
 use hyper::{Response, StatusCode};
 use serde_json::{json, Value};
 
-use super::{AdminCommand, AdminResponse};
+use super::AdminResponse;
 
+/// Turn a module's parse result into either the command or a rendered 400.
+/// The module did the validating; this only renders its error.
 #[allow(clippy::result_large_err)]
-pub(super) fn command<C: AdminCommand>(body: &[u8]) -> std::result::Result<C, AdminResponse> {
-    C::parse(body).map_err(|e| json_status(StatusCode::BAD_REQUEST, json!({ "error": e })))
+pub(super) fn command<C>(
+    parsed: std::result::Result<C, String>,
+) -> std::result::Result<C, AdminResponse> {
+    parsed.map_err(|e| json_status(StatusCode::BAD_REQUEST, json!({ "error": e })))
 }
 
 pub(super) fn json_ok(v: Value) -> AdminResponse {

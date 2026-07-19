@@ -4,10 +4,9 @@
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::{Response, StatusCode};
-use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::proxy::certs::CertStore;
+use crate::proxy::certs::{CertCommand, CertStore};
 use crate::stats::{EventKind, SharedState};
 
 use super::respond::{json_ok, json_status, parse_query, percent_decode};
@@ -17,51 +16,37 @@ pub(super) fn certs_json(store: &CertStore) -> Value {
     json!({ "certs": store.list() })
 }
 
-#[derive(Deserialize)]
-struct CertCommand {
-    action: String,
-    #[serde(default)]
-    name: String,
-    #[serde(default)]
-    cert: String,
-    #[serde(default)]
-    key: String,
-    #[serde(default)]
-    common_name: String,
-}
-
 pub(super) fn edit_certs(store: &CertStore, state: &SharedState, body: &[u8]) -> AdminResponse {
-    let cmd: CertCommand = match serde_json::from_slice(body) {
+    let cmd = match CertCommand::parse(body) {
         Ok(c) => c,
-        Err(e) => {
-            return json_status(StatusCode::BAD_REQUEST, json!({ "error": format!("bad request: {e}") }))
-        }
+        Err(e) => return json_status(StatusCode::BAD_REQUEST, json!({ "error": e })),
     };
+    let action = cmd.action();
+    let name = cmd.name().to_string();
 
-    let result: std::result::Result<Value, String> = match cmd.action.as_str() {
-        "add" => store
-            .add_pem(&cmd.name, &cmd.cert, &cmd.key)
-            .map(|_| json!({ "ok": true, "added": cmd.name }))
+    let result: std::result::Result<Value, String> = match &cmd {
+        CertCommand::Add { name, cert, key } => store
+            .add_pem(name, cert, key)
+            .map(|_| json!({ "ok": true, "added": name }))
             .map_err(|e| e.to_string()),
-        "generate" => store
-            .generate(&cmd.name, &cmd.common_name)
-            .map(|pem| json!({ "ok": true, "added": cmd.name, "cert": pem }))
+        CertCommand::Generate { name, common_name } => store
+            .generate(name, common_name)
+            .map(|pem| json!({ "ok": true, "added": name, "cert": pem }))
             .map_err(|e| e.to_string()),
-        "activate" => store
-            .activate(&cmd.name)
+        CertCommand::Activate { name } => store
+            .activate(name)
             // The running proxy binds its CA once, so a switch needs a restart.
-            .map(|_| json!({ "ok": true, "active": cmd.name, "restart_needed": true }))
+            .map(|_| json!({ "ok": true, "active": name, "restart_needed": true }))
             .map_err(|e| e.to_string()),
-        "delete" => store
-            .delete(&cmd.name)
-            .map(|_| json!({ "ok": true, "deleted": cmd.name }))
+        CertCommand::Delete { name } => store
+            .delete(name)
+            .map(|_| json!({ "ok": true, "deleted": name }))
             .map_err(|e| e.to_string()),
-        other => Err(format!("unknown action '{other}'")),
     };
 
     match result {
         Ok(v) => {
-            state.log_event(EventKind::Info, format!("certificate {} {}", cmd.action, cmd.name));
+            state.log_event(EventKind::Info, format!("certificate {action} {name}"));
             json_ok(v)
         }
         Err(e) => json_status(StatusCode::BAD_REQUEST, json!({ "error": e })),

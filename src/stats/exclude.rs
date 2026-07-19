@@ -81,6 +81,30 @@ fn normalize(domain: &str) -> String {
     d.trim_matches('.').trim().to_string()
 }
 
+/// A raw admin command against the stats exclusion list. Callers (the web app)
+/// hand bytes here and render the result; stats decides what is valid.
+#[derive(Debug, PartialEq)]
+pub enum StatsExclusionCommand {
+    Add { domain: String },
+    Delete { domain: String },
+}
+
+impl StatsExclusionCommand {
+    pub fn parse(body: &[u8]) -> std::result::Result<Self, String> {
+        let v: serde_json::Value = serde_json::from_slice(body).map_err(|e| e.to_string())?;
+        let Some(domain) = v.get("domain").and_then(serde_json::Value::as_str).map(str::trim)
+        else {
+            return Err("expected 'domain'".into());
+        };
+        let domain = domain.to_string();
+        Ok(if v.get("delete").and_then(serde_json::Value::as_bool) == Some(true) {
+            Self::Delete { domain }
+        } else {
+            Self::Add { domain }
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,6 +113,21 @@ mod tests {
         let path = std::env::temp_dir().join(format!("proxy-stats-excl-{tag}.conf"));
         let _ = std::fs::remove_file(&path);
         StatsExclusions::load(path)
+    }
+
+    #[test]
+    fn exclusion_commands_parse_before_any_io() {
+        assert_eq!(
+            StatsExclusionCommand::parse(br#"{"domain": "  noise.example "}"#).unwrap(),
+            StatsExclusionCommand::Add { domain: "noise.example".into() }
+        );
+        assert_eq!(
+            StatsExclusionCommand::parse(br#"{"domain": "noise.example", "delete": true}"#)
+                .unwrap(),
+            StatsExclusionCommand::Delete { domain: "noise.example".into() }
+        );
+        assert!(StatsExclusionCommand::parse(br#"{"delete": true}"#).is_err());
+        assert!(StatsExclusionCommand::parse(b"not json").is_err());
     }
 
     #[test]

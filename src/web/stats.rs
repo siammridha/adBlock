@@ -40,12 +40,12 @@ pub(super) fn stats_json(state: &SharedState) -> Value {
 }
 
 pub(super) fn config(state: &SharedState, body: &[u8]) -> AdminResponse {
-    let change: crate::stats::StatsOverrides = match serde_json::from_slice(body) {
+    let change = match crate::stats::StatsOverrides::parse(body) {
         Ok(c) => c,
         Err(e) => {
             return super::respond::json_status(
                 hyper::StatusCode::BAD_REQUEST,
-                json!({"error": format!("bad stats config: {e}")}),
+                json!({"error": e}),
             )
         }
     };
@@ -72,12 +72,9 @@ pub(super) fn exclusions_json(state: &SharedState) -> Value {
 /// Add or delete a stats-excluded domain. Body: `{"domain": "...", "delete"?: true}`.
 pub(super) fn edit_exclusions(state: &SharedState, body: &[u8]) -> AdminResponse {
     use hyper::StatusCode;
-    let v: Value = match serde_json::from_slice(body) {
-        Ok(v) => v,
-        Err(e) => return super::respond::json_status(StatusCode::BAD_REQUEST, json!({"error": e.to_string()})),
-    };
-    let Some(domain) = v.get("domain").and_then(Value::as_str).map(str::trim) else {
-        return super::respond::json_status(StatusCode::BAD_REQUEST, json!({"error": "expected 'domain'"}));
+    let cmd = match crate::stats::StatsExclusionCommand::parse(body) {
+        Ok(c) => c,
+        Err(e) => return super::respond::json_status(StatusCode::BAD_REQUEST, json!({"error": e})),
     };
     let Some(store) = state.stats_exclusions() else {
         return super::respond::json_status(
@@ -85,17 +82,17 @@ pub(super) fn edit_exclusions(state: &SharedState, body: &[u8]) -> AdminResponse
             json!({"error": "stats persistence is not configured"}),
         );
     };
-    let deleting = v.get("delete").and_then(Value::as_bool) == Some(true);
-    let outcome = if deleting {
-        store.remove(domain).map(|removed| {
-            if removed {
-                state.log_event(EventKind::Info, format!("stats exclusion removed: {domain}"));
-            }
-        })
-    } else {
-        store.add(domain).map(|_| {
+    let outcome = match &cmd {
+        crate::stats::StatsExclusionCommand::Delete { domain } => {
+            store.remove(domain).map(|removed| {
+                if removed {
+                    state.log_event(EventKind::Info, format!("stats exclusion removed: {domain}"));
+                }
+            })
+        }
+        crate::stats::StatsExclusionCommand::Add { domain } => store.add(domain).map(|_| {
             state.log_event(EventKind::Info, format!("stats exclusion added: {domain}"));
-        })
+        }),
     };
     match outcome {
         Ok(()) => json_ok(exclusions_json(state)),

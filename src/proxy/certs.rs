@@ -37,6 +37,60 @@ pub struct CertSummary {
     pub readable: bool,
 }
 
+/// A raw admin command against the CA store. Callers (the web app) hand bytes
+/// here and render the result; the proxy decides what is valid.
+#[derive(Debug, PartialEq)]
+pub enum CertCommand {
+    Add { name: String, cert: String, key: String },
+    Generate { name: String, common_name: String },
+    Activate { name: String },
+    Delete { name: String },
+}
+
+impl CertCommand {
+    pub fn parse(body: &[u8]) -> std::result::Result<Self, String> {
+        #[derive(Deserialize)]
+        struct Raw {
+            action: String,
+            #[serde(default)]
+            name: String,
+            #[serde(default)]
+            cert: String,
+            #[serde(default)]
+            key: String,
+            #[serde(default)]
+            common_name: String,
+        }
+        let raw: Raw =
+            serde_json::from_slice(body).map_err(|e| format!("bad request: {e}"))?;
+        match raw.action.as_str() {
+            "add" => Ok(Self::Add { name: raw.name, cert: raw.cert, key: raw.key }),
+            "generate" => Ok(Self::Generate { name: raw.name, common_name: raw.common_name }),
+            "activate" => Ok(Self::Activate { name: raw.name }),
+            "delete" => Ok(Self::Delete { name: raw.name }),
+            other => Err(format!("unknown action '{other}'")),
+        }
+    }
+
+    pub fn action(&self) -> &'static str {
+        match self {
+            Self::Add { .. } => "add",
+            Self::Generate { .. } => "generate",
+            Self::Activate { .. } => "activate",
+            Self::Delete { .. } => "delete",
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Add { name, .. }
+            | Self::Generate { name, .. }
+            | Self::Activate { name }
+            | Self::Delete { name } => name,
+        }
+    }
+}
+
 pub struct CertStore {
     certs_dir: PathBuf,
     active: OverrideStore<ActiveSelection>,
@@ -276,6 +330,23 @@ fn read_cert_info(path: &Path) -> Option<(String, String, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cert_commands_parse_actions_and_reject_unknown_ones() {
+        assert_eq!(
+            CertCommand::parse(br#"{"action": "generate", "name": "lab", "common_name": "Lab CA"}"#)
+                .unwrap(),
+            CertCommand::Generate { name: "lab".into(), common_name: "Lab CA".into() }
+        );
+        assert_eq!(
+            CertCommand::parse(br#"{"action": "activate", "name": "lab"}"#).unwrap(),
+            CertCommand::Activate { name: "lab".into() }
+        );
+        let err = CertCommand::parse(br#"{"action": "explode"}"#).unwrap_err();
+        assert_eq!(err, "unknown action 'explode'");
+        let err = CertCommand::parse(b"not json").unwrap_err();
+        assert!(err.starts_with("bad request: "), "err: {err}");
+    }
 
     fn scratch() -> (PathBuf, PathBuf) {
         let _ = rustls::crypto::ring::default_provider().install_default();

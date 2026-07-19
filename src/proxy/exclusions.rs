@@ -79,6 +79,30 @@ fn normalize(domain: &str) -> String {
     d.trim_matches('.').trim().to_string()
 }
 
+/// A raw admin command against the exclusion list. Callers (the web app) hand
+/// bytes here and render the result; the proxy decides what is valid.
+#[derive(Debug, PartialEq)]
+pub enum ExclusionCommand {
+    Add { domain: String },
+    Delete { domain: String },
+}
+
+impl ExclusionCommand {
+    pub fn parse(body: &[u8]) -> std::result::Result<Self, String> {
+        let v: serde_json::Value = serde_json::from_slice(body).map_err(|e| e.to_string())?;
+        let Some(domain) = v.get("domain").and_then(serde_json::Value::as_str).map(str::trim)
+        else {
+            return Err("expected 'domain'".into());
+        };
+        let domain = domain.to_string();
+        Ok(if v.get("delete").and_then(serde_json::Value::as_bool) == Some(true) {
+            Self::Delete { domain }
+        } else {
+            Self::Add { domain }
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,6 +115,24 @@ mod tests {
             s.add(d).unwrap();
         }
         s
+    }
+
+    #[test]
+    fn exclusion_commands_parse_before_any_io() {
+        assert_eq!(
+            ExclusionCommand::parse(br#"{"domain": "  bank.com "}"#).unwrap(),
+            ExclusionCommand::Add { domain: "bank.com".into() }
+        );
+        assert_eq!(
+            ExclusionCommand::parse(br#"{"domain": "bank.com", "delete": true}"#).unwrap(),
+            ExclusionCommand::Delete { domain: "bank.com".into() }
+        );
+        assert!(matches!(
+            ExclusionCommand::parse(br#"{"domain": "x.com", "delete": false}"#),
+            Ok(ExclusionCommand::Add { .. })
+        ));
+        assert!(ExclusionCommand::parse(br#"{"delete": true}"#).is_err());
+        assert!(ExclusionCommand::parse(b"not json").is_err());
     }
 
     #[test]

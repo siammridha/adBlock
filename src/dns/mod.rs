@@ -2,6 +2,7 @@
 //! and forwards the rest to upstream resolvers.
 
 mod cache;
+pub mod commands;
 pub mod config;
 pub mod control;
 pub mod error;

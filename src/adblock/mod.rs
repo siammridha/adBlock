@@ -10,6 +10,7 @@ use adblock::Engine;
 
 use error::Result;
 
+pub mod commands;
 pub mod config;
 mod curation;
 pub mod error;

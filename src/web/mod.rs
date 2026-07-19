@@ -45,13 +45,6 @@ use self::server::{edit_proxy_config, edit_server_config};
 use self::sse::sse_stream;
 use self::stats::stats_json;
 
-#[allow(unused_imports)]
-pub(crate) use self::blocklists::BlocklistCommand;
-#[allow(unused_imports)]
-pub(crate) use self::dns::{DnsConfigCommand, RewriteCommand};
-#[allow(unused_imports)]
-pub(crate) use self::exclusions::ExclusionCommand;
-
 type AdminResponse = Response<BoxBody<Bytes, Infallible>>;
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -78,10 +71,6 @@ impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
         Error::Io(e)
     }
-}
-
-pub(crate) trait AdminCommand: Sized {
-    fn parse(body: &[u8]) -> std::result::Result<Self, String>;
 }
 
 pub struct Admin {
@@ -262,135 +251,9 @@ fn dashboard() -> Bytes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adblock::RulesUpdate;
     use crate::stats::history::Metric;
     use http_body_util::Full;
     use serde_json::Value;
-
-    fn parse(body: &str) -> BlocklistCommand {
-        BlocklistCommand::parse(body.as_bytes()).unwrap()
-    }
-
-    #[test]
-    fn pasted_rules_default_to_append_on_the_custom_list() {
-        assert_eq!(
-            parse(r#"{"rules": "||ads.example^"}"#),
-            BlocklistCommand::ApplyRules {
-                name: None,
-                rules: "||ads.example^".into(),
-                update: RulesUpdate::Append,
-            }
-        );
-    }
-
-    #[test]
-    fn replace_is_opt_in_and_names_are_kept() {
-        assert_eq!(
-            parse(r#"{"name": "mine", "rules": "||a^", "replace": true}"#),
-            BlocklistCommand::ApplyRules {
-                name: Some("mine".into()),
-                rules: "||a^".into(),
-                update: RulesUpdate::Replace,
-            }
-        );
-        assert!(matches!(
-            parse(r#"{"rules": "||a^", "replace": false}"#),
-            BlocklistCommand::ApplyRules { update: RulesUpdate::Append, .. }
-        ));
-    }
-
-    #[test]
-    fn url_wins_over_rules_and_is_trimmed() {
-        assert_eq!(
-            parse(r#"{"url": "  https://x/l.txt  "}"#),
-            BlocklistCommand::AddUrl { url: "https://x/l.txt".into() }
-        );
-    }
-
-    #[test]
-    fn delete_takes_precedence_and_needs_a_name() {
-        assert_eq!(
-            parse(r#"{"name": "easylist", "delete": true}"#),
-            BlocklistCommand::Delete { name: "easylist".into() }
-        );
-        assert!(BlocklistCommand::parse(br#"{"delete": true}"#).is_err());
-        assert!(BlocklistCommand::parse(br#"{"name": "  ", "delete": true}"#).is_err());
-        assert!(BlocklistCommand::parse(br#"{"delete": false}"#).is_err());
-    }
-
-    #[test]
-    fn a_body_with_no_recognized_action_is_rejected() {
-        assert!(BlocklistCommand::parse(br#"{"nonsense": 1}"#).is_err());
-        assert!(BlocklistCommand::parse(b"not json").is_err());
-    }
-
-    #[test]
-    fn exclusion_commands_parse_before_any_io() {
-        assert_eq!(
-            ExclusionCommand::parse(br#"{"domain": "  bank.com "}"#).unwrap(),
-            ExclusionCommand::Add { domain: "bank.com".into() }
-        );
-        assert_eq!(
-            ExclusionCommand::parse(br#"{"domain": "bank.com", "delete": true}"#).unwrap(),
-            ExclusionCommand::Delete { domain: "bank.com".into() }
-        );
-        assert!(matches!(
-            ExclusionCommand::parse(br#"{"domain": "x.com", "delete": false}"#),
-            Ok(ExclusionCommand::Add { .. })
-        ));
-        assert!(ExclusionCommand::parse(br#"{"delete": true}"#).is_err());
-        assert!(ExclusionCommand::parse(b"not json").is_err());
-    }
-
-    #[test]
-    fn rewrite_commands_need_both_fields() {
-        assert_eq!(
-            RewriteCommand::parse(br#"{"domain": "app.example", "answer": "1.2.3.4"}"#).unwrap(),
-            RewriteCommand::Add { domain: "app.example".into(), answer: "1.2.3.4".into() }
-        );
-        assert_eq!(
-            RewriteCommand::parse(
-                br#"{"domain": "app.example", "answer": "1.2.3.4", "delete": true}"#
-            )
-            .unwrap(),
-            RewriteCommand::Delete { domain: "app.example".into(), answer: "1.2.3.4".into() }
-        );
-        assert!(RewriteCommand::parse(br#"{"domain": "app.example"}"#).is_err());
-        assert!(RewriteCommand::parse(br#"{"answer": "1.2.3.4"}"#).is_err());
-    }
-
-    #[test]
-    fn dns_config_commands_reset_wins_and_bad_modes_are_named() {
-        assert_eq!(
-            DnsConfigCommand::parse(br#"{"reset": true, "cache_size": 5}"#).unwrap(),
-            DnsConfigCommand::Reset
-        );
-        let DnsConfigCommand::Apply(upd) = DnsConfigCommand::parse(
-            br#"{"upstreams": [" udp://1.1.1.1:53 ", ""], "min_ttl_secs": 30}"#,
-        )
-        .unwrap() else {
-            panic!("expected Apply");
-        };
-        assert_eq!(upd.upstreams, Some(vec!["udp://1.1.1.1:53".to_string()]));
-        assert_eq!(upd.min_ttl_secs, Some(30));
-        assert_eq!(upd.max_ttl_secs, None);
-        assert_eq!(upd.upstream_mode, None);
-        assert_eq!(upd.ech_probe_domain, None);
-        let DnsConfigCommand::Apply(upd) =
-            DnsConfigCommand::parse(br#"{"ech_probe_domain": " example.com "}"#).unwrap()
-        else {
-            panic!("expected Apply");
-        };
-        assert_eq!(upd.ech_probe_domain, Some("example.com".to_string()));
-        let DnsConfigCommand::Apply(upd) =
-            DnsConfigCommand::parse(br#"{"ech_probe_domain": ""}"#).unwrap()
-        else {
-            panic!("expected Apply");
-        };
-        assert_eq!(upd.ech_probe_domain, Some(String::new()));
-        let err = DnsConfigCommand::parse(br#"{"upstream_mode": "quantum"}"#).unwrap_err();
-        assert!(err.contains("failover"), "err: {err}");
-    }
 
     use crate::adblock::MemoryListStore;
     use crate::adblock::AdblockConfig;

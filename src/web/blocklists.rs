@@ -5,14 +5,15 @@ use std::sync::Arc;
 use hyper::StatusCode;
 use serde_json::{json, Value};
 
+use crate::adblock::commands::{BlocklistCommand, RuleTest};
 use crate::adblock::updater::{ScriptletUpdater, UBO_TARBALL_PAGE};
-use crate::adblock::{AdBlocker, ListCuration, ListEntry, RulesUpdate};
+use crate::adblock::{AdBlocker, ListCuration, ListEntry};
 use crate::adblock::error::Result;
 use crate::adblock::maintenance::{event_list_change, event_scriptlets, RefreshError};
 use crate::stats::{EventKind, SharedState};
 
 use super::respond::{command, json_ok, json_status, parse_query, percent_decode};
-use super::{Admin, AdminCommand, AdminResponse};
+use super::{Admin, AdminResponse};
 
 pub(super) async fn update_scriptlets(
     state: &SharedState,
@@ -96,22 +97,15 @@ pub(super) fn blocklist_text_json(curation: &ListCuration, query: &str) -> Value
 }
 
 pub(super) fn check_rule(adblock: &AdBlocker, body: &[u8]) -> AdminResponse {
-    let v: Value = match serde_json::from_slice(body) {
-        Ok(v) => v,
-        Err(e) => return json_status(StatusCode::BAD_REQUEST, json!({"error": e.to_string()})),
+    let t = match command(RuleTest::parse(body)) {
+        Ok(t) => t,
+        Err(resp) => return resp,
     };
-    let url = match v.get("url").and_then(Value::as_str) {
-        Some(u) if !u.trim().is_empty() => crate::adblock::normalize_test_url(u),
-        _ => return json_status(StatusCode::BAD_REQUEST, json!({"error": "missing 'url'"})),
-    };
-    let req_type = v.get("type").and_then(Value::as_str).unwrap_or("other");
-    let source = v.get("source").and_then(Value::as_str).unwrap_or("");
-
-    let d = adblock.check(&url, source, req_type);
+    let d = adblock.check(&t.url, &t.source, &t.req_type);
     json_ok(json!({
-        "url": url,
-        "request_type": req_type,
-        "source": source,
+        "url": t.url,
+        "request_type": t.req_type,
+        "source": t.source,
         "outcome": if d.blocked { "blocked" } else { "allowed" },
         "blocked": d.blocked,
         "filter": d.attribution.rule,
@@ -119,52 +113,9 @@ pub(super) fn check_rule(adblock: &AdBlocker, body: &[u8]) -> AdminResponse {
     }))
 }
 
-#[derive(Debug, PartialEq)]
-pub(crate) enum BlocklistCommand {
-    Delete { name: String },
-    AddUrl { url: String },
-    ApplyRules {
-        name: Option<String>,
-        rules: String,
-        update: RulesUpdate,
-    },
-}
-
-impl AdminCommand for BlocklistCommand {
-    fn parse(body: &[u8]) -> std::result::Result<Self, String> {
-        let v: Value = serde_json::from_slice(body).map_err(|e| e.to_string())?;
-        if v.get("delete").and_then(Value::as_bool) == Some(true) {
-            let name = v
-                .get("name")
-                .and_then(Value::as_str)
-                .filter(|n| !n.trim().is_empty())
-                .ok_or("delete needs 'name'")?
-                .to_string();
-            return Ok(BlocklistCommand::Delete { name });
-        }
-        if let Some(url) = v.get("url").and_then(Value::as_str) {
-            return Ok(BlocklistCommand::AddUrl {
-                url: url.trim().to_string(),
-            });
-        }
-        let Some(rules) = v.get("rules").and_then(Value::as_str) else {
-            return Err("expected {\"url\": …} or {\"rules\": …}".into());
-        };
-        Ok(BlocklistCommand::ApplyRules {
-            name: v.get("name").and_then(Value::as_str).map(str::to_string),
-            rules: rules.to_string(),
-            update: if v.get("replace").and_then(Value::as_bool) == Some(true) {
-                RulesUpdate::Replace
-            } else {
-                RulesUpdate::Append
-            },
-        })
-    }
-}
-
 impl Admin {
     pub(super) async fn add_blocklist(&self, body: &[u8]) -> AdminResponse {
-        let cmd = match command::<BlocklistCommand>(body) {
+        let cmd = match command(BlocklistCommand::parse(body)) {
             Ok(cmd) => cmd,
             Err(resp) => return resp,
         };

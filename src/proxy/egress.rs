@@ -63,6 +63,24 @@ pub struct EgressOverrides {
     pub disable_ipv6: Option<bool>,
 }
 
+impl EgressOverrides {
+    /// Parse a raw settings update. Callers (the web app) hand bytes here and
+    /// render the result; the proxy decides what is valid. Only present,
+    /// well-typed flags are picked up.
+    pub fn parse(body: &[u8]) -> std::result::Result<Self, String> {
+        let v: serde_json::Value = serde_json::from_slice(body).map_err(|e| e.to_string())?;
+        if !v.is_object() {
+            return Err("expected a JSON object".into());
+        }
+        let flag = |key: &str| -> Option<bool> { v.get(key).and_then(serde_json::Value::as_bool) };
+        Ok(EgressOverrides {
+            resolver_only: flag("resolver_only"),
+            use_ech: flag("use_ech"),
+            disable_ipv6: flag("disable_ipv6"),
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct EgressSettings {
     pub resolver_only: bool,
@@ -160,5 +178,21 @@ impl EgressPolicy {
         let list = self.dns.ech_config_list(host).await;
         self.ech_cache.put(host.to_string(), list.clone());
         list
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proxy_config_parses_present_flags_only() {
+        let upd = EgressOverrides::parse(br#"{"resolver_only": true}"#).unwrap();
+        assert_eq!(upd.resolver_only, Some(true));
+        assert_eq!(upd.use_ech, None);
+        assert_eq!(upd.disable_ipv6, None);
+        let upd = EgressOverrides::parse(br#"{"use_ech": "yes"}"#).unwrap();
+        assert_eq!(upd.use_ech, None);
+        assert!(EgressOverrides::parse(b"[]").is_err());
     }
 }

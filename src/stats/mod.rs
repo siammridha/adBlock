@@ -24,7 +24,7 @@ mod records;
 
 use errors::ErrorLog;
 pub use config::LoggingConfig;
-pub use exclude::StatsExclusions;
+pub use exclude::{StatsExclusionCommand, StatsExclusions};
 use logs::RotatingLog;
 pub use records::{
     CaptureSlot, DnsOutcome, DnsRecord, RequestDetail, RequestKind, RequestRecord, UiMsg,
@@ -122,6 +122,14 @@ pub struct StatsOverrides {
     pub retention_hours: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log_rotate_hours: Option<u32>,
+}
+
+impl StatsOverrides {
+    /// Parse a raw settings update. Callers (the web app) hand bytes here and
+    /// render the result; stats decides what is valid.
+    pub fn parse(body: &[u8]) -> Result<Self, String> {
+        serde_json::from_slice(body).map_err(|e| format!("bad stats config: {e}"))
+    }
 }
 
 pub struct StaticInfo {
