@@ -1,6 +1,7 @@
 //! DNS's config section (`[dns]` in the TOML file) and its validation.
 
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 use super::error::{Error, Result};
 
@@ -21,9 +22,28 @@ pub struct DnsConfig {
     pub ech_probe_domain: String,
     pub log_ipv6: bool,
     pub upstream_timeout_ms: u64,
+    /// Root of the DNS module's on-disk data tree; its rewrite and settings files
+    /// live under `settings/`. Defaults to `data`, the shared default root.
+    pub data_dir: PathBuf,
 }
 
 impl DnsConfig {
+    /// Where DNS keeps its persisted files (rewrites, settings, listener state).
+    pub fn settings_dir(&self) -> PathBuf {
+        self.data_dir.join("settings")
+    }
+
+    /// The DNS listener's own settings (enabled/listen overrides).
+    pub fn server_settings_path(&self) -> PathBuf {
+        self.settings_dir().join("dns-server.json")
+    }
+
+    /// The pre-split combined settings file, read once to seed the per-service
+    /// files when they are missing.
+    pub fn legacy_server_settings_path(&self) -> PathBuf {
+        self.settings_dir().join("server-settings.json")
+    }
+
     /// DNS validates its own section; callers hand it over raw.
     pub fn validate(&self) -> Result<()> {
         if self.enabled {
@@ -85,6 +105,7 @@ impl Default for DnsConfig {
             ech_probe_domain: "crypto.cloudflare.com".into(),
             log_ipv6: false,
             upstream_timeout_ms: 5_000,
+            data_dir: PathBuf::from("data"),
         }
     }
 }

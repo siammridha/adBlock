@@ -7,8 +7,7 @@
 
 use serde_json::json;
 
-use crate::proxy::capture::decode_captured;
-use crate::stats::SharedState;
+use crate::stats::{BodyDecode, SharedState};
 
 use super::respond::{json_ok, json_status, parse_query};
 use super::AdminResponse;
@@ -67,22 +66,15 @@ pub(super) fn request_body_decode(state: &SharedState, query: &str) -> AdminResp
         );
     };
     let slot = parse_query(query, "slot").unwrap_or_default();
-    let detail = state.request_detail(seq);
-    let raw = match slot {
-        "req" => detail.req_body_raw,
-        "resp" => detail.resp_body_raw,
-        _ => {
-            return json_status(
-                hyper::StatusCode::BAD_REQUEST,
-                json!({ "error": "slot must be req or resp" }),
-            );
-        }
-    };
-    if raw.is_empty() {
-        return json_status(
+    match state.decode_captured_body(seq, slot) {
+        BodyDecode::Text(text) => json_ok(json!({ "text": text })),
+        BodyDecode::NoData => json_status(
             hyper::StatusCode::NOT_FOUND,
             json!({ "error": "no compressed body captured for this request" }),
-        );
+        ),
+        BodyDecode::UnknownSlot => json_status(
+            hyper::StatusCode::BAD_REQUEST,
+            json!({ "error": "slot must be req or resp" }),
+        ),
     }
-    json_ok(json!({ "text": decode_captured(&raw) }))
 }

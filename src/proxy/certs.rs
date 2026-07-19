@@ -107,6 +107,11 @@ impl CertStore {
         config_cert: PathBuf,
         config_key: PathBuf,
     ) -> Self {
+        // Proxy owns the certs directory; create it so listing and generating
+        // managed CAs works even before the first one is added.
+        if let Err(e) = std::fs::create_dir_all(&certs_dir) {
+            tracing::warn!(error = %e, dir = %certs_dir.display(), "creating certs dir");
+        }
         Self {
             certs_dir,
             active: OverrideStore::new(active_store),

@@ -101,6 +101,11 @@ impl DnsService {
             .listen
             .parse()
             .map_err(|e| Error::Config(format!("invalid dns.listen '{}': {e}", cfg.listen)))?;
+        // DNS owns its settings directory; create it so its rewrite and settings
+        // files have a home on first write.
+        if let Err(e) = std::fs::create_dir_all(data_dir) {
+            tracing::warn!(error = %e, dir = %data_dir.display(), "creating dns settings dir");
+        }
         let settings = settings::SettingsStore::new(data_dir.join("dns-settings.json"));
 
         let base_eff = EffectiveDnsSettings::from_config(cfg);
@@ -497,10 +502,9 @@ mod tests {
                 version: "test".into(),
                 listen: String::new(),
                 admin_listen: String::new(),
-                ca_pem: String::new(),
                 started: Instant::now(),
             },
-            &LoggingConfig { level: "info".into(), log_actions: true, log_requests: true },
+            &LoggingConfig { level: "info".into(), log_actions: true, log_requests: true, ..Default::default() },
         ));
         DnsService::new(&cfg, &data_dir, adblock, state).unwrap()
     }

@@ -47,49 +47,32 @@ async fn main() -> Result<()> {
 
     init_logging(&config.logging.level);
 
-    // Everything the proxy persists lives under one data root, split into
-    // blocklists/, settings/, logs/, scriptlets/, and certs/. Create them up
-    // front so first writes (and the log-writer threads) always have a home.
-    let settings_dir = config.adblock.settings_dir();
-    for dir in [
-        config.adblock.blocklists_dir(),
-        settings_dir.clone(),
-        config.adblock.logs_dir(),
-        config.adblock.scriptlets_dir(),
-        config.adblock.certs_dir(),
-    ] {
-        if let Err(e) = std::fs::create_dir_all(&dir) {
-            eprintln!("creating {}: {e}", dir.display());
-        }
-    }
-
+    // Each module owns and creates its own data directories; the entry point
+    // only hands each one its config section and wires the results together.
     let (adblock, curation) = proxy::adblock::from_config(&config.adblock)?;
 
     // The active CA (from the certificates tab) wins over the config CA; when
     // nothing is selected, active_paths() returns the config paths. Switching is
     // applied here at startup, so a change takes effect on the next run.
     let certs = Arc::new(CertStore::load(
-        config.adblock.certs_dir(),
-        settings_dir.join("active-ca.json"),
+        config.server.certs_dir(),
+        config.server.active_ca_path(),
         config.tls.ca_cert.clone(),
         config.tls.ca_key.clone(),
     ));
     let (ca_cert_path, ca_key_path) = certs.active_paths();
     let ca = Arc::new(CertAuthority::load(&ca_cert_path, &ca_key_path)?);
 
-    let exclusions = Arc::new(ExclusionStore::load(
-        settings_dir.join("excluded-domains.conf"),
-    ));
+    let exclusions = Arc::new(ExclusionStore::load(config.server.exclusions_path()));
 
     let info = StaticInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
         listen: config.server.listen.clone(),
         admin_listen: config.server.admin_listen.clone(),
-        ca_pem: ca.root_pem().to_string(),
         started: Instant::now(),
     };
     let state =
-        Arc::new(SharedState::new(info, &config.logging).with_data_dir(&config.adblock.data_dir));
+        Arc::new(SharedState::new(info, &config.logging).with_data_dir(&config.logging.data_dir));
 
     tracing::info!(
         "starting proxy: adblock={} dns={}",
@@ -100,11 +83,13 @@ async fn main() -> Result<()> {
     // The DNS service always exists so the proxy can resolve through it even
     // while the DNS listener is disabled; enable/disable only touches the
     // listener.
-    let dns = DnsService::new(&config.dns, &settings_dir, adblock.clone(), state.clone())?;
-    let egress = EgressPolicy::load(
-        settings_dir.join("proxy-settings.json"),
-        dns.clone(),
-    );
+    let dns = DnsService::new(
+        &config.dns,
+        &config.dns.settings_dir(),
+        adblock.clone(),
+        state.clone(),
+    )?;
+    let egress = EgressPolicy::load(config.server.egress_settings_path(), dns.clone());
 
     // Each module owns its outbound networking: the proxy's pooled client
     // dials through the egress policy, adblock fetches lists with its own
@@ -132,20 +117,19 @@ async fn main() -> Result<()> {
     );
     // Each service owns its lifecycle behind its settings interface; the old
     // combined server-settings.json seeds them once if their own files are
-    // missing.
-    let legacy_settings = settings_dir.join("server-settings.json");
+    // missing. Each module names its own files (via its config).
     let proxy_runtime = ProxyRuntime::new(
         state.clone(),
-        settings_dir.join("proxy-server.json"),
-        Some(legacy_settings.clone()),
+        config.server.server_settings_path(),
+        Some(config.server.legacy_server_settings_path()),
         Some(std::sync::Arc::new(proxy)),
         &config.server.listen,
         config.server.enabled,
     )?;
     let dns_runtime = DnsRuntime::new(
         state.clone(),
-        settings_dir.join("dns-server.json"),
-        Some(legacy_settings),
+        config.dns.server_settings_path(),
+        Some(config.dns.legacy_server_settings_path()),
         dns,
         &config.dns.listen,
         config.dns.enabled,

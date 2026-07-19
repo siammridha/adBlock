@@ -286,10 +286,9 @@ mod tests {
                 version: "test".into(),
                 listen: String::new(),
                 admin_listen: String::new(),
-                ca_pem: String::new(),
                 started: std::time::Instant::now(),
             },
-            &LoggingConfig { level: "info".into(), log_actions: true, log_requests: true },
+            &LoggingConfig { level: "info".into(), log_actions: true, log_requests: true, ..Default::default() },
         ))
     }
 

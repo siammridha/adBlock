@@ -178,7 +178,9 @@ impl Admin {
             }
             (&Method::GET, "/api/certs") => json_ok(certs::certs_json(&self.certs)),
             (&Method::GET, "/api/cert") => certs::cert_download(&self.certs, &query),
-            (&Method::GET, "/ca-cert.pem") => meta::ca_cert(&self.state),
+            // Legacy path: download the active CA, served by the proxy (which
+            // owns certificate state) — same bytes and filename as before.
+            (&Method::GET, "/ca-cert.pem") => certs::cert_download(&self.certs, ""),
             (&Method::POST, _) => {
                 let body = match req.into_body().collect().await {
                     Ok(b) => b.to_bytes(),
@@ -296,10 +298,9 @@ mod tests {
                 version: "test".into(),
                 listen: String::new(),
                 admin_listen: String::new(),
-                ca_pem: String::new(),
                 started: std::time::Instant::now(),
             },
-            &LoggingConfig { level: "info".into(), log_actions: true, log_requests: true },
+            &LoggingConfig { level: "info".into(), log_actions: true, log_requests: true, ..Default::default() },
         ));
         let exclusions = Arc::new(ExclusionStore::load(std::path::PathBuf::from(
             "/nonexistent-for-tests/excluded-domains.conf",

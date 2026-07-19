@@ -124,6 +124,13 @@ impl BlockAttribution {
 }
 
 pub fn from_config(cfg: &AdblockConfig) -> Result<(Arc<AdBlocker>, Arc<ListCuration>)> {
+    // Adblock owns its own directories: create them up front so first reads and
+    // writes (lists, scriptlet bundle) always have a home.
+    for dir in [cfg.blocklists_dir(), cfg.scriptlets_dir()] {
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            tracing::warn!(error = %e, dir = %dir.display(), "creating adblock data dir");
+        }
+    }
     with_store(cfg, Arc::new(DiskStore::new(cfg.blocklists_dir())))
 }
 

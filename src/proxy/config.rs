@@ -14,6 +14,10 @@ pub struct ServerConfig {
     /// Where the admin web UI listens. Stored in this section for config-file
     /// compatibility; the root wiring validates and hands it to the web app.
     pub admin_listen: String,
+    /// Root of the proxy's on-disk data tree. Proxy keeps its certificates under
+    /// `certs/` and its settings files under `settings/`. Defaults to `data`, the
+    /// same root the other modules default to, so the existing layout is shared.
+    pub data_dir: PathBuf,
 }
 
 impl ServerConfig {
@@ -24,6 +28,41 @@ impl ServerConfig {
             .parse::<std::net::SocketAddr>()
             .map_err(|e| Error::Config(format!("invalid listen '{}': {e}", self.listen)))?;
         Ok(())
+    }
+
+    /// Managed CA cert/key pairs, one subfolder per CA.
+    pub fn certs_dir(&self) -> PathBuf {
+        self.data_dir.join("certs")
+    }
+
+    fn settings_dir(&self) -> PathBuf {
+        self.data_dir.join("settings")
+    }
+
+    /// Records which managed CA is active.
+    pub fn active_ca_path(&self) -> PathBuf {
+        self.settings_dir().join("active-ca.json")
+    }
+
+    /// The MITM exclusion list.
+    pub fn exclusions_path(&self) -> PathBuf {
+        self.settings_dir().join("excluded-domains.conf")
+    }
+
+    /// Persisted egress (resolver-only/ECH/IPv6) settings.
+    pub fn egress_settings_path(&self) -> PathBuf {
+        self.settings_dir().join("proxy-settings.json")
+    }
+
+    /// The proxy listener's own settings (enabled/listen overrides).
+    pub fn server_settings_path(&self) -> PathBuf {
+        self.settings_dir().join("proxy-server.json")
+    }
+
+    /// The pre-split combined settings file, read once to seed the per-service
+    /// files when they are missing.
+    pub fn legacy_server_settings_path(&self) -> PathBuf {
+        self.settings_dir().join("server-settings.json")
     }
 }
 
@@ -47,6 +86,7 @@ impl Default for ServerConfig {
             enabled: true,
             listen: "127.0.0.1:8080".into(),
             admin_listen: "127.0.0.1:8081".into(),
+            data_dir: PathBuf::from("data"),
         }
     }
 }

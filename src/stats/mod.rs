@@ -14,6 +14,7 @@ use crate::stats::persist::OverrideStore;
 use history::{History, Metric};
 
 pub mod config;
+mod decode;
 mod errors;
 pub mod error;
 mod exclude;
@@ -24,6 +25,7 @@ mod records;
 
 use errors::ErrorLog;
 pub use config::LoggingConfig;
+pub use decode::BodyDecode;
 pub use exclude::{StatsExclusionCommand, StatsExclusions};
 use logs::RotatingLog;
 pub use records::{
@@ -136,7 +138,6 @@ pub struct StaticInfo {
     pub version: String,
     pub listen: String,
     pub admin_listen: String,
-    pub ca_pem: String,
     pub started: Instant,
 }
 
@@ -453,6 +454,22 @@ impl SharedState {
         found.unwrap_or(RequestDetail { seq, ..Default::default() })
     }
 
+    /// Decompress one captured body on demand. `slot` is `req` or `resp`. Stats
+    /// owns the stored capture, so it owns turning the raw compressed prefix
+    /// back into text; the web app renders whatever variant comes back.
+    pub fn decode_captured_body(&self, seq: u64, slot: &str) -> BodyDecode {
+        let detail = self.request_detail(seq);
+        let raw = match slot {
+            "req" => detail.req_body_raw,
+            "resp" => detail.resp_body_raw,
+            _ => return BodyDecode::UnknownSlot,
+        };
+        if raw.is_empty() {
+            return BodyDecode::NoData;
+        }
+        BodyDecode::Text(decode::decode_captured(&raw))
+    }
+
     /// A page of persisted DNS query records, newest first. Cursor semantics
     /// match [`request_page`].
     pub fn query_page(&self, before: Option<u64>, limit: usize) -> Vec<DnsRecord> {
@@ -616,13 +633,13 @@ mod tests {
             version: "test".into(),
             listen: String::new(),
             admin_listen: String::new(),
-            ca_pem: String::new(),
             started: Instant::now(),
         };
         let logging = LoggingConfig {
             level: "info".into(),
             log_actions: true,
             log_requests: true,
+            ..Default::default()
         };
         Arc::new(SharedState::new(info, &logging))
     }
@@ -829,13 +846,13 @@ mod tests {
             version: "test".into(),
             listen: String::new(),
             admin_listen: String::new(),
-            ca_pem: String::new(),
             started: Instant::now(),
         };
         let logging = LoggingConfig {
             level: "info".into(),
             log_actions: true,
             log_requests: true,
+            ..Default::default()
         };
         Arc::new(SharedState::new(info, &logging).with_error_log(path.to_path_buf()))
     }
@@ -891,11 +908,10 @@ mod tests {
             version: "test".into(),
             listen: String::new(),
             admin_listen: String::new(),
-            ca_pem: String::new(),
             started: Instant::now(),
         };
         let logging =
-            LoggingConfig { level: "info".into(), log_actions: true, log_requests: true };
+            LoggingConfig { level: "info".into(), log_actions: true, log_requests: true, ..Default::default() };
         let s = Arc::new(SharedState::new(info, &logging).with_data_dir(&dir));
 
         let ex = s.record_forwarded(doc("https://kept.example/"), 200, false);
@@ -957,11 +973,10 @@ mod tests {
             version: "test".into(),
             listen: String::new(),
             admin_listen: String::new(),
-            ca_pem: String::new(),
             started: Instant::now(),
         };
         let logging =
-            LoggingConfig { level: "info".into(), log_actions: true, log_requests: true };
+            LoggingConfig { level: "info".into(), log_actions: true, log_requests: true, ..Default::default() };
         let s = Arc::new(SharedState::new(info, &logging).with_data_dir(&dir));
         s.stats_exclusions().unwrap().add("noise.example").unwrap();
 
@@ -1024,11 +1039,10 @@ mod tests {
             version: "test".into(),
             listen: String::new(),
             admin_listen: String::new(),
-            ca_pem: String::new(),
             started: Instant::now(),
         };
         let logging =
-            LoggingConfig { level: "info".into(), log_actions: true, log_requests: true };
+            LoggingConfig { level: "info".into(), log_actions: true, log_requests: true, ..Default::default() };
         let s = SharedState::new(info, &logging).with_data_dir(&dir);
 
         let got = s.stats_settings();
@@ -1066,7 +1080,6 @@ mod tests {
             version: "test".into(),
             listen: String::new(),
             admin_listen: String::new(),
-            ca_pem: String::new(),
             started: Instant::now(),
         };
         let s2 = SharedState::new(info, &logging).with_data_dir(&dir);
@@ -1080,12 +1093,11 @@ mod tests {
             version: "test".into(),
             listen: String::new(),
             admin_listen: String::new(),
-            ca_pem: String::new(),
             started: Instant::now(),
         };
         let s = Arc::new(SharedState::new(
             info,
-            &LoggingConfig { level: "info".into(), log_actions: true, log_requests: false },
+            &LoggingConfig { level: "info".into(), log_actions: true, log_requests: false, ..Default::default() },
         ));
         let mut obs = s.observe();
         let ex = s.record_forwarded(doc("https://a.example/"), 200, false);

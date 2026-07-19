@@ -8,9 +8,9 @@ use std::path::PathBuf;
 pub struct AdblockConfig {
     pub enabled: bool,
     pub custom_rules: Vec<String>,
-    /// Root of the on-disk data tree. Everything the proxy persists lives under
-    /// here in one of four subfolders: `blocklists/`, `settings/`, `logs/`, and
-    /// `scriptlets/` (plus `certs/` for managed CAs).
+    /// Root of the adblock module's on-disk data tree. Adblock keeps downloaded
+    /// lists under `blocklists/` and the scriptlet bundle under `scriptlets/`.
+    /// Defaults to `data`, the shared default root the other modules use too.
     pub data_dir: PathBuf,
     pub auto_update_hours: u64,
     pub inject_scriptlets: bool,
@@ -22,21 +22,9 @@ impl AdblockConfig {
     pub fn blocklists_dir(&self) -> PathBuf {
         self.data_dir.join("blocklists")
     }
-    /// Persisted settings/overrides (JSON and `.conf` files).
-    pub fn settings_dir(&self) -> PathBuf {
-        self.data_dir.join("settings")
-    }
-    /// Rotating request/query/error logs.
-    pub fn logs_dir(&self) -> PathBuf {
-        self.data_dir.join("logs")
-    }
     /// Scriptlet resource bundle.
     pub fn scriptlets_dir(&self) -> PathBuf {
         self.data_dir.join("scriptlets")
-    }
-    /// Managed CA cert/key pairs, one subfolder per CA.
-    pub fn certs_dir(&self) -> PathBuf {
-        self.data_dir.join("certs")
     }
 }
 
