@@ -8,7 +8,7 @@ use bytes::Bytes;
 use http_body_util::{combinators::BoxBody, BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
-use hyper::{Method, Request, Response};
+use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
@@ -197,13 +197,18 @@ impl Proxy {
         result.map_err(ProxyError::from)
     }
 
-    fn deny(
+    /// Count, log, and record a blocked request. The request headers (and body,
+    /// when present) are captured the same way a forwarded request's are, so a
+    /// blocked request's detail view shows exactly what the client sent.
+    fn record_block(
         &self,
         facts: RequestFacts<'_>,
         host: &str,
         by: &str,
-        headers: Option<&hyper::HeaderMap>,
-    ) -> BoxError {
+        req_hdrs: &str,
+        req_body: &[u8],
+        enc: capture::BodyEncoding,
+    ) {
         let state = &self.inner.state;
         state.count_block(Metric::Blocked, host);
         let label = if facts.method == "CONNECT" { "CONNECT" } else { facts.req_type };
@@ -211,19 +216,19 @@ impl Proxy {
             state.log_event(EventKind::Blocked, format!("{label}  {}  [{by}]", facts.url));
         }
         let exchange = state.record_blocked(facts, by);
-        if let Some(h) = headers {
-            exchange.attach(CaptureSlot::ReqHeaders, || capture::headers_text(h));
+        if !req_body.is_empty() {
+            capture::request_body(&exchange, req_body, enc);
         }
-        Box::new(BlockedDropped)
+        exchange.attach(CaptureSlot::ReqHeaders, || req_hdrs.to_string());
     }
 
-    fn deny_request(
-        &self,
-        plan: &pipeline::RequestPlan,
-        by: &str,
-        headers: Option<&hyper::HeaderMap>,
-    ) -> BoxError {
-        self.deny(request_facts(plan), &plan.host, by, headers)
+    /// Tell a host-level block from a path-level block. A rule that blocks the
+    /// whole host (e.g. `||ads.example^`) also matches the host's root document;
+    /// a rule that only blocks a specific resource does not. Re-checking the root
+    /// URL is how we distinguish the two.
+    fn host_blocked(&self, plan: &pipeline::RequestPlan) -> bool {
+        let root = format!("{}://{}/", plan.scheme, plan.host);
+        self.inner.adblock.check(&root, "", "document").blocked
     }
 
     async fn handle_connect(
@@ -249,7 +254,18 @@ impl Proxy {
                 url: &plan.url,
                 host: &plan.host,
             };
-            return Err(self.deny(facts, &plan.host, blocked_by, None));
+            // A CONNECT block happens before any request body exists, but the
+            // CONNECT request's headers are available — capture what we have.
+            let hdrs = capture::headers_text(req.headers());
+            self.record_block(
+                facts,
+                &plan.host,
+                blocked_by,
+                &hdrs,
+                &[],
+                capture::BodyEncoding::Identity,
+            );
+            return Err(Box::new(BlockedDropped));
         }
 
         state.record_tunnel(
@@ -346,23 +362,47 @@ impl Proxy {
             .inner
             .adblock
             .check(&plan.url, &plan.source, &plan.req_type);
-        if decision.blocked {
-            let by = decision.attribution.display();
-            return Err(self.deny_request(&plan, &by, Some(req.headers())));
-        }
 
-        if self.inner.blackhole.is_blackholed(&plan.host, plan.port).await {
-            return Err(self.deny_request(&plan, "DNS blackhole", Some(req.headers())));
-        }
-
-        state.count(Metric::Requests, &plan.host);
-
+        // Collect the request up front so blocked and forwarded requests capture
+        // their headers and body through the same path. A block happens before
+        // the body would otherwise be read, so without this a blocked request
+        // would have no stored body.
         let (mut parts, body) = req.into_parts();
         let req_bytes = body.collect().await.map_err(Into::into)?.to_bytes();
         parts.headers.remove(hyper::header::TRANSFER_ENCODING);
         parts.headers.remove(hyper::header::CONTENT_LENGTH);
         let req_enc = capture::BodyEncoding::from_headers(&parts.headers);
         let req_hdrs = capture::headers_text(&parts.headers);
+
+        if decision.blocked {
+            let by = decision.attribution.display();
+            self.record_block(request_facts(&plan), &plan.host, &by, &req_hdrs, &req_bytes, req_enc);
+            // Only drop the connection when the whole host is blocked. A
+            // path-level block gets a synthetic response so the other requests
+            // sharing this connection keep working.
+            return if self.host_blocked(&plan) {
+                Err(Box::new(BlockedDropped))
+            } else {
+                Ok(synthetic_blocked_response())
+            };
+        }
+
+        if self.inner.blackhole.is_blackholed(&plan.host, plan.port).await {
+            // A blackholed host resolves to nowhere, so the whole host is
+            // effectively blocked: drop the connection.
+            self.record_block(
+                request_facts(&plan),
+                &plan.host,
+                "DNS blackhole",
+                &req_hdrs,
+                &req_bytes,
+                req_enc,
+            );
+            return Err(Box::new(BlockedDropped));
+        }
+
+        state.count(Metric::Requests, &plan.host);
+
         let fwd = Request::from_parts(parts, Full::new(req_bytes.clone()));
 
         let (upstream, ech) = match self
@@ -449,6 +489,16 @@ fn empty_body() -> ResBody {
 
 fn full_body(bytes: Bytes) -> ResBody {
     Full::new(bytes).map_err(|e| match e {}).boxed()
+}
+
+/// The response returned for a path-level block. A `403 Forbidden` with an empty
+/// body tells the client the resource was blocked without tearing down the
+/// connection, so its other in-flight requests survive.
+fn synthetic_blocked_response() -> Response<ResBody> {
+    Response::builder()
+        .status(StatusCode::FORBIDDEN)
+        .body(empty_body())
+        .expect("static blocked response is always valid")
 }
 
 fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
@@ -627,6 +677,14 @@ mod tests {
         b.body(Full::new(Bytes::new())).unwrap()
     }
 
+    fn post(url: &str, headers: &[(&str, &str)], body: &'static [u8]) -> Request<Full<Bytes>> {
+        let mut b = Request::builder().method(hyper::Method::POST).uri(url);
+        for (k, v) in headers {
+            b = b.header(*k, *v);
+        }
+        b.body(Full::new(Bytes::from_static(body))).unwrap()
+    }
+
     #[tokio::test]
     async fn blocked_request_is_denied_and_fully_recorded() {
         let upstream = CannedUpstream::new(StatusCode::OK, vec![], b"");
@@ -653,6 +711,83 @@ mod tests {
         assert_eq!(recs[0].blocked_by, "||ads.example.com^ — custom");
         assert!(recs[0].req_headers.contains("accept: */*"));
         assert!(obs.events().iter().any(|e| e.kind == EventKind::Blocked));
+    }
+
+    #[tokio::test]
+    async fn blocked_request_captures_headers_and_body() {
+        // A host-level block still drops the connection, but the record now keeps
+        // the full request headers AND the request body that was attempted.
+        let upstream = CannedUpstream::new(StatusCode::OK, vec![], b"");
+        let (proxy, state) = test_proxy(
+            &["||ads.example.com^"],
+            upstream.clone(),
+            FixedResolver::to(&["93.184.216.34:80"]),
+        );
+        let mut obs = state.observe();
+
+        let req = post(
+            "http://ads.example.com/collect",
+            &[("accept", "*/*"), ("content-type", "text/plain")],
+            b"tracking-payload=42",
+        );
+        let err = proxy.handle_forward(req, false).await.unwrap_err();
+        assert!(err.is::<BlockedDropped>(), "host block still drops: {err}");
+
+        assert_eq!(upstream.calls.load(Ordering::SeqCst), 0, "blocked requests must not go upstream");
+        let recs = obs.records();
+        assert_eq!(recs.len(), 1);
+        assert!(recs[0].req_headers.contains("accept: */*"), "headers: {}", recs[0].req_headers);
+        assert!(
+            recs[0].req_headers.contains("content-type: text/plain"),
+            "headers: {}",
+            recs[0].req_headers
+        );
+        assert_eq!(recs[0].req_body, "tracking-payload=42", "blocked body must be captured");
+    }
+
+    #[tokio::test]
+    async fn path_block_returns_a_synthetic_response_and_keeps_the_connection() {
+        // Only the sub-resource is blocked; the host root is fine. The request
+        // gets a synthetic 403 instead of dropping the connection.
+        let upstream = CannedUpstream::new(StatusCode::OK, vec![], b"");
+        let (proxy, state) = test_proxy(
+            &["||allowed.example/ads/tracker.js"],
+            upstream.clone(),
+            FixedResolver::to(&["93.184.216.34:80"]),
+        );
+        let mut obs = state.observe();
+
+        let req = get("http://allowed.example/ads/tracker.js", &[("accept", "*/*")]);
+        let resp = proxy
+            .handle_forward(req, false)
+            .await
+            .expect("a path-level block returns Ok, not a dropped connection");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        assert_eq!(upstream.calls.load(Ordering::SeqCst), 0, "blocked requests must not go upstream");
+        // Still counted and recorded exactly like any other block.
+        assert_eq!(state.metrics.blocked_total.load(Ordering::Relaxed), 1);
+        assert_eq!(state.metrics.requests_total.load(Ordering::Relaxed), 1);
+        let recs = obs.records();
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].status, 0);
+        assert!(recs[0].blocked_by.starts_with("||allowed.example/ads/tracker.js"));
+        assert!(recs[0].req_headers.contains("accept: */*"));
+    }
+
+    #[tokio::test]
+    async fn host_block_still_drops_the_connection() {
+        // The whole host is blocked, so the connection is dropped as before.
+        let upstream = CannedUpstream::new(StatusCode::OK, vec![], b"");
+        let (proxy, _state) = test_proxy(
+            &["||blocked.example^"],
+            upstream,
+            FixedResolver::to(&["93.184.216.34:80"]),
+        );
+
+        let req = get("http://blocked.example/ads/tracker.js", &[("accept", "*/*")]);
+        let err = proxy.handle_forward(req, false).await.unwrap_err();
+        assert!(err.is::<BlockedDropped>(), "a fully blocked host drops the connection: {err}");
     }
 
     #[tokio::test(start_paused = true)]

@@ -9,7 +9,7 @@ use serde_json::json;
 
 use crate::stats::api::{BodyDecode, SharedState};
 
-use super::respond::{json_ok, json_status, parse_query};
+use super::respond::{json_ok, json_status, octet_download, parse_query};
 use super::AdminResponse;
 
 const DEFAULT_PAGE: usize = 100;
@@ -68,6 +68,11 @@ pub(super) fn request_body_decode(state: &SharedState, query: &str) -> AdminResp
     let slot = parse_query(query, "slot").unwrap_or_default();
     match state.decode_captured_body(seq, slot) {
         BodyDecode::Text(text) => json_ok(json!({ "text": text })),
+        // A binary body comes back as real bytes: hand them to the client as a
+        // plain download. The web app renders them (download / hex); it does not
+        // decode. Text stays JSON, so the client tells the two apart by
+        // content-type.
+        BodyDecode::Binary(bytes) => octet_download(bytes),
         BodyDecode::NoData => json_status(
             hyper::StatusCode::NOT_FOUND,
             json!({ "error": "no compressed body captured for this request" }),

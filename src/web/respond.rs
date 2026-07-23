@@ -39,6 +39,20 @@ pub(super) fn html(body: impl Into<Bytes>) -> AdminResponse {
         .unwrap()
 }
 
+/// Return raw bytes as a downloadable `application/octet-stream`. Used for a
+/// decoded binary body: Stats already produced the bytes, and the web app only
+/// renders them (a download / hex view), so they travel as-is with no JSON or
+/// base64 wrapper for the client to unpack.
+pub(super) fn octet_download(bytes: Vec<u8>) -> AdminResponse {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/octet-stream")
+        .header("content-disposition", "attachment")
+        .header("cache-control", "no-store")
+        .body(Full::new(Bytes::from(bytes)).boxed())
+        .unwrap()
+}
+
 pub(super) fn text_status(status: StatusCode, msg: &str) -> AdminResponse {
     Response::builder()
         .status(status)

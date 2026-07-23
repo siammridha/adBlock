@@ -468,7 +468,9 @@ impl SharedState {
         if raw.is_empty() {
             return BodyDecode::NoData;
         }
-        BodyDecode::Text(decode::decode_captured(&raw))
+        // Stats owns the decode: it returns `Text` for text bodies and `Binary`
+        // (real bytes) for non-text ones. The web app only renders the result.
+        decode::decode_captured(&raw)
     }
 
     /// A page of persisted DNS query records, newest first. Cursor semantics

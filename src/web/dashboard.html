@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>proxy · dashboard</title>
+<title>adBlocker · dashboard</title>
 <style>
   :root {
     --bg:#0e1116; --panel:#161b22; --panel2:#1c2330; --border:#2a3240;
@@ -211,10 +211,11 @@
   .tabpane[hidden] { display:none; }
   /* ---- virtual logs: fixed-height rows drawn only within the viewport ---- */
   /* A tall spacer (.vinner) holds the full height; only ~1 screen of rows is
-     ever in the DOM, positioned by transform. Rows are one clipped line —
-     full request/response detail opens in the drawer, not inline. */
+     ever in the DOM, positioned by transform. DNS rows are one clipped line;
+     request rows are taller so the URL can wrap. Full request/response detail
+     opens in the drawer, not inline. */
   .vhead, .vrow { display:grid; align-items:center; gap:10px; padding:0 8px; }
-  .rqcols  { grid-template-columns:84px 46px 46px 74px minmax(0,1fr) 74px; }
+  .rqcols  { grid-template-columns:108px 66px 60px 104px minmax(0,1fr) 74px; }
   .dnscols { grid-template-columns:84px 76px minmax(0,1.1fr) 50px minmax(0,1.1fr) 150px 40px 74px; }
   .vhead { height:30px; color:var(--muted); font-size:11px; text-transform:uppercase;
     letter-spacing:.06em; font-weight:600; border-bottom:1px solid var(--border);
@@ -224,16 +225,23 @@
   .vinner { position:relative; width:100%; }
   .vrow { position:absolute; left:0; right:0; height:30px; box-sizing:border-box;
     border-bottom:1px solid var(--border); font-size:13px; white-space:nowrap; }
+  /* Request-log rows stay single-line: every non-URL column shows its full text
+     (no ellipsis) at a width that fits its content, and the URL column truncates
+     with an ellipsis when it overflows. */
   .vrow.click { cursor:pointer; }
-  .vrow > span { overflow:hidden; text-overflow:ellipsis; }
+  .vrow > span { min-width:0; }
+  /* DNS-log cells keep the old truncation so a long answer can't overflow into
+     the next column. The request log opts out of this (its non-URL columns show
+     full text; its URL cell handles its own ellipsis via .urlcell .u). */
+  .vrow.dnscols > span { overflow:hidden; text-overflow:ellipsis; }
   .vrow:hover { background:var(--panel2); }
   .vrow.st-ok   { background:rgba(34,197,94,.06); }
   .vrow.st-info { background:rgba(56,189,248,.06); }
   .vrow.st-warn { background:rgba(249,115,22,.07); }
   .vrow.st-err  { background:rgba(239,68,68,.08); }
   .vrow.st-ok:hover,.vrow.st-info:hover,.vrow.st-warn:hover,.vrow.st-err:hover { background:var(--panel2); }
-  .vrow .urlcell { display:flex; align-items:center; gap:8px; overflow:hidden; min-width:0; }
-  .vrow .urlcell .u { overflow:hidden; text-overflow:ellipsis; }
+  .vrow .urlcell { display:flex; flex-wrap:nowrap; align-items:center; gap:8px 8px; min-width:0; }
+  .vrow .urlcell .u { flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .vrow .bb, .vrow .sj { display:inline-flex; align-items:center; gap:5px; flex-shrink:0;
     font-size:11px; color:var(--muted); }
   .vrow .bb .bb-rule { font:11px/1.5 ui-monospace,Menlo,Consolas,monospace; color:var(--blocked);
@@ -278,7 +286,7 @@
 </head>
 <body>
 <header>
-  <h1>proxy <span class="badge" id="alive">●</span></h1>
+  <h1>adBlocker <span class="badge" id="alive">●</span></h1>
   <span class="meta" id="hdr-meta">connecting…</span>
   <span id="hdr-errors">0 errors</span>
 </header>
@@ -829,7 +837,7 @@ function fmtDur(s){
 }
 function fmtTime(ms){
   const t=new Date(ms);
-  return t.toLocaleTimeString([], {hour12:false})+"."+String(t.getMilliseconds()).padStart(3,"0");
+  return t.toLocaleTimeString([], {hour12:true, hour:"numeric", minute:"2-digit", second:"2-digit"});
 }
 function esc(s){ const d=document.createElement("span"); d.textContent=s; return d.innerHTML; }
 
@@ -1490,7 +1498,11 @@ function statusColor(s){
 // Drop the query string for display: "…/ads.js?id=1&x" → "…/ads.js"
 function stripQuery(u){ const i = u.indexOf("?"); return i<0 ? u : u.slice(0,i); }
 const PAGE = 100;   // records fetched per page
-const ROW_H = 30;   // fixed row height (must match .vrow height in CSS)
+// Fixed row heights, one per list. Each must match the matching CSS row height.
+// Both logs use compact single-line rows (.vrow height); the request log's URL
+// column truncates with an ellipsis rather than wrapping.
+const RQ_ROW_H = 30;   // request log (must match .vrow height in CSS)
+const DQ_ROW_H = 30;   // dns query log (must match .vrow height in CSS)
 
 // One-click block/unblock into the custom list. Shared by the request rows, the
 // DNS rows, and the top-domain tables (renderTop), so all filtering stays one
@@ -1518,17 +1530,17 @@ function ruleButton(domain, isBlocked){
 // A windowed renderer over a fixed-height row list. `render(item, el)` fills a
 // recycled row element; `onNearBottom()` fires when the tail scrolls into view
 // (the caller pages more in). Call setItems() to swap the backing array.
-function makeVirtualList(scroller, render, onNearBottom){
+function makeVirtualList(scroller, render, onNearBottom, rowH){
   const inner = document.createElement("div");
   inner.className = "vinner";
   scroller.appendChild(inner);
   let items = [];
   const pool = [];
   function draw(){
-    inner.style.height = (items.length * ROW_H) + "px";
+    inner.style.height = (items.length * rowH) + "px";
     const top = scroller.scrollTop, vh = scroller.clientHeight || 0;
-    const start = Math.max(0, Math.floor(top / ROW_H) - 8);
-    const end = Math.min(items.length, Math.ceil((top + vh) / ROW_H) + 8);
+    const start = Math.max(0, Math.floor(top / rowH) - 8);
+    const end = Math.min(items.length, Math.ceil((top + vh) / rowH) + 8);
     const need = Math.max(0, end - start);
     while(pool.length < need){
       const el = document.createElement("div");
@@ -1539,7 +1551,7 @@ function makeVirtualList(scroller, render, onNearBottom){
       const el = pool[k];
       if(k < need){
         const i = start + k;
-        el.style.transform = "translateY(" + (i*ROW_H) + "px)";
+        el.style.transform = "translateY(" + (i*rowH) + "px)";
         el.style.display = "";
         render(items[i], el);
       } else if(el.style.display !== "none"){
@@ -1660,7 +1672,7 @@ function rqRender(rec, el){
   el.innerHTML = rqRowHTML(rec);
 }
 
-const rqVL = makeVirtualList($("rq-log"), rqRender, ()=>rqLoadOlder());
+const rqVL = makeVirtualList($("rq-log"), rqRender, ()=>rqLoadOlder(), RQ_ROW_H);
 
 async function rqLoadNewest(){
   try {
@@ -1804,25 +1816,76 @@ function skelLines(n){
 }
 function skelBox(){ return `<span class="skel skel-box"></span>`; }
 
-// A compressed body is stored as a short placeholder; the raw bytes stay on the
-// backend and are decoded only when this button is clicked.
+// A compressed or binary body is stored as a short placeholder; the raw bytes
+// stay on the backend and are decoded (by Stats) only when this button is
+// clicked. A compressed body offers "decompress"; an already-binary body offers
+// "view bytes".
 const COMPRESSED_RE = /^\[compressed body — /;
+const BINARY_RE = /^\[binary body — /;
 function fillBody(seq, slot, pre, tools, text){
   pre.textContent = text;
   tools.textContent = "";
-  if(!COMPRESSED_RE.test(text)) return;
+  const compressed = COMPRESSED_RE.test(text);
+  const binary = BINARY_RE.test(text);
+  if(!compressed && !binary) return;
   const btn = document.createElement("button");
   btn.className = "ghost mini decomp";
-  btn.textContent = "decompress";
+  btn.textContent = compressed ? "decompress" : "view bytes";
   btn.addEventListener("click", ()=>decompressBody(seq, slot, pre, btn));
   tools.appendChild(btn);
 }
+// Stats decodes the body and returns either JSON text (a text body) or the raw
+// decoded bytes as application/octet-stream (a binary body). We tell them apart
+// by content-type and only *render* the result — no decoding happens here.
 function decompressBody(seq, slot, pre, btn){
   btn.disabled = true; btn.textContent = "decompressing…";
-  fetch(`/api/request/body?seq=${seq}&slot=${slot}`).then(r=>r.json()).then(j=>{
-    if(typeof j.text === "string"){ pre.textContent = j.text; btn.remove(); }
-    else { btn.disabled = false; btn.textContent = "retry"; btn.title = j.error || "decode failed"; }
+  fetch(`/api/request/body?seq=${seq}&slot=${slot}`).then(async r=>{
+    const ct = r.headers.get("content-type") || "";
+    if(ct.includes("application/json")){
+      const j = await r.json();
+      if(typeof j.text === "string"){ pre.textContent = j.text; btn.remove(); }
+      else { btn.disabled = false; btn.textContent = "retry"; btn.title = j.error || "decode failed"; }
+      return;
+    }
+    const buf = await r.arrayBuffer();
+    showBinaryBody(seq, slot, pre, btn, new Uint8Array(buf));
   }).catch(e=>{ btn.disabled = false; btn.textContent = "retry"; btn.title = String(e); });
+}
+
+// A binary body arrived as real bytes. Offer a download and show a hex preview.
+function showBinaryBody(seq, slot, pre, btn, bytes){
+  const tools = btn.parentNode;
+  btn.remove();
+  const blob = new Blob([bytes], {type:"application/octet-stream"});
+  const dl = document.createElement("a");
+  dl.className = "ghost mini decomp";
+  dl.textContent = "download";
+  dl.href = URL.createObjectURL(blob);
+  dl.download = `body-${slot}-${seq}.bin`;
+  tools.appendChild(dl);
+  pre.textContent = `[binary body — ${bytes.length} bytes]\n\n` + hexDump(bytes, 4096);
+}
+
+// Classic offset | hex | ascii dump of up to `max` bytes. Pure rendering of
+// bytes the server already decoded.
+function hexDump(bytes, max){
+  const n = Math.min(bytes.length, max);
+  let out = "";
+  for(let i=0;i<n;i+=16){
+    const row = bytes.subarray(i, Math.min(i+16, n));
+    let hex = "", asc = "";
+    for(let j=0;j<16;j++){
+      if(j < row.length){
+        hex += row[j].toString(16).padStart(2,"0") + " ";
+        const c = row[j];
+        asc += (c>=32 && c<127) ? String.fromCharCode(c) : ".";
+      } else { hex += "   "; }
+      if(j===7) hex += " ";
+    }
+    out += i.toString(16).padStart(8,"0") + "  " + hex + " " + asc + "\n";
+  }
+  if(bytes.length > max) out += `… [${bytes.length - max} more bytes — download for the full body]\n`;
+  return out;
 }
 
 // Row clicks: the block button toggles a filter; anywhere else opens the drawer.
@@ -1925,7 +1988,7 @@ function dqRender(d, el){
   el.className = "vrow dnscols" + (tint ? " " + tint : "");
   el.innerHTML = dqRowHTML(d);
 }
-const dqVL = makeVirtualList($("dq-log"), dqRender, ()=>dqLoadOlder());
+const dqVL = makeVirtualList($("dq-log"), dqRender, ()=>dqLoadOlder(), DQ_ROW_H);
 
 async function dqLoadNewest(){
   try {

@@ -114,7 +114,15 @@ fn attach_body(
     enc: BodyEncoding,
 ) {
     if enc == BodyEncoding::Identity {
+        let kept = &prefix[..prefix.len().min(cap)];
         ex.attach(disp, || render(prefix, total, cap));
+        // A binary identity body (an image, font, wasm, …) can't be shown inline,
+        // so `render` returns a placeholder. Keep its raw bytes too, tagged
+        // `identity`, so the decode endpoint can hand the real bytes back for a
+        // download / hex view instead of leaving the placeholder a dead end.
+        if kept.contains(&0) {
+            ex.attach_quiet(raw, || encode_raw(BodyEncoding::Identity, kept));
+        }
         return;
     }
     let kept = &prefix[..prefix.len().min(cap)];
@@ -333,6 +341,61 @@ mod tests {
             panic!("expected a decodable body");
         };
         assert_eq!(text, "console.log('hello world, compressed')");
+    }
+
+    #[test]
+    fn identity_binary_capture_keeps_decodable_raw_bytes() {
+        // An uncompressed (identity) binary body — e.g. a PNG — shows a
+        // placeholder inline but must keep its raw bytes so the decode endpoint
+        // can return them in full for a download / hex view.
+        let png: &[u8] = &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x01, 0xff];
+
+        let dir = std::env::temp_dir().join("proxy-capture-identity-binary-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = std::sync::Arc::new(persisting_state(&dir));
+
+        let ex = state.record_forwarded(
+            RequestFacts { method: "GET", req_type: "image", url: "https://a.example/logo.png", host: "a.example" },
+            200,
+            false,
+        );
+        response_body(&ex, png, BodyEncoding::Identity);
+        drop(ex);
+        state.flush_logs();
+
+        let seq = state.request_page(None, 10)[0].seq;
+        let detail = state.request_detail(seq);
+        assert!(detail.resp_body.starts_with("[binary body —"), "body: {}", detail.resp_body);
+        assert!(!detail.resp_body_raw.is_empty(), "raw bytes should be captured for a binary identity body");
+        let crate::stats::api::BodyDecode::Binary(bytes) = state.decode_captured_body(seq, "resp") else {
+            panic!("expected binary bytes back, not text/placeholder");
+        };
+        assert_eq!(bytes, png, "the full binary body must decode back");
+    }
+
+    #[test]
+    fn identity_text_body_keeps_no_raw_prefix() {
+        // Regression guard: a plain text identity body still shows inline with no
+        // raw sidecar (text bodies are unchanged by the binary work).
+        let dir = std::env::temp_dir().join("proxy-capture-identity-text-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = std::sync::Arc::new(persisting_state(&dir));
+
+        let ex = state.record_forwarded(
+            RequestFacts { method: "GET", req_type: "document", url: "https://a.example/", host: "a.example" },
+            200,
+            false,
+        );
+        response_body(&ex, b"<html>plain</html>", BodyEncoding::Identity);
+        drop(ex);
+        state.flush_logs();
+
+        let seq = state.request_page(None, 10)[0].seq;
+        let detail = state.request_detail(seq);
+        assert_eq!(detail.resp_body, "<html>plain</html>");
+        assert!(detail.resp_body_raw.is_empty(), "a text identity body needs no raw prefix");
     }
 
     #[tokio::test]
