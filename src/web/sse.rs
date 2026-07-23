@@ -13,7 +13,7 @@ use hyper::{Response, StatusCode};
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, mpsc};
 
-use crate::stats::{SharedState, UiMsg};
+use crate::stats::api::{SharedState, UiMsg};
 
 use super::stats::stats_json;
 use super::AdminResponse;

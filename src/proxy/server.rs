@@ -13,15 +13,15 @@ use hyper_util::rt::TokioIo;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
 
-use crate::adblock::AdBlocker;
+use crate::adblock::api::AdBlocker;
 use crate::proxy::error::{Error, Result};
 use crate::proxy::exclusions::ExclusionStore;
-use crate::stats::history::Metric;
+use crate::stats::api::Metric;
 use super::http_client::HttpClient;
 use crate::proxy::blackhole::{BlackholeProbe, EgressResolver, Resolver};
 use crate::proxy::ca::CertAuthority;
 use crate::proxy::{capture, pipeline};
-use crate::stats::{CaptureSlot, EventKind, Exchange, RequestFacts, SharedState};
+use crate::stats::api::{CaptureSlot, EventKind, Exchange, RequestFacts, SharedState};
 
 fn request_facts(plan: &pipeline::RequestPlan) -> RequestFacts<'_> {
     RequestFacts { method: &plan.method, req_type: &plan.req_type, url: &plan.url, host: &plan.host }
@@ -479,11 +479,11 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::proxy::blackhole::BLACKHOLE_TTL;
-    use crate::adblock::MemoryListStore;
-    use crate::adblock::AdblockConfig;
+    use crate::adblock::api::MemoryListStore;
+    use crate::adblock::api::AdblockConfig;
     use crate::proxy::config::PerformanceConfig;
-    use crate::stats::LoggingConfig;
-    use crate::stats::StaticInfo;
+    use crate::stats::api::LoggingConfig;
+    use crate::stats::api::StaticInfo;
     use hyper::StatusCode;
 
     struct CannedUpstream {
@@ -580,7 +580,7 @@ mod tests {
             scriptlet_resources: std::path::PathBuf::new(),
         };
         let (adblock, _curation) =
-            crate::adblock::with_store(&cfg, Arc::new(MemoryListStore::new())).unwrap();
+            crate::adblock::api::with_store(&cfg, Arc::new(MemoryListStore::new())).unwrap();
         proxy_with_adblock(adblock, client, resolver)
     }
 
@@ -760,7 +760,7 @@ mod tests {
             scriptlet_resources: res_path,
         };
         let (adblock, _curation) =
-            crate::adblock::with_store(&cfg, Arc::new(MemoryListStore::new())).unwrap();
+            crate::adblock::api::with_store(&cfg, Arc::new(MemoryListStore::new())).unwrap();
         let upstream = CannedUpstream::new(
             StatusCode::OK,
             vec![
@@ -854,7 +854,7 @@ mod tests {
         assert_eq!(state.metrics.errors_total.load(Ordering::Relaxed), 1);
         let recs = obs.records();
         assert_eq!(recs.len(), 1);
-        assert_eq!(recs[0].kind, crate::stats::RequestKind::Failed);
+        assert_eq!(recs[0].kind, crate::stats::api::RequestKind::Failed);
         assert!(
             recs[0].blocked_by.starts_with("upstream down.example:"),
             "tag: {}",

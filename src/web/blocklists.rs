@@ -5,12 +5,12 @@ use std::sync::Arc;
 use hyper::StatusCode;
 use serde_json::{json, Value};
 
-use crate::adblock::commands::{BlocklistCommand, RuleTest};
-use crate::adblock::updater::{ScriptletUpdater, UBO_TARBALL_PAGE};
-use crate::adblock::{AdBlocker, ListCuration, ListEntry};
-use crate::adblock::error::Result;
-use crate::adblock::maintenance::{event_list_change, event_scriptlets, RefreshError};
-use crate::stats::{EventKind, SharedState};
+use crate::adblock::api::{BlocklistCommand, RuleTest};
+use crate::adblock::api::{ScriptletUpdater, UBO_TARBALL_PAGE};
+use crate::adblock::api::{AdBlocker, ListCuration, ListEntry};
+use crate::adblock::api::Result;
+use crate::adblock::api::{event_list_change, event_scriptlets, RefreshError};
+use crate::stats::api::{EventKind, SharedState};
 
 use super::respond::{command, json_ok, json_status, parse_query, percent_decode};
 use super::{Admin, AdminResponse};
@@ -128,7 +128,7 @@ impl Admin {
                 match result {
                     Ok(Ok(true)) => {
                         self.state.log_event(
-                            crate::stats::EventKind::Info,
+                            crate::stats::api::EventKind::Info,
                             format!("blocklist removed: {name}"),
                         );
                         json_ok(blocklists_json(&self.curation))

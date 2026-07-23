@@ -2,7 +2,7 @@
 
 use serde_json::json;
 
-use crate::stats::SharedState;
+use crate::stats::api::SharedState;
 
 use super::respond::json_ok;
 use super::AdminResponse;

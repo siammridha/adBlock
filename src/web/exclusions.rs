@@ -5,8 +5,8 @@ use std::sync::Arc;
 use hyper::StatusCode;
 use serde_json::{json, Value};
 
-use crate::proxy::exclusions::{ExclusionCommand, ExclusionStore};
-use crate::stats::SharedState;
+use crate::proxy::api::{ExclusionCommand, ExclusionStore};
+use crate::stats::api::SharedState;
 
 use super::respond::{command, json_ok, json_status};
 use super::AdminResponse;
@@ -29,14 +29,14 @@ pub(super) fn edit_exclusions(
         ExclusionCommand::Delete { domain } => exclusions.remove(domain).map(|removed| {
             if removed {
                 state.log_event(
-                    crate::stats::EventKind::Info,
+                    crate::stats::api::EventKind::Info,
                     format!("excluded domain removed: {domain}"),
                 );
             }
         }),
         ExclusionCommand::Add { domain } => exclusions.add(domain).map(|_| {
             state.log_event(
-                crate::stats::EventKind::Info,
+                crate::stats::api::EventKind::Info,
                 format!("excluded domain added: {domain} (bypasses MITM)"),
             );
         }),

@@ -4,11 +4,11 @@
 
 use serde::Deserialize;
 
-use crate::adblock::AdblockConfig;
-use crate::dns::DnsConfig;
+use crate::adblock::api::AdblockConfig;
+use crate::dns::api::DnsConfig;
 use crate::error::{Error, Result};
-use crate::proxy::config::{PerformanceConfig, ServerConfig, TlsConfig};
-use crate::stats::LoggingConfig;
+use crate::proxy::api::{PerformanceConfig, ServerConfig, TlsConfig};
+use crate::stats::api::LoggingConfig;
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]

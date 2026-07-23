@@ -14,7 +14,7 @@ use tokio::task::JoinHandle;
 use crate::proxy::error::Result;
 use crate::proxy::persist::OverrideStore;
 use crate::proxy::Proxy;
-use crate::stats::{EventKind, SharedState};
+use crate::stats::api::{EventKind, SharedState};
 
 type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
@@ -248,9 +248,9 @@ fn legacy_overrides(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stats::LoggingConfig;
+    use crate::stats::api::LoggingConfig;
     use crate::proxy::error::Error;
-    use crate::stats::StaticInfo;
+    use crate::stats::api::StaticInfo;
     use std::path::Path;
 
     struct TcpBinder;

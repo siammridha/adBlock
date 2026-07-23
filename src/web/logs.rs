@@ -7,7 +7,7 @@
 
 use serde_json::json;
 
-use crate::stats::{BodyDecode, SharedState};
+use crate::stats::api::{BodyDecode, SharedState};
 
 use super::respond::{json_ok, json_status, parse_query};
 use super::AdminResponse;

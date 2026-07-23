@@ -17,7 +17,7 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use bytes::Bytes;
 use hyper::body::{Body, Frame};
 
-use crate::stats::{CaptureSlot, Exchange};
+use crate::stats::api::{CaptureSlot, Exchange};
 
 const REQ_BODY_CAP: usize = 16 * 1024;
 const RESP_BODY_CAP: usize = 64 * 1024;
@@ -211,7 +211,7 @@ impl<B> Drop for CaptureBody<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stats::RequestFacts;
+    use crate::stats::api::RequestFacts;
 
     #[test]
     fn render_passes_text_through_and_notes_truncation() {
@@ -257,13 +257,13 @@ mod tests {
         assert!(raw.starts_with("gzip\n"), "raw: {raw}");
     }
 
-    fn state() -> std::sync::Arc<crate::stats::SharedState> {
+    fn state() -> std::sync::Arc<crate::stats::api::SharedState> {
         std::sync::Arc::new(bare_state())
     }
 
-    fn bare_state() -> crate::stats::SharedState {
-        use crate::stats::LoggingConfig;
-        use crate::stats::{SharedState, StaticInfo};
+    fn bare_state() -> crate::stats::api::SharedState {
+        use crate::stats::api::LoggingConfig;
+        use crate::stats::api::{SharedState, StaticInfo};
         SharedState::new(
             StaticInfo {
                 version: "test".into(),
@@ -280,7 +280,7 @@ mod tests {
         )
     }
 
-    fn persisting_state(dir: &std::path::Path) -> crate::stats::SharedState {
+    fn persisting_state(dir: &std::path::Path) -> crate::stats::api::SharedState {
         bare_state().with_data_dir(dir)
     }
 
@@ -329,7 +329,7 @@ mod tests {
         assert!(detail.resp_body.starts_with("[compressed body — gzip,"), "body: {}", detail.resp_body);
         assert!(!detail.resp_body_raw.is_empty(), "raw prefix should be captured");
         // Stats owns the decode; the proxy-produced prefix decodes through it.
-        let crate::stats::BodyDecode::Text(text) = state.decode_captured_body(seq, "resp") else {
+        let crate::stats::api::BodyDecode::Text(text) = state.decode_captured_body(seq, "resp") else {
             panic!("expected a decodable body");
         };
         assert_eq!(text, "console.log('hello world, compressed')");
@@ -377,7 +377,7 @@ mod tests {
         let seq = state.request_page(None, 10)[0].seq;
         let detail = state.request_detail(seq);
         assert!(detail.resp_body.starts_with("[compressed body — gzip,"), "body: {}", detail.resp_body);
-        let crate::stats::BodyDecode::Text(text) = state.decode_captured_body(seq, "resp") else {
+        let crate::stats::api::BodyDecode::Text(text) = state.decode_captured_body(seq, "resp") else {
             panic!("expected a decodable body");
         };
         assert_eq!(text, "streamed-and-gzipped-payload");

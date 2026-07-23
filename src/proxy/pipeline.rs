@@ -220,7 +220,7 @@ impl ConnectPlan {
 
 pub(crate) fn plan_connect(
     authority: &str,
-    check: impl FnOnce(&str) -> crate::adblock::BlockDecision,
+    check: impl FnOnce(&str) -> crate::adblock::api::BlockDecision,
     exclusion: impl FnOnce(&str) -> Option<String>,
 ) -> ConnectPlan {
     let host = authority.split(':').next().unwrap_or("").to_string();
@@ -470,17 +470,17 @@ mod tests {
             .is_some());
     }
 
-    fn pass_decision() -> crate::adblock::BlockDecision {
-        crate::adblock::BlockDecision {
+    fn pass_decision() -> crate::adblock::api::BlockDecision {
+        crate::adblock::api::BlockDecision {
             blocked: false,
-            attribution: crate::adblock::BlockAttribution { rule: None, list: None },
+            attribution: crate::adblock::api::BlockAttribution { rule: None, list: None },
         }
     }
 
-    fn block_by(rule: &str) -> crate::adblock::BlockDecision {
-        crate::adblock::BlockDecision {
+    fn block_by(rule: &str) -> crate::adblock::api::BlockDecision {
+        crate::adblock::api::BlockDecision {
             blocked: true,
-            attribution: crate::adblock::BlockAttribution {
+            attribution: crate::adblock::api::BlockAttribution {
                 rule: Some(rule.to_string()),
                 list: None,
             },

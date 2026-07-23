@@ -5,20 +5,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use proxy::adblock::updater::ScriptletUpdater;
-use proxy::Config;
-use proxy::dns::DnsService;
-use proxy::proxy::egress::EgressPolicy;
-use proxy::proxy::exclusions::ExclusionStore;
-use proxy::proxy::http_client::HttpClient;
-use proxy::adblock::maintenance::{self, BlocklistFetcher};
-use proxy::proxy::ca::CertAuthority;
-use proxy::proxy::certs::CertStore;
-use proxy::dns::control::DnsRuntime;
-use proxy::proxy::control::ProxyRuntime;
-use proxy::proxy::Proxy;
-use proxy::stats::{SharedState, StaticInfo};
+use proxy::adblock::api::{spawn_blocklist_updater, BlocklistFetcher, ScriptletUpdater};
+use proxy::dns::api::{DnsRuntime, DnsService};
+use proxy::proxy::api::{
+    CertAuthority, CertStore, EgressPolicy, ExclusionStore, HttpClient, Proxy, ProxyRuntime,
+};
+use proxy::stats::api::{SharedState, StaticInfo};
 use proxy::web;
+use proxy::Config;
 use proxy::Result;
 
 #[cfg(not(target_env = "msvc"))]
@@ -49,7 +43,7 @@ async fn main() -> Result<()> {
 
     // Each module owns and creates its own data directories; the entry point
     // only hands each one its config section and wires the results together.
-    let (adblock, curation) = proxy::adblock::from_config(&config.adblock)?;
+    let (adblock, curation) = proxy::adblock::api::from_config(&config.adblock)?;
 
     // The active CA (from the certificates tab) wins over the config CA; when
     // nothing is selected, active_paths() returns the config paths. Switching is
@@ -100,7 +94,7 @@ async fn main() -> Result<()> {
             .with_egress(egress.clone()),
     );
     let fetch_client = Arc::new(
-        proxy::adblock::fetch::HttpClient::new()
+        proxy::adblock::api::HttpClient::new()
             .with_connect_timeout(config.performance.upstream_timeout_ms),
     );
     let updater = Arc::new(ScriptletUpdater::ubo(fetch_client.clone()));
@@ -157,7 +151,7 @@ async fn main() -> Result<()> {
         });
     }
 
-    maintenance::spawn_blocklist_updater(
+    spawn_blocklist_updater(
         state.clone(),
         curation.clone(),
         fetcher,

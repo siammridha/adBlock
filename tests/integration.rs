@@ -4,10 +4,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use proxy::adblock::{AdBlocker, ListCuration, MemoryListStore};
-use proxy::adblock::AdblockConfig;
+use proxy::adblock::api::{AdBlocker, AdblockConfig, ListCuration, MemoryListStore};
+use proxy::proxy::api::ExclusionStore;
 use proxy::Config;
-use proxy::proxy::exclusions::ExclusionStore;
 
 fn blocker(rules: &[&str]) -> Arc<AdBlocker> {
     parts(rules).0
@@ -23,7 +22,7 @@ fn parts(rules: &[&str]) -> (Arc<AdBlocker>, Arc<ListCuration>) {
         inject_scriptlets: false,
         scriptlet_resources: PathBuf::new(),
     };
-    proxy::adblock::with_store(&cfg, Arc::new(MemoryListStore::new())).unwrap()
+    proxy::adblock::api::with_store(&cfg, Arc::new(MemoryListStore::new())).unwrap()
 }
 
 #[test]

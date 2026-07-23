@@ -5,10 +5,10 @@ use std::sync::Arc;
 use hyper::StatusCode;
 use serde_json::{json, Value};
 
-use crate::dns::control::DnsRuntime;
-use crate::proxy::control::ProxyRuntime;
-use crate::proxy::egress::{EgressOverrides, EgressPolicy};
-use crate::stats::SharedState;
+use crate::dns::api::DnsRuntime;
+use crate::proxy::api::ProxyRuntime;
+use crate::proxy::api::{EgressOverrides, EgressPolicy};
+use crate::stats::api::SharedState;
 
 use super::respond::{command, json_ok, json_status};
 use super::AdminResponse;
@@ -59,7 +59,7 @@ pub(super) fn edit_proxy_config(
     };
     let settings = egress.apply(&upd);
     state.log_event(
-        crate::stats::EventKind::Info,
+        crate::stats::api::EventKind::Info,
         format!(
             "proxy egress: resolver-only={} ech={} disable-ipv6={}",
             settings.resolver_only, settings.use_ech, settings.disable_ipv6

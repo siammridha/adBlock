@@ -4,7 +4,7 @@
 use hickory_proto::op::{Message, OpCode, Query, ResponseCode};
 use hickory_proto::rr::RecordType;
 
-use crate::adblock::AdBlocker;
+use crate::adblock::api::AdBlocker;
 
 use super::cache;
 use super::rewrites::{RewriteAnswer, RewriteStore};
@@ -63,8 +63,8 @@ pub(super) fn plan_query(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adblock::{with_store, MemoryListStore};
-    use crate::adblock::AdblockConfig;
+    use crate::adblock::api::{with_store, MemoryListStore};
+    use crate::adblock::api::AdblockConfig;
     use hickory_proto::rr::Name;
     use std::path::PathBuf;
     use std::str::FromStr;

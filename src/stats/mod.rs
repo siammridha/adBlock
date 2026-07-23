@@ -13,6 +13,7 @@ use crate::stats::persist::OverrideStore;
 
 use history::{History, Metric};
 
+pub mod api;
 pub mod config;
 mod decode;
 mod errors;

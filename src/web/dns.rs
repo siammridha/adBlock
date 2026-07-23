@@ -5,11 +5,11 @@ use std::sync::Arc;
 use hyper::StatusCode;
 use serde_json::{json, Value};
 
-use crate::adblock::commands::DnsRuleTest;
-use crate::adblock::AdBlocker;
-use crate::dns::commands::{DnsConfigCommand, RewriteCommand};
-use crate::dns::{DnsService, DnsStatus};
-use crate::stats::SharedState;
+use crate::adblock::api::DnsRuleTest;
+use crate::adblock::api::AdBlocker;
+use crate::dns::api::{DnsConfigCommand, RewriteCommand};
+use crate::dns::api::{DnsService, DnsStatus};
+use crate::stats::api::SharedState;
 
 use super::respond::{command, json_ok, json_status};
 use super::AdminResponse;
@@ -69,7 +69,7 @@ pub(super) fn edit_rewrites(
             dns.rewrites().remove(domain, answer).map(|removed| {
                 if removed {
                     state.log_event(
-                        crate::stats::EventKind::Info,
+                        crate::stats::api::EventKind::Info,
                         format!("dns rewrite removed: {domain} → {answer}"),
                     );
                 }
@@ -78,7 +78,7 @@ pub(super) fn edit_rewrites(
         RewriteCommand::Add { domain, answer } => {
             dns.rewrites().add(domain, answer).map(|()| {
                 state.log_event(
-                    crate::stats::EventKind::Info,
+                    crate::stats::api::EventKind::Info,
                     format!("dns rewrite added: {domain} → {answer}"),
                 );
             })
@@ -111,7 +111,7 @@ pub(super) fn edit_dns_config(
 
     match outcome {
         Ok(msg) => {
-            state.log_event(crate::stats::EventKind::Info, msg);
+            state.log_event(crate::stats::api::EventKind::Info, msg);
             json_ok(dns_json(state, dns))
         }
         Err(e) => json_status(StatusCode::BAD_REQUEST, json!({"error": e})),

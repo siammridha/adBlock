@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use lru::LruCache;
 use serde::{Deserialize, Serialize};
 
-use crate::dns::DnsService;
+use crate::dns::api::DnsService;
 use crate::proxy::persist::OverrideStore;
 
 /// How long a resolved host stays in the egress-side cache. This sits in front
@@ -183,7 +183,13 @@ impl EgressPolicy {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::Ordering;
+    use std::time::Instant;
+
     use super::*;
+    use crate::adblock::api::{with_store, AdblockConfig, MemoryListStore};
+    use crate::dns::api::{DnsConfig, DnsService};
+    use crate::stats::api::{LoggingConfig, SharedState, StaticInfo};
 
     #[test]
     fn proxy_config_parses_present_flags_only() {
@@ -194,5 +200,67 @@ mod tests {
         let upd = EgressOverrides::parse(br#"{"use_ech": "yes"}"#).unwrap();
         assert_eq!(upd.use_ech, None);
         assert!(EgressOverrides::parse(b"[]").is_err());
+    }
+
+    // Build a DNS service reachable only through DNS's public API, backed by a
+    // rewrite so it answers without any upstream. We keep the shared state so
+    // the test can read the DNS query counter directly.
+    fn dns_with_rewrite() -> (Arc<DnsService>, Arc<SharedState>) {
+        let adblock_cfg = AdblockConfig {
+            enabled: true,
+            custom_rules: vec![],
+            data_dir: PathBuf::from("/nonexistent-for-tests"),
+            auto_update_hours: 0,
+            inject_scriptlets: false,
+            scriptlet_resources: PathBuf::new(),
+        };
+        let (adblock, _) = with_store(&adblock_cfg, Arc::new(MemoryListStore::new())).unwrap();
+        let state = Arc::new(SharedState::new(
+            StaticInfo {
+                version: "test".into(),
+                listen: String::new(),
+                admin_listen: String::new(),
+                started: Instant::now(),
+            },
+            &LoggingConfig {
+                level: "info".into(),
+                log_actions: true,
+                log_requests: true,
+                ..Default::default()
+            },
+        ));
+        let cfg = DnsConfig {
+            upstreams: vec!["udp://127.0.0.1:1".into()],
+            upstream_timeout_ms: 200,
+            ..DnsConfig::default()
+        };
+        let dir = std::env::temp_dir().join("proxy-egress-cache-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let dns = DnsService::new(&cfg, &dir, adblock, state.clone()).unwrap();
+        dns.rewrites().add("*.lab.example", "10.9.8.7").unwrap();
+        (dns, state)
+    }
+
+    #[tokio::test]
+    async fn resolve_serves_repeats_from_the_egress_cache_until_settings_change() {
+        let (dns, state) = dns_with_rewrite();
+        let store = std::env::temp_dir().join("proxy-egress-cache-test.json");
+        let _ = std::fs::remove_file(&store);
+        let egress = EgressPolicy::load(store, dns);
+
+        // First resolve goes through the DNS pipeline.
+        let addrs = egress.resolve("app.lab.example").await.unwrap();
+        assert_eq!(addrs, vec![IpAddr::V4(std::net::Ipv4Addr::new(10, 9, 8, 7))]);
+        let after_first = state.metrics.dns_queries_total.load(Ordering::Relaxed);
+        assert!(after_first >= 1);
+
+        // A repeat is served from the egress cache without touching DNS.
+        egress.resolve("app.lab.example").await.unwrap();
+        assert_eq!(state.metrics.dns_queries_total.load(Ordering::Relaxed), after_first);
+
+        // Applying settings clears the cache, so the next resolve hits DNS again.
+        egress.apply(&EgressOverrides::default());
+        egress.resolve("app.lab.example").await.unwrap();
+        assert!(state.metrics.dns_queries_total.load(Ordering::Relaxed) > after_first);
     }
 }

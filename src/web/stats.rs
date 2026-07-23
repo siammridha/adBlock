@@ -2,9 +2,9 @@
 
 use serde_json::{json, Value};
 
-use crate::stats::history::Metric;
-use crate::dns::DnsService;
-use crate::stats::{EventKind, SharedState};
+use crate::stats::api::Metric;
+use crate::dns::api::DnsService;
+use crate::stats::api::{EventKind, SharedState};
 
 use super::respond::json_ok;
 use super::AdminResponse;
@@ -40,7 +40,7 @@ pub(super) fn stats_json(state: &SharedState) -> Value {
 }
 
 pub(super) fn config(state: &SharedState, body: &[u8]) -> AdminResponse {
-    let change = match crate::stats::StatsOverrides::parse(body) {
+    let change = match crate::stats::api::StatsOverrides::parse(body) {
         Ok(c) => c,
         Err(e) => {
             return super::respond::json_status(
@@ -72,7 +72,7 @@ pub(super) fn exclusions_json(state: &SharedState) -> Value {
 /// Add or delete a stats-excluded domain. Body: `{"domain": "...", "delete"?: true}`.
 pub(super) fn edit_exclusions(state: &SharedState, body: &[u8]) -> AdminResponse {
     use hyper::StatusCode;
-    let cmd = match crate::stats::StatsExclusionCommand::parse(body) {
+    let cmd = match crate::stats::api::StatsExclusionCommand::parse(body) {
         Ok(c) => c,
         Err(e) => return super::respond::json_status(StatusCode::BAD_REQUEST, json!({"error": e})),
     };
@@ -83,14 +83,14 @@ pub(super) fn edit_exclusions(state: &SharedState, body: &[u8]) -> AdminResponse
         );
     };
     let outcome = match &cmd {
-        crate::stats::StatsExclusionCommand::Delete { domain } => {
+        crate::stats::api::StatsExclusionCommand::Delete { domain } => {
             store.remove(domain).map(|removed| {
                 if removed {
                     state.log_event(EventKind::Info, format!("stats exclusion removed: {domain}"));
                 }
             })
         }
-        crate::stats::StatsExclusionCommand::Add { domain } => store.add(domain).map(|_| {
+        crate::stats::api::StatsExclusionCommand::Add { domain } => store.add(domain).map(|_| {
             state.log_event(EventKind::Info, format!("stats exclusion added: {domain}"));
         }),
     };

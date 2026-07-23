@@ -6,8 +6,8 @@ use http_body_util::{BodyExt, Full};
 use hyper::{Response, StatusCode};
 use serde_json::{json, Value};
 
-use crate::proxy::certs::{CertCommand, CertStore};
-use crate::stats::{EventKind, SharedState};
+use crate::proxy::api::{CertCommand, CertStore};
+use crate::stats::api::{EventKind, SharedState};
 
 use super::respond::{json_ok, json_status, parse_query, percent_decode};
 use super::AdminResponse;

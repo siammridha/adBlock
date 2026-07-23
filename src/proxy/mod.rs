@@ -1,5 +1,6 @@
 //! The HTTP/HTTPS proxy itself.
 
+pub mod api;
 pub(crate) mod blackhole;
 pub mod ca;
 pub(crate) mod capture;

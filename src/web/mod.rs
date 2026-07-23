@@ -13,16 +13,16 @@ use hyper_util::rt::TokioIo;
 use serde_json::json;
 use tokio::net::TcpListener;
 
-use crate::adblock::updater::ScriptletUpdater;
-use crate::adblock::{AdBlocker, ListCuration};
-use crate::dns::control::DnsRuntime;
-use crate::dns::DnsService;
-use crate::proxy::control::ProxyRuntime;
-use crate::proxy::egress::EgressPolicy;
-use crate::proxy::certs::CertStore;
-use crate::proxy::exclusions::ExclusionStore;
-use crate::adblock::maintenance::BlocklistFetcher;
-use crate::stats::SharedState;
+use crate::adblock::api::ScriptletUpdater;
+use crate::adblock::api::{AdBlocker, ListCuration};
+use crate::dns::api::DnsRuntime;
+use crate::dns::api::DnsService;
+use crate::proxy::api::ProxyRuntime;
+use crate::proxy::api::EgressPolicy;
+use crate::proxy::api::CertStore;
+use crate::proxy::api::ExclusionStore;
+use crate::adblock::api::BlocklistFetcher;
+use crate::stats::api::SharedState;
 
 mod blocklists;
 mod certs;
@@ -214,7 +214,7 @@ impl Admin {
             "/api/dns/flush" => self.with_dns(|dns| {
                 let cleared = dns.cache().clear();
                 self.state.log_event(
-                    crate::stats::EventKind::Info,
+                    crate::stats::api::EventKind::Info,
                     format!("dns cache flushed ({cleared} entries)"),
                 );
                 json_ok(json!({"ok": true, "cleared": cleared}))
@@ -253,16 +253,16 @@ fn dashboard() -> Bytes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stats::history::Metric;
+    use crate::stats::api::Metric;
     use http_body_util::Full;
     use serde_json::Value;
 
-    use crate::adblock::MemoryListStore;
-    use crate::adblock::AdblockConfig;
-    use crate::dns::DnsConfig;
-    use crate::stats::LoggingConfig;
-    use crate::adblock::maintenance::{BlocklistFetcher, Downloader};
-    use crate::stats::StaticInfo;
+    use crate::adblock::api::MemoryListStore;
+    use crate::adblock::api::AdblockConfig;
+    use crate::dns::api::DnsConfig;
+    use crate::stats::api::LoggingConfig;
+    use crate::adblock::api::{BlocklistFetcher, Downloader};
+    use crate::stats::api::StaticInfo;
 
     struct CannedDownloader(&'static str);
 
@@ -292,7 +292,7 @@ mod tests {
             scriptlet_resources: std::path::PathBuf::new(),
         };
         let (adblock, curation) =
-            crate::adblock::with_store(&cfg, Arc::new(MemoryListStore::new())).unwrap();
+            crate::adblock::api::with_store(&cfg, Arc::new(MemoryListStore::new())).unwrap();
         let state = Arc::new(SharedState::new(
             StaticInfo {
                 version: "test".into(),
@@ -306,13 +306,13 @@ mod tests {
             "/nonexistent-for-tests/excluded-domains.conf",
         )));
         let updater = Arc::new(ScriptletUpdater::ubo(Arc::new(
-            crate::adblock::fetch::HttpClient::new(),
+            crate::adblock::api::HttpClient::new(),
         )));
         let fetcher = Arc::new(BlocklistFetcher::new(curation.clone(), downloader));
         let dns_cfg = DnsConfig::default();
         let dns_svc =
             DnsService::new(&dns_cfg, dns_dir, adblock.clone(), state.clone()).unwrap();
-        let egress = crate::proxy::egress::EgressPolicy::load(
+        let egress = crate::proxy::api::EgressPolicy::load(
             dns_dir.join("proxy-settings.json"),
             dns_svc.clone(),
         );
@@ -627,8 +627,8 @@ mod tests {
     #[tokio::test]
     async fn error_log_is_served_and_cleared_over_the_api() {
         let admin = admin(&[], Arc::new(CannedDownloader("")));
-        admin.state.log_event(crate::stats::EventKind::Error, "boom");
-        admin.state.log_event(crate::stats::EventKind::Info, "not an error");
+        admin.state.log_event(crate::stats::api::EventKind::Error, "boom");
+        admin.state.log_event(crate::stats::api::EventKind::Info, "not an error");
 
         let v = body_json(admin.route(get("/api/errors")).await).await;
         let errors = v["errors"].as_array().unwrap();

@@ -7,7 +7,7 @@ use crate::adblock::updater::ScriptletUpdater;
 use crate::adblock::{ListCuration, ListEntry};
 use crate::adblock::error::Error;
 use super::fetch::HttpClient;
-use crate::stats::{EventKind, SharedState};
+use crate::stats::api::{EventKind, SharedState};
 
 type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
@@ -129,8 +129,8 @@ mod tests {
     use super::*;
     use crate::adblock::MemoryListStore;
     use crate::adblock::AdblockConfig;
-    use crate::stats::LoggingConfig;
-    use crate::stats::StaticInfo;
+    use crate::stats::api::LoggingConfig;
+    use crate::stats::api::StaticInfo;
 
     struct CannedDownloader(std::result::Result<&'static str, &'static str>);
 

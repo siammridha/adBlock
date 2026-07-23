@@ -13,7 +13,7 @@ use tokio::sync::Mutex;
 use super::{DnsHandles, DnsService};
 use crate::dns::error::{Error, Result};
 use crate::dns::persist::OverrideStore;
-use crate::stats::{EventKind, SharedState};
+use crate::stats::api::{EventKind, SharedState};
 
 /// Persisted overrides for the DNS listener (its own settings file).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -230,11 +230,11 @@ fn legacy_overrides(path: Option<&std::path::Path>) -> DnsServerOverrides {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adblock::MemoryListStore;
-    use crate::adblock::AdblockConfig;
+    use crate::adblock::api::MemoryListStore;
+    use crate::adblock::api::AdblockConfig;
     use crate::dns::DnsConfig;
-    use crate::stats::LoggingConfig;
-    use crate::stats::StaticInfo;
+    use crate::stats::api::LoggingConfig;
+    use crate::stats::api::StaticInfo;
     use std::path::Path;
 
     fn temp_dir(tag: &str) -> PathBuf {
@@ -254,7 +254,7 @@ mod tests {
             scriptlet_resources: PathBuf::new(),
         };
         let (adblock, _curation) =
-            crate::adblock::with_store(&cfg, Arc::new(MemoryListStore::new())).unwrap();
+            crate::adblock::api::with_store(&cfg, Arc::new(MemoryListStore::new())).unwrap();
         let state = Arc::new(SharedState::new(
             StaticInfo {
                 version: "test".into(),
