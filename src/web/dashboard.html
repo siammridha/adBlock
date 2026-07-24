@@ -445,7 +445,7 @@
         <span class="hint" id="dns-svc-status"></span>
       </div>
       <p class="hint">Start, stop, or move the resolver's listener without a restart — applied
-        live and persisted (over <code>config.toml [dns]</code>). Any change here rebuilds the
+        live and persisted (over the DNS <code>[dns]</code> base config). Any change here rebuilds the
         resolver, so the cache is cleared, but upstreams, rewrites and the settings below are
         kept.</p>
     </div>
@@ -480,19 +480,20 @@
       <div class="actions" style="margin-top:0;flex-wrap:wrap">
         <label for="ca-size">Size (entries, 0 disables)</label>
         <input type="number" id="ca-size" min="0" step="1" style="width:110px">
-        <label for="ca-min">Min TTL (s)</label>
+        <label for="ca-min">Override minimum TTL (s, 0 disables)</label>
         <input type="number" id="ca-min" min="0" step="1" style="width:90px">
-        <label for="ca-max">Max TTL (s)</label>
-        <input type="number" id="ca-max" min="1" step="1" style="width:90px">
+        <label for="ca-max">Override maximum TTL (s, 0 disables)</label>
+        <input type="number" id="ca-max" min="0" step="1" style="width:90px">
       </div>
-      <p class="hint">Cached answers are clamped into the [min, max] TTL band. A resize
+      <p class="hint">Each override forces cached answers to at least the minimum and at
+        most the maximum TTL. Set either to 0 to leave the answer's own TTL alone. A resize
         keeps existing entries; changed TTLs apply to answers cached from now on.</p>
       <div class="actions">
         <button id="ca-save">Save cache settings</button>
         <button class="ghost" id="dns-flush" title="drop every cached DNS answer">Flush cache</button>
         <button class="ghost" id="dnscfg-reset"
-          title="drop every saved override (upstreams, mode, bootstrap, cache) and return to config.toml">
-          Reset all to config.toml</button>
+          title="drop every saved override (upstreams, mode, bootstrap, cache) and return to base config">
+          Reset all to base config</button>
         <span class="hint" id="ca-status"></span>
       </div>
     </div>
@@ -636,11 +637,12 @@
       </table>
     </div>
     <div class="actions">
-      <input type="text" id="ex-domain" placeholder="bank.example.com" style="flex:1;min-width:180px">
+      <input type="text" id="ex-domain" placeholder="bank.example.com or *.example.com" style="flex:1;min-width:180px">
       <button id="ex-add">Add domain</button>
     </div>
     <p class="hint">Tunneled blind (no TLS interception) — for cert-pinned apps that
-      reject the forged leaf. Matches the exact host or any subdomain. Persisted.</p>
+      reject the forged leaf. A bare domain matches it and all subdomains;
+      <code>*.domain</code> matches subdomains only, not the domain itself. Persisted.</p>
     <p class="hint" id="ex-status"></p>
   </section>
 
@@ -703,7 +705,7 @@
       <tr><td>HTTPS inspection</td>
           <td>Install the root CA (link above) in the OS/browser trust store.</td></tr>
       <tr><td>Ad / tracker blocking</td>
-          <td>Always on. Filter lists load at startup from <code>config.toml</code> or live
+          <td>Always on. Filter lists load at startup from the adblock base config or live
               via “Add list” here (persisted). Cosmetic <code>##</code> rules hide page
               elements on HTML pages. Blocked requests drop the connection.</td></tr>
       <tr><td>Excluded domains</td>
@@ -713,7 +715,7 @@
           <td>Point clients' DNS at the address in the <b>DNS</b> tab (UDP or TCP).
               Queries are filtered with the same blocklists, cached, and resolved
               recursively over encrypted upstreams (DoH / DoT). Configure in
-              <code>config.toml [dns]</code>.</td></tr>
+              the DNS <code>[dns]</code> base config.</td></tr>
       <tr><td>Encrypted Client Hello (ECH)</td>
           <td>Toggle in the <b>DNS</b> tab under the proxy egress policy. To test it,
               browse to <a href="https://tls-ech.dev" target="_blank" rel="noopener">tls-ech.dev</a>
@@ -1054,7 +1056,7 @@ async function refreshCerts(){
     $("certs-empty").style.display = rows.length ? "none" : "";
     $("certs-rows").innerHTML = rows.map(c=>{
       const name = esc(c.name);
-      const label = c.source === "config" ? "config.toml" : name;
+      const label = c.source === "config" ? "base config" : name;
       const badge = c.active
         ? `<span class="chip" style="border-color:var(--ok,#3fb950);color:var(--ok,#3fb950)">active</span>`
         : (c.expired ? `<span class="chip" style="border-color:var(--bad,#f85149);color:var(--bad,#f85149)">expired</span>` : "");
@@ -2075,11 +2077,13 @@ async function refreshDns(){
       ` · blocking: ${d.blocking_mode}`+
       ` · ECH: ${d.strip_ech ? "stripped from answers" : "passed through"}`+
       ` · cache ${d.cache.entries}/${d.cache.capacity}${rate}`;
-    const stats = (d.upstream_stats || []).filter(s=>s.queries > 0);
+    // Show every configured upstream from the start, even ones no query has
+    // hit yet (idle ones report zero queries and no timing until traffic).
+    const stats = d.upstream_stats || [];
     $("up-stats").innerHTML = stats.map(()=>
       `<tr><td class="msg us-spec"></td><td class="us-q"></td>`+
       `<td class="us-f"></td><td class="us-rtt"></td><td class="us-ech"></td></tr>`
-    ).join("") || `<tr><td colspan="5" class="hint">no lookups yet</td></tr>`;
+    ).join("") || `<tr><td colspan="5" class="hint">no upstreams configured</td></tr>`;
     const trs = $("up-stats").querySelectorAll("tr");
     const echBadge = {
       supported:   ['k ok',    'ECH',   'returns ECH configs in HTTPS answers'],
@@ -2200,7 +2204,7 @@ $("ca-save").addEventListener("click", ()=>{
   postDnsConfig({
     cache_size: Math.max(0, parseInt($("ca-size").value) || 0),
     min_ttl_secs: Math.max(0, parseInt($("ca-min").value) || 0),
-    max_ttl_secs: Math.max(1, parseInt($("ca-max").value) || 1),
+    max_ttl_secs: Math.max(0, parseInt($("ca-max").value) || 0),
   }, "ca-status", "applying…");
 });
 $("ech-save").addEventListener("click", ()=>{
@@ -2211,7 +2215,7 @@ $("lv6-save").addEventListener("click", ()=>{
   postDnsConfig({log_ipv6: $("lv6-log").checked}, "lv6-status", "applying…");
 });
 $("dnscfg-reset").addEventListener("click", ()=>{
-  if(!confirm("Drop every saved DNS override (upstreams, mode, bootstrap, cache, ECH probe domain, query-log IPv6) and return to config.toml?")) return;
+  if(!confirm("Drop every saved DNS override (upstreams, mode, bootstrap, cache, ECH probe domain, query-log IPv6) and return to base config?")) return;
   postDnsConfig({reset:true}, "ca-status", "resetting…");
 });
 

@@ -57,7 +57,7 @@ impl DnsCache {
         Self {
             entries: Mutex::new(NonZeroUsize::new(capacity).map(LruCache::new)),
             min_ttl: AtomicU32::new(min_ttl),
-            max_ttl: AtomicU32::new(max_ttl.max(1)),
+            max_ttl: AtomicU32::new(max_ttl),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
         }
@@ -65,7 +65,7 @@ impl DnsCache {
 
     pub fn set_config(&self, capacity: usize, min_ttl: u32, max_ttl: u32) {
         self.min_ttl.store(min_ttl, Ordering::Relaxed);
-        self.max_ttl.store(max_ttl.max(1), Ordering::Relaxed);
+        self.max_ttl.store(max_ttl, Ordering::Relaxed);
         let mut entries = self.entries.lock().expect("dns cache lock");
         match (entries.as_mut(), NonZeroUsize::new(capacity)) {
             (Some(cache), Some(cap)) => cache.resize(cap),
@@ -109,12 +109,18 @@ impl DnsCache {
         {
             return;
         }
+        // A bound of 0 means "no override": leave the record's own TTL alone.
         let min_ttl = self.min_ttl.load(Ordering::Relaxed);
-        let max_ttl = self.max_ttl.load(Ordering::Relaxed).max(min_ttl);
+        let max_ttl = self.max_ttl.load(Ordering::Relaxed);
         let mut response = response.clone();
         let mut shortest: Option<u32> = None;
         for r in records_mut(&mut response) {
-            r.ttl = r.ttl.clamp(min_ttl, max_ttl);
+            if min_ttl > 0 {
+                r.ttl = r.ttl.max(min_ttl);
+            }
+            if max_ttl > 0 {
+                r.ttl = r.ttl.min(max_ttl);
+            }
             shortest = Some(shortest.map_or(r.ttl, |s| s.min(r.ttl)));
         }
         let now = Instant::now();
@@ -240,6 +246,24 @@ mod tests {
         let q = query("long.example.", RecordType::A);
         cache.put(Key::of(&q), &response("long.example.", 999_999));
         assert!(cache.get(&Key::of(&q)).unwrap().answers[0].ttl <= 120);
+    }
+
+    #[test]
+    fn zero_bounds_leave_record_ttl_untouched() {
+        // max_ttl 0 disables the ceiling; min_ttl 0 disables the floor.
+        let cache = DnsCache::new(8, 0, 0);
+        let q = query("big.example.", RecordType::A);
+        cache.put(Key::of(&q), &response("big.example.", 100_000));
+        assert!(cache.get(&Key::of(&q)).unwrap().answers[0].ttl >= 99_999);
+
+        // Only the floor active: a short TTL is raised, a long one is left alone.
+        let cache = DnsCache::new(8, 60, 0);
+        let short = query("short.example.", RecordType::A);
+        cache.put(Key::of(&short), &response("short.example.", 5));
+        assert!(cache.get(&Key::of(&short)).unwrap().answers[0].ttl >= 59);
+        let long = query("long.example.", RecordType::A);
+        cache.put(Key::of(&long), &response("long.example.", 100_000));
+        assert!(cache.get(&Key::of(&long)).unwrap().answers[0].ttl >= 99_999);
     }
 
     #[test]

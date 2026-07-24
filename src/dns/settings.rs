@@ -55,7 +55,8 @@ pub type SettingsStore = crate::dns::persist::OverrideStore<DnsOverrides>;
 impl EffectiveDnsSettings {
 
     pub fn validate(&self) -> Result<(), String> {
-        if self.min_ttl_secs > self.max_ttl_secs {
+        // 0 disables a bound, so only a conflict between two active bounds is invalid.
+        if self.min_ttl_secs > 0 && self.max_ttl_secs > 0 && self.min_ttl_secs > self.max_ttl_secs {
             return Err(format!(
                 "min_ttl_secs ({}) exceeds max_ttl_secs ({})",
                 self.min_ttl_secs, self.max_ttl_secs
@@ -126,6 +127,13 @@ mod tests {
             ..Default::default()
         });
         assert!(bad.validate().unwrap_err().contains("min_ttl_secs"));
+        // A disabled max (0) never conflicts with an active min.
+        let disabled_max = folded.clone().with(&DnsOverrides {
+            min_ttl_secs: Some(100),
+            max_ttl_secs: Some(0),
+            ..Default::default()
+        });
+        assert!(disabled_max.validate().is_ok());
         let empty = folded.with(&DnsOverrides { upstreams: Some(vec![]), ..Default::default() });
         assert!(empty.validate().is_err());
     }

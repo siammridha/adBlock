@@ -119,6 +119,12 @@ impl HttpClient {
         Self::with_tls_config(default_client_config())
     }
 
+    /// Like [`HttpClient::new`], but also trusts any extra upstream root CAs
+    /// stored in `certs_dir` (see [`client_config_with_extra_roots`]).
+    pub fn with_extra_roots(certs_dir: &std::path::Path) -> Self {
+        Self::with_tls_config(client_config_with_extra_roots(certs_dir))
+    }
+
     pub fn with_tls_config(config: Arc<rustls::ClientConfig>) -> Self {
         Self {
             tls: tokio_rustls::TlsConnector::from(config),
@@ -425,20 +431,58 @@ pub fn default_client_config() -> Arc<rustls::ClientConfig> {
     use std::sync::OnceLock;
     static CONFIG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
     CONFIG
-        .get_or_init(|| {
-            ensure_crypto_provider();
-            let verifier = rustls::client::WebPkiServerVerifier::builder(root_store())
-                .build()
-                .expect("root store is non-empty (webpki bundle is compiled in)");
-            let config = rustls::ClientConfig::builder()
-                .dangerous()
-                .with_custom_certificate_verifier(Arc::new(IssuerLoggingVerifier {
-                    inner: verifier,
-                }))
-                .with_no_client_auth();
-            Arc::new(config)
-        })
+        .get_or_init(|| build_client_config(root_store()))
         .clone()
+}
+
+/// File under the proxy's certs dir holding extra upstream root CAs to trust,
+/// beyond the OS and webpki bundles. It is a PEM bundle (one or more certs); we
+/// ship Apple's roots there because Apple runs its own trust program and its
+/// private server-auth CAs (which sign hosts like init.ess.apple.com and
+/// gdmf.apple.com) are not in the public bundles. Without them those upstreams
+/// fail with UnknownIssuer.
+const EXTRA_ROOTS_FILE: &str = "upstream-roots.pem";
+
+/// Client config whose upstream trust store is the defaults plus any extra roots
+/// found in `certs_dir` (see [`EXTRA_ROOTS_FILE`]). A missing file is not an
+/// error — verification just falls back to the default roots.
+pub fn client_config_with_extra_roots(certs_dir: &std::path::Path) -> Arc<rustls::ClientConfig> {
+    ensure_crypto_provider();
+    let mut roots = (*root_store()).clone();
+
+    let path = certs_dir.join(EXTRA_ROOTS_FILE);
+    match std::fs::read(&path) {
+        Ok(pem) => {
+            let mut added = 0usize;
+            for cert in rustls_pemfile::certs(&mut pem.as_slice()) {
+                match cert.map_err(|e| e.to_string()).and_then(|c| {
+                    roots.add(c).map_err(|e| e.to_string())
+                }) {
+                    Ok(()) => added += 1,
+                    Err(e) => tracing::warn!(path = %path.display(), error = %e, "adding extra upstream root"),
+                }
+            }
+            tracing::info!(path = %path.display(), extra_added = added, "loaded extra upstream roots");
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::info!(path = %path.display(), "no extra upstream roots file; using defaults");
+        }
+        Err(e) => tracing::warn!(path = %path.display(), error = %e, "reading extra upstream roots"),
+    }
+
+    build_client_config(Arc::new(roots))
+}
+
+fn build_client_config(roots: Arc<rustls::RootCertStore>) -> Arc<rustls::ClientConfig> {
+    ensure_crypto_provider();
+    let verifier = rustls::client::WebPkiServerVerifier::builder(roots)
+        .build()
+        .expect("root store is non-empty (webpki bundle is compiled in)");
+    let config = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(IssuerLoggingVerifier { inner: verifier }))
+        .with_no_client_auth();
+    Arc::new(config)
 }
 
 fn root_store() -> Arc<rustls::RootCertStore> {

@@ -44,7 +44,7 @@ Module map (`src/`):
 
 | Module          | Responsibility                                                        |
 |-----------------|-----------------------------------------------------------------------|
-| `config`          | Single typed config source, loaded from TOML, with defaults.          |
+| per-module config | Each of `proxy`/`adblock`/`dns`/`stats` owns its base settings and loads them from its own `data/settings/<module>-base.toml`, validating them itself; every key has a built-in default. |
 | `proxy::server`   | IO shell: accept loop, plain-HTTP forwarding, CONNECT/MITM.           |
 | `proxy::pipeline` | Pure per-request/response/CONNECT decisions (target, type, inject-or-stream, deny/tunnel/MITM). |
 | `proxy::ca`       | Signing CA load (required on disk); per-host leaf minting; TLS config cache.|
@@ -65,16 +65,24 @@ Module map (`src/`):
 
 ```bash
 cargo build --release
-./target/release/proxy config.toml   # every key has a default; edit config.toml to taste
+./target/release/proxy
 ```
 
+> **Configuration.** Each module (`proxy`, `adblock`, `dns`, `stats`) loads its own
+> base settings from `data/settings/<module>-base.toml` and validates them
+> itself; every key has a built-in default, so a module with no file just uses
+> its defaults. The tables are `[server]`/`[tls]`/`[performance]` for proxy,
+> `[adblock]`, `[dns]`, and `[logging]`. `admin_listen` (in `[server]`) is the one
+> wiring-level knob validated by the root, not a module.
+
 No native dependencies. **You must supply a signing CA**: the proxy reads
-`ca-cert.pem` / `ca-key.pem` (paths in `[tls]`) and refuses to start if they're
-missing — it never generates its own. Use a private-PKI intermediate (e.g.
-step-ca) so leaves chain to a root your devices already trust:
+`data/certs/ca-cert.pem` / `data/certs/ca-key.pem` (paths in `[tls]`) and
+refuses to start if they're missing — it never generates its own. Use a
+private-PKI intermediate (e.g. step-ca) so leaves chain to a root your devices
+already trust:
 
 ```bash
-step certificate create "proxy Signing CA" ca-cert.pem ca-key.pem \
+step certificate create "proxy Signing CA" data/certs/ca-cert.pem data/certs/ca-key.pem \
   --profile intermediate-ca --ca root_ca.crt --ca-key root_ca_key
 ```
 
@@ -85,7 +93,7 @@ client's HTTP+HTTPS proxy at `127.0.0.1:8080`.
 Excluded domains are tunneled blind — no TLS termination — which is what you
 want for cert-pinned apps (banking, etc.). Manage them live in the dashboard's
 **Excluded domains** tab; the set persists to
-`<adblock.lists_dir>/excluded-domains.conf` and survives restarts.
+`data/settings/excluded-domains.conf` and survives restarts.
 
 ---
 
@@ -97,16 +105,17 @@ Build the image (multi-stage; `.dockerignore` keeps `target/` and CA material ou
 docker build -t proxy:latest .
 ```
 
-The image bakes `config.toml` and the blocklists and rebinds the listeners to
-`0.0.0.0` so published ports work. It does **not** contain a CA — bind-mount one
-at run time (the container exits immediately without it):
+The image bakes the scriptlet library and two module base files
+(`proxy-base.toml`, `dns-base.toml`) that bind the listeners to `0.0.0.0` so
+published ports work. It does **not** contain a CA — bind-mount one at run time
+(the container exits immediately without it):
 
 ```bash
 docker run -d --name proxy \
   -p 8080:8080 -p 8081:8081 \
-  -v "$(pwd)/ca-cert.pem:/app/ca-cert.pem:ro" \
-  -v "$(pwd)/ca-key.pem:/app/ca-key.pem:ro" \
-  -v proxy-lists:/app/lists \
+  -v "$(pwd)/ca-cert.pem:/app/data/certs/ca-cert.pem:ro" \
+  -v "$(pwd)/ca-key.pem:/app/data/certs/ca-key.pem:ro" \
+  -v proxy-data:/app/data \
   proxy:latest
 ```
 
@@ -114,24 +123,26 @@ docker run -d --name proxy \
   production. Use absolute paths (`$(pwd)/…`); `-v` rejects bare relative paths.
 - **`-p 8080`** proxy, **`-p 8081`** admin dashboard (drop `8081` to keep it
   private).
-- **`proxy-lists`** named volume persists runtime-added blocklists (seeded from
-  the lists baked into the image on first use).
+- **`proxy-data`** named volume persists everything the proxy writes — blocklists,
+  settings, logs, and managed CAs — under `/app/data` (blocklists download on
+  first start).
 
 Verify:
 
 ```bash
 docker logs -f proxy    # want: "proxy listening 0.0.0.0:8080"
-curl -x http://localhost:8080 --cacert ca-cert.pem -I https://example.com
+curl -x http://localhost:8080 --cacert data/certs/ca-cert.pem -I https://example.com
 ```
 
 If the container exits at once, `docker logs proxy` shows
 `CA cert/key not found … provide a signing CA` — the mounts didn't land.
 
-Mounting your own `config.toml` over `/app/config.toml` bypasses the build-time
-`0.0.0.0` rebind, so that file must already bind `0.0.0.0` itself. Behind a
-reverse proxy (Traefik + step-ca), don't publish ports — attach to its network
-and route a TCP-passthrough entrypoint to `proxy:8080`; see
-`docker-compose-template-dev.yml`.
+To change the baked settings, mount your own base files over
+`/app/data/settings/proxy-base.toml` (or `dns-base.toml`), or mount a whole data
+dir at `/app/data` that already contains them — a bind-mounted empty dir hides
+the baked files, so it must supply its own. Behind a reverse proxy (Traefik +
+step-ca), don't publish ports — attach to its network and route a
+TCP-passthrough entrypoint to `proxy:8080`; see `docker-compose-template-dev.yml`.
 
 ---
 
@@ -183,7 +194,7 @@ JSON API (all on `admin_listen`):
 | `/api/dns/flush`       | POST     | clear the DNS response cache                   |
 | `/api/dns/test`        | POST     | test a domain against the DNS filter (`{domain}`) |
 | `/api/dns/rewrites`    | GET/POST | operator-defined local records (add / delete)  |
-| `/api/dns/config`      | POST     | live upstream/cache settings; `{"reset": true}` returns to config.toml |
+| `/api/dns/config`      | POST     | live upstream/cache settings; `{"reset": true}` returns to base config |
 | `/ca-cert.pem`         | GET      | download the root CA                           |
 
 Bind it to `127.0.0.1` only (the default) — it exposes controls. Set
@@ -216,7 +227,7 @@ it needs code running in the page.
 
 It's **on by default** (`inject_scriptlets = true`, `scriptlet_resources =
 "data/scriptlets/scriptlets.json"`). Because it strips Content-Security-Policy site-wide,
-you can opt out in `config.toml`:
+you can opt out in the adblock base file (`data/settings/adblock-base.toml`):
 
 ```toml
 [adblock]

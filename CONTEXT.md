@@ -55,5 +55,5 @@ The background jobs that keep blocklists and scriptlets fresh.
 The control plane that starts, stops, and reconfigures the proxy and DNS listeners while the process runs. Owned by the admin web app.
 
 **Override**:
-A setting changed at runtime and persisted separately, layered on top of config.toml values at startup.
+A setting changed at runtime and persisted separately, layered on top of the module's base config values at startup.
 _Avoid_: using "override" for DNS rewrites

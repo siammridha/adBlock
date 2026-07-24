@@ -7,8 +7,9 @@ use crate::proxy::error::{Error, Result};
 use crate::proxy::persist::{Entry, PersistedSet};
 
 const FILE_HEADER: &str = "# Domains that bypass MITM inspection (blind tunnel). Managed by the\n\
-                           # admin UI; one host per line. Matches the exact host or any subdomain\n\
-                           # (a leading *. is accepted and means the same thing).";
+                           # admin UI; one host per line. A bare domain (example.com) matches the\n\
+                           # domain and every subdomain; a leading *. (*.example.com) matches only\n\
+                           # subdomains, not the domain itself.";
 
 impl Entry for String {
     fn parse(line: &str) -> Option<Self> {
@@ -39,7 +40,12 @@ impl ExclusionStore {
         self.domains.read(|domains| {
             domains
                 .iter()
-                .find(|d| host == d.as_str() || host.ends_with(&format!(".{d}")))
+                .find(|d| match d.strip_prefix("*.") {
+                    // "*.example.com" — subdomains only, never the apex itself.
+                    Some(base) => host.ends_with(&format!(".{base}")),
+                    // "example.com" — the domain itself and any subdomain.
+                    None => host == d.as_str() || host.ends_with(&format!(".{d}")),
+                })
                 .cloned()
         })
     }
@@ -75,8 +81,20 @@ impl ExclusionStore {
 
 fn normalize(domain: &str) -> String {
     let d = domain.trim().to_lowercase();
-    let d = d.strip_prefix("*.").unwrap_or(&d);
-    d.trim_matches('.').trim().to_string()
+    // A leading "*." is kept as a marker meaning "subdomains only". A bare
+    // domain means the domain itself and every subdomain.
+    let (wildcard, rest) = match d.strip_prefix("*.") {
+        Some(rest) => (true, rest),
+        None => (false, d.as_str()),
+    };
+    let core = rest.trim_matches('.').trim();
+    if core.is_empty() {
+        String::new()
+    } else if wildcard {
+        format!("*.{core}")
+    } else {
+        core.to_string()
+    }
 }
 
 /// A raw admin command against the exclusion list. Callers (the web app) hand
@@ -145,20 +163,33 @@ mod tests {
     }
 
     #[test]
-    fn wildcard_normalizes_to_bare_domain() {
+    fn wildcard_matches_subdomains_only() {
         let s = store("wild", &["*.sentryvault.com"]);
-        assert_eq!(s.list(), vec!["sentryvault.com".to_string()]);
+        assert_eq!(s.list(), vec!["*.sentryvault.com".to_string()]);
         assert_eq!(
             s.matching("xyz.sentryvault.com").as_deref(),
-            Some("sentryvault.com")
+            Some("*.sentryvault.com")
         );
         assert_eq!(
-            s.matching("sentryvault.com").as_deref(),
-            Some("sentryvault.com")
+            s.matching("deep.xyz.sentryvault.com").as_deref(),
+            Some("*.sentryvault.com")
         );
+        // the apex is NOT matched by a wildcard entry
+        assert_eq!(s.matching("sentryvault.com"), None);
         assert_eq!(s.matching("notsentryvault.com"), None);
         assert!(s.remove("*.sentryvault.com").unwrap());
         assert_eq!(s.matching("xyz.sentryvault.com"), None);
+    }
+
+    #[test]
+    fn bare_and_wildcard_are_distinct_entries() {
+        let s = store("distinct", &["apple.com", "*.example.com"]);
+        // bare covers apex + subdomains
+        assert_eq!(s.matching("apple.com").as_deref(), Some("apple.com"));
+        assert_eq!(s.matching("gdmf.apple.com").as_deref(), Some("apple.com"));
+        // wildcard covers subdomains only
+        assert_eq!(s.matching("www.example.com").as_deref(), Some("*.example.com"));
+        assert_eq!(s.matching("example.com"), None);
     }
 
     #[test]

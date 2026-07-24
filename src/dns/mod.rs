@@ -119,7 +119,7 @@ impl DnsService {
         ) {
             Ok(r) => r,
             Err(e) => {
-                tracing::warn!(error = %e, "saved dns upstream override is invalid, using config.toml values");
+                tracing::warn!(error = %e, "saved dns upstream override is invalid, using base config values");
                 eff.upstreams = base_eff.upstreams;
                 eff.upstream_mode = base_eff.upstream_mode;
                 eff.bootstrap = base_eff.bootstrap;

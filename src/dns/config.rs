@@ -1,4 +1,4 @@
-//! DNS's config section (`[dns]` in the TOML file) and its validation.
+//! DNS's config section (`[dns]`), its loader, and validation.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -56,6 +56,31 @@ impl DnsConfig {
         }
         Ok(())
     }
+
+    /// Load DNS's base config from DNS's own file
+    /// (`<data_dir>/settings/dns-base.toml`), else built-in defaults.
+    /// `data_dir` is root-supplied wiring and always wins for the on-disk data
+    /// root.
+    pub fn load(data_dir: &std::path::Path) -> Result<Self> {
+        let own = data_dir.join("settings").join("dns-base.toml");
+        let mut cfg = if own.exists() {
+            Self::from_toml_file(&own)?
+        } else {
+            Self::default()
+        };
+        cfg.data_dir = data_dir.to_path_buf();
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    fn from_toml_file(path: &std::path::Path) -> Result<Self> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| Error::Config(format!("reading {}: {e}", path.display())))?;
+        // The base-config file nests settings under `[dns]`; unwrap it.
+        let file: BaseFile = toml::from_str(&text)
+            .map_err(|e| Error::Config(format!("parsing {}: {e}", path.display())))?;
+        Ok(file.dns)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -107,5 +132,60 @@ impl Default for DnsConfig {
             upstream_timeout_ms: 5_000,
             data_dir: PathBuf::from("data"),
         }
+    }
+}
+
+/// Wrapper matching the `[dns]` table. DNS's config is a single top-level
+/// table, so parsing through this reads its base-config file.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+struct BaseFile {
+    dns: DnsConfig,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_reads_dns_table_and_ignores_others() {
+        let dir = std::env::temp_dir().join("dns-base-cfg-own");
+        let _ = std::fs::remove_dir_all(&dir);
+        let settings = dir.join("settings");
+        std::fs::create_dir_all(&settings).unwrap();
+        std::fs::write(
+            settings.join("dns-base.toml"),
+            r#"
+[dns]
+enabled = false
+cache_size = 128
+
+[server]
+listen = "127.0.0.1:9090"
+some_unrelated_field = "ignored"
+"#,
+        )
+        .unwrap();
+
+        let cfg = DnsConfig::load(&dir).unwrap();
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.cache_size, 128);
+        // data_dir is root-supplied wiring, not taken from the file.
+        assert_eq!(cfg.data_dir, dir);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_falls_back_to_defaults() {
+        let dir = std::env::temp_dir().join("dns-base-cfg-missing-xyz");
+        let _ = std::fs::remove_dir_all(&dir);
+        let cfg = DnsConfig::load(&dir).unwrap();
+        let defaults = DnsConfig::default();
+        assert_eq!(cfg.enabled, defaults.enabled);
+        assert_eq!(cfg.cache_size, defaults.cache_size);
+        assert_eq!(cfg.listen, defaults.listen);
+        // data_dir still reflects the passed-in root.
+        assert_eq!(cfg.data_dir, dir);
     }
 }

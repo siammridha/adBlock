@@ -15,13 +15,13 @@ use crate::proxy::persist::OverrideStore;
 
 const CERT_FILE: &str = "cert.pem";
 const KEY_FILE: &str = "key.pem";
-/// Reserved name that means "use the CA from config.toml" (no stored override).
+/// Reserved name that means "use the CA from the proxy base config" (no stored override).
 pub const CONFIG_NAME: &str = "config";
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 struct ActiveSelection {
-    /// Folder name of the active stored CA. `None` means the config-file CA.
+    /// Folder name of the active stored CA. `None` means the base-config CA.
     active: Option<String>,
 }
 
@@ -100,7 +100,7 @@ pub struct CertStore {
 
 impl CertStore {
     /// `active_store` is the JSON file that records the selection;
-    /// `config_cert`/`config_key` are the fallback CA from config.toml.
+    /// `config_cert`/`config_key` are the fallback CA from the proxy base config.
     pub fn load(
         certs_dir: PathBuf,
         active_store: PathBuf,
@@ -121,7 +121,7 @@ impl CertStore {
     }
 
     /// The cert/key paths the proxy should load at startup: the active stored CA
-    /// if one is selected and present, otherwise the config-file CA.
+    /// if one is selected and present, otherwise the base-config CA.
     pub fn active_paths(&self) -> (PathBuf, PathBuf) {
         if let Some(name) = self.active.load().active {
             let dir = self.certs_dir.join(&name);
@@ -135,7 +135,7 @@ impl CertStore {
         (self.config_cert.clone(), self.config_key.clone())
     }
 
-    /// All selectable CAs: the config-file CA first, then each stored one.
+    /// All selectable CAs: the base-config CA first, then each stored one.
     pub fn list(&self) -> Vec<CertSummary> {
         let active = self.active.load().active;
         let mut out = vec![summarize(
@@ -179,7 +179,7 @@ impl CertStore {
         Ok(cert_pem)
     }
 
-    /// Set the active CA. `CONFIG_NAME` clears the override (use config.toml).
+    /// Set the active CA. `CONFIG_NAME` clears the override (use the base-config CA).
     /// The switch takes effect on the next restart.
     pub fn activate(&self, name: &str) -> Result<()> {
         let selection = if name == CONFIG_NAME {
@@ -218,7 +218,7 @@ impl CertStore {
     }
 
     /// A stored CA's certificate PEM (for download). `CONFIG_NAME` returns the
-    /// config-file CA's cert.
+    /// base-config CA's cert.
     pub fn cert_pem(&self, name: &str) -> Result<String> {
         let path = if name == CONFIG_NAME {
             self.config_cert.clone()

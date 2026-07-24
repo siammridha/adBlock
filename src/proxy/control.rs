@@ -343,7 +343,7 @@ mod tests {
         assert!(std::net::TcpStream::connect(addr_b).is_err());
         let reloaded = runtime_in(&dir, true);
         let status = reloaded.status().await;
-        assert!(!status.enabled, "persisted disable must beat config.toml");
+        assert!(!status.enabled, "persisted disable must beat base config");
         assert_eq!(status.listen, addr_b.to_string());
         std::fs::remove_dir_all(dir).ok();
     }

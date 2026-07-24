@@ -47,15 +47,24 @@ COPY --from=builder /build/target/release/proxy /usr/local/bin/proxy
 # refreshed from uBO at runtime, inside the container.
 COPY --from=llrt /usr/local/bin/llrt /usr/local/bin/llrt
 COPY tools /app/tools
-COPY config.toml /app/config.toml
 # Ship the pre-generated scriptlet library so scriptlets work out of the box.
-# Everything else the proxy persists (blocklists, settings, logs, certs) is
-# created at runtime under /app/data. Blocklists download on first start.
-COPY lists/scriptlets.json /app/data/scriptlets/scriptlets.json
+# It lives under data/ now (the old top-level lists/ dir is gone). Everything
+# else the proxy persists (blocklists, settings, logs, certs) is created at
+# runtime under /app/data. Blocklists download on first start.
+COPY data/scriptlets/scriptlets.json /app/data/scriptlets/scriptlets.json
 
-# config.toml binds 127.0.0.1 for local dev; inside a container loopback is
-# unreachable from a published port or a reverse proxy. Rebind to 0.0.0.0.
-RUN sed -i 's/127\.0\.0\.1:/0.0.0.0:/g' /app/config.toml
+# Each module reads its own base-config file under
+# /app/data/settings/<module>-base.toml (or its built-in defaults).
+# The container needs one non-default value: bind on all interfaces instead of
+# loopback, so a published port / reverse proxy can reach the proxy, admin UI,
+# and DNS. Bake the two modules that have a listener; adblock and stats use
+# their defaults. A named data volume inherits these on first run, like the
+# scriptlet library above.
+RUN mkdir -p /app/data/settings \
+ && printf '[server]\nlisten = "0.0.0.0:8080"\nadmin_listen = "0.0.0.0:8081"\n\n[tls]\nca_cert = "data/certs/ca-cert.pem"\nca_key = "data/certs/ca-key.pem"\n' \
+      > /app/data/settings/proxy-base.toml \
+ && printf '[dns]\nlisten = "0.0.0.0:53"\n' \
+      > /app/data/settings/dns-base.toml
 
 # proxy + admin dashboard.
 EXPOSE 8080 8081
@@ -65,21 +74,27 @@ EXPOSE 8080 8081
 VOLUME ["/app/data"]
 
 # --- MITM signing CA (REQUIRED) --------------------------------------------
-# The proxy signs per-host leaf certs with ca_cert/ca_key (config.toml →
-# /app/ca-cert.pem, /app/ca-key.pem) and REFUSES TO START if they're missing —
-# it never generates its own CA. Bind-mount a signer at run time, e.g. a step-ca
-# (or other private-PKI) intermediate so forged leaves chain to a root your
-# devices already trust:
-#   -v ./ca-cert.pem:/app/ca-cert.pem:ro -v ./ca-key.pem:/app/ca-key.pem:ro
+# The proxy signs per-host leaf certs with ca_cert/ca_key (default paths
+# /app/data/certs/ca-cert.pem, /app/data/certs/ca-key.pem) and REFUSES TO START
+# if they're missing — it never generates its own CA. Bind-mount a signer at run
+# time, e.g. a step-ca (or other private-PKI) intermediate so forged leaves
+# chain to a root your devices already trust:
+#   -v ./ca-cert.pem:/app/data/certs/ca-cert.pem:ro -v ./ca-key.pem:/app/data/certs/ca-key.pem:ro
 # (A self-signed root works too — mount it the same way and install it in each
 # client's trust store.)
 
 # --- Upstream (egress) trust -----------------------------------------------
 # To trust a private/corporate CA on the *upstream* side (fixes UnknownIssuer
 # when your network does TLS inspection) — distinct from the MITM CA above —
-# mount the PEM and rebuild the store:
-#   docker run -v ./corp-ca.crt:/usr/local/share/ca-certificates/corp.crt ... \
-#     sh -c 'update-ca-certificates && proxy /app/config.toml'
+# mount the PEM and rebuild the store. ENTRYPOINT is "proxy", so override it to
+# get a shell (otherwise the args are passed to proxy, not run as a command):
+#   docker run --entrypoint sh \
+#     -v "$(pwd)/corp-ca.crt:/usr/local/share/ca-certificates/corp.crt" ... proxy:latest \
+#     -c 'update-ca-certificates && proxy'
+#
+# Note: /app/data is a VOLUME. A single-file bind mount at
+# /app/data/certs/ca-cert.pem still lands correctly on top of that volume.
 
+# proxy reads each module's base-config file under /app/data/settings, or its
+# built-in defaults.
 ENTRYPOINT ["proxy"]
-CMD ["/app/config.toml"]

@@ -6,9 +6,12 @@ target/
 
 # Local CA material / CA state must never be baked into an image. The MITM
 # signer is bind-mounted (step-ca intermediate) or self-generated at runtime.
+# CA files live under data/certs/ now, so exclude that whole directory too (the
+# build only needs data/scriptlets/scriptlets.json out of data/).
 ca-cert.pem
 ca-key.pem
 ca-cert.srl
+data/certs/
 step-ca-data/
 
 # Orchestration and docs aren't needed to compile.

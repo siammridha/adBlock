@@ -1,5 +1,5 @@
 [package]
-name = "proxy"
+name = "adBlock"
 version = "0.1.0"
 edition = "2021"
 description = "Intercepting HTTP/HTTPS proxy with ad/tracker blocking (network + cosmetic filtering)"

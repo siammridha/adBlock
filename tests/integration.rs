@@ -4,9 +4,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use proxy::adblock::api::{AdBlocker, AdblockConfig, ListCuration, MemoryListStore};
-use proxy::proxy::api::ExclusionStore;
-use proxy::Config;
+use adBlock::adblock::api::{AdBlocker, AdblockConfig, ListCuration, MemoryListStore};
+use adBlock::proxy::api::{ExclusionStore, ServerConfig};
 
 fn blocker(rules: &[&str]) -> Arc<AdBlocker> {
     parts(rules).0
@@ -22,27 +21,20 @@ fn parts(rules: &[&str]) -> (Arc<AdBlocker>, Arc<ListCuration>) {
         inject_scriptlets: false,
         scriptlet_resources: PathBuf::new(),
     };
-    proxy::adblock::api::with_store(&cfg, Arc::new(MemoryListStore::new())).unwrap()
-}
-
-#[test]
-fn default_config_is_valid() {
-    let cfg = Config::default();
-    assert!(cfg.validate().is_ok());
+    adBlock::adblock::api::with_store(&cfg, Arc::new(MemoryListStore::new())).unwrap()
 }
 
 #[test]
 fn unparseable_listen_addrs_fail_validation() {
-    let mut cfg = Config::default();
-    cfg.server.listen = "not-an-addr".into();
+    // Proxy owns its listen address and validates it.
+    let mut cfg = ServerConfig::default();
+    cfg.listen = "not-an-addr".into();
     assert!(cfg.validate().is_err());
 
-    let mut cfg = Config::default();
-    cfg.server.admin_listen = "localhost:nope".into();
-    assert!(cfg.validate().is_err());
-    // Empty admin_listen means "web UI disabled", not an error.
-    cfg.server.admin_listen = String::new();
+    let cfg = ServerConfig::default();
     assert!(cfg.validate().is_ok());
+    // admin_listen is validated by the root wiring, not by Proxy, so it is not
+    // exercised here.
 }
 
 #[test]

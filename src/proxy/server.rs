@@ -158,12 +158,12 @@ impl Proxy {
         tracing::info!(?addr, "proxy listening");
         loop {
             match listener.accept().await {
-                Ok((stream, peer)) => {
+                Ok((stream, _peer)) => {
                     let proxy = self.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = proxy.serve_conn(stream).await {
-                            tracing::debug!(%peer, error = %e, "connection ended");
-                        }
+                        // serve_conn logs its own meaningful failures and stays
+                        // quiet on routine closes; nothing to report here.
+                        let _ = proxy.serve_conn(stream).await;
                     });
                 }
                 Err(e) => tracing::debug!(error = %e, "proxy accept"),
@@ -178,11 +178,16 @@ impl Proxy {
             let proxy = proxy.clone();
             async move { proxy.dispatch(req).await }
         });
-        hyper::server::conn::http1::Builder::new()
+        if let Err(e) = hyper::server::conn::http1::Builder::new()
             .serve_connection(io, service)
             .with_upgrades()
             .await
-            .map_err(|e| Error::Other(format!("serve: {e}")))
+        {
+            if !is_routine_close(&e) {
+                tracing::warn!(error = %e, "client connection ended with error");
+            }
+        }
+        Ok(())
     }
 
     async fn dispatch(
@@ -288,7 +293,7 @@ impl Proxy {
                     if blind {
                         let _ = proxy.blind_tunnel(io, &authority).await;
                     } else if let Err(e) = proxy.mitm(io, &host).await {
-                        tracing::debug!(%host, error = %e, "mitm ended");
+                        tracing::warn!(%host, error = %e, "could not start MITM (certificate setup failed)");
                     }
                 }
                 Err(e) => tracing::debug!(error = %e, "upgrade failed"),
@@ -304,10 +309,23 @@ impl Proxy {
     {
         let server_config = self.inner.ca.server_config_for(host).await?;
         let acceptor = TlsAcceptor::from(server_config);
-        let tls = acceptor
-            .accept(stream)
-            .await
-            .map_err(|e| Error::Tls(format!("tls accept: {e}")))?;
+        let tls = match acceptor.accept(stream).await {
+            Ok(tls) => tls,
+            Err(e) => {
+                // A client that just closed mid-handshake (UnexpectedEof) is
+                // routine — a probe or an aborted connection, not a rejection.
+                // Only a real certificate rejection (a TLS alert, surfaced as
+                // InvalidData) means cert pinning or a distrusted proxy CA.
+                if !is_routine_close(&e) {
+                    tracing::warn!(
+                        %host, error = %e,
+                        "client rejected proxy certificate during TLS handshake \
+                         (cert pinning or untrusted proxy CA) — cannot intercept",
+                    );
+                }
+                return Ok(());
+            }
+        };
         let tls_io = TokioIo::new(tls);
 
         let proxy = self.clone();
@@ -315,10 +333,15 @@ impl Proxy {
             let proxy = proxy.clone();
             async move { proxy.handle_forward(req, true).await.map_err(ProxyError::from) }
         });
-        hyper::server::conn::http1::Builder::new()
+        if let Err(e) = hyper::server::conn::http1::Builder::new()
             .serve_connection(tls_io, service)
             .await
-            .map_err(|e| Error::Other(format!("mitm serve: {e}")))
+        {
+            if !is_routine_close(&e) {
+                tracing::warn!(%host, error = %e, "MITM connection ended with error");
+            }
+        }
+        Ok(())
     }
 
     async fn blind_tunnel<S>(&self, mut stream: S, authority: &str) -> Result<()>
@@ -522,6 +545,36 @@ impl std::fmt::Display for BlockedDropped {
 }
 
 impl std::error::Error for BlockedDropped {}
+
+/// Whether a finished connection's error is routine and not worth a log line: a
+/// client that simply disconnected, a connection we deliberately dropped for a
+/// blocked host, or a handler error already reported at its own site. Real
+/// trouble — TLS/cert failures, cert pinning, an upstream forced reset we have
+/// not already logged — is not routine and should surface.
+fn is_routine_close(err: &(dyn std::error::Error + 'static)) -> bool {
+    let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(e) = cur {
+        // Anything our own request handler returned is already logged where it
+        // happened (blocked-host drops via BlockedDropped, upstream send
+        // failures), so don't repeat it at the connection layer.
+        if e.is::<ProxyError>() || e.is::<BlockedDropped>() {
+            return true;
+        }
+        if let Some(io) = e.downcast_ref::<std::io::Error>() {
+            use std::io::ErrorKind::{
+                BrokenPipe, ConnectionAborted, ConnectionReset, NotConnected, UnexpectedEof,
+            };
+            if matches!(
+                io.kind(),
+                BrokenPipe | ConnectionReset | ConnectionAborted | NotConnected | UnexpectedEof
+            ) {
+                return true;
+            }
+        }
+        cur = e.source();
+    }
+    false
+}
 
 #[cfg(test)]
 mod tests {

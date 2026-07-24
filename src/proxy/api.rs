@@ -7,7 +7,7 @@
 
 pub use super::ca::CertAuthority;
 pub use super::certs::{CertCommand, CertStore};
-pub use super::config::{PerformanceConfig, ServerConfig, TlsConfig};
+pub use super::config::{PerformanceConfig, ProxyBaseConfig, ServerConfig, TlsConfig};
 pub use super::control::ProxyRuntime;
 pub use super::egress::{EgressOverrides, EgressPolicy};
 pub use super::error::{Error, Result};

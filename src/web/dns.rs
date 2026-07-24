@@ -103,7 +103,7 @@ pub(super) fn edit_dns_config(
     let outcome = match cmd {
         DnsConfigCommand::Reset => dns
             .reset_settings()
-            .map(|()| "dns settings reset to config.toml".to_string()),
+            .map(|()| "dns settings reset to base config".to_string()),
         DnsConfigCommand::Apply(upd) => {
             dns.apply_settings(upd).map(|()| "dns settings updated".to_string())
         }
