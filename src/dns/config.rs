@@ -5,8 +5,7 @@ use std::path::PathBuf;
 
 use super::error::{Error, Result};
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone)]
 pub struct DnsConfig {
     pub enabled: bool,
     pub listen: String,
@@ -14,8 +13,8 @@ pub struct DnsConfig {
     pub upstream_mode: UpstreamMode,
     pub bootstrap: Vec<String>,
     pub cache_size: usize,
-    pub min_ttl_secs: u32,
-    pub max_ttl_secs: u32,
+    pub override_min_ttl_secs: u32,
+    pub override_max_ttl_secs: u32,
     pub blocking_mode: BlockingMode,
     pub blocked_ttl_secs: u32,
     pub strip_ech: bool,
@@ -38,53 +37,29 @@ impl DnsConfig {
         self.settings_dir().join("dns-server.json")
     }
 
-    /// The pre-split combined settings file, read once to seed the per-service
-    /// files when they are missing.
-    pub fn legacy_server_settings_path(&self) -> PathBuf {
-        self.settings_dir().join("server-settings.json")
-    }
-
     /// DNS validates its own section; callers hand it over raw.
     pub fn validate(&self) -> Result<()> {
         if self.enabled {
             self.listen.parse::<std::net::SocketAddr>().map_err(|e| {
                 Error::Config(format!("invalid dns.listen '{}': {e}", self.listen))
             })?;
-            if self.upstreams.is_empty() {
-                return Err(Error::Config("dns.upstreams must not be empty".into()));
-            }
         }
         Ok(())
     }
 
-    /// Load DNS's base config from DNS's own file
-    /// (`<data_dir>/settings/dns-base.toml`), else built-in defaults.
-    /// `data_dir` is root-supplied wiring and always wins for the on-disk data
-    /// root.
+    /// Build DNS's config from built-in defaults. `data_dir` is root-supplied
+    /// wiring and always wins for the on-disk data root.
     pub fn load(data_dir: &std::path::Path) -> Result<Self> {
-        let own = data_dir.join("settings").join("dns-base.toml");
-        let mut cfg = if own.exists() {
-            Self::from_toml_file(&own)?
-        } else {
-            Self::default()
+        let cfg = Self {
+            data_dir: data_dir.to_path_buf(),
+            ..Default::default()
         };
-        cfg.data_dir = data_dir.to_path_buf();
         cfg.validate()?;
         Ok(cfg)
     }
-
-    fn from_toml_file(path: &std::path::Path) -> Result<Self> {
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| Error::Config(format!("reading {}: {e}", path.display())))?;
-        // The base-config file nests settings under `[dns]`; unwrap it.
-        let file: BaseFile = toml::from_str(&text)
-            .map_err(|e| Error::Config(format!("parsing {}: {e}", path.display())))?;
-        Ok(file.dns)
-    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlockingMode {
     NullIp,
     Nxdomain,
@@ -113,17 +88,19 @@ impl Default for DnsConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            listen: "127.0.0.1:5353".into(),
-            upstreams: vec![
-                "https://dns.cloudflare.com/dns-query".into(),
-                "tls://1.1.1.1".into(),
-                "https://dns.google/dns-query".into(),
-            ],
+            // Listen on all interfaces, port 53, so a mapped container port (or a
+            // client on the LAN) can reach the resolver. Live UI changes persist to
+            // data/settings/dns-server.json and layer over this.
+            listen: "0.0.0.0:53".into(),
+            // Empty by default; the operator configures upstreams before DNS can
+            // forward. With none set the resolver still serves cache, rewrites,
+            // and block answers.
+            upstreams: Vec::new(),
             upstream_mode: UpstreamMode::Failover,
-            bootstrap: vec!["1.1.1.1:53".into(), "8.8.8.8:53".into()],
+            bootstrap: vec!["1.1.1.1".into(), "8.8.8.8".into()],
             cache_size: 4096,
-            min_ttl_secs: 0,
-            max_ttl_secs: 86_400,
+            override_min_ttl_secs: 0,
+            override_max_ttl_secs: 0,
             blocking_mode: BlockingMode::NullIp,
             blocked_ttl_secs: 10,
             strip_ech: false,
@@ -135,57 +112,19 @@ impl Default for DnsConfig {
     }
 }
 
-/// Wrapper matching the `[dns]` table. DNS's config is a single top-level
-/// table, so parsing through this reads its base-config file.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-struct BaseFile {
-    dns: DnsConfig,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn load_reads_dns_table_and_ignores_others() {
-        let dir = std::env::temp_dir().join("dns-base-cfg-own");
-        let _ = std::fs::remove_dir_all(&dir);
-        let settings = dir.join("settings");
-        std::fs::create_dir_all(&settings).unwrap();
-        std::fs::write(
-            settings.join("dns-base.toml"),
-            r#"
-[dns]
-enabled = false
-cache_size = 128
-
-[server]
-listen = "127.0.0.1:9090"
-some_unrelated_field = "ignored"
-"#,
-        )
-        .unwrap();
-
-        let cfg = DnsConfig::load(&dir).unwrap();
-        assert!(!cfg.enabled);
-        assert_eq!(cfg.cache_size, 128);
-        // data_dir is root-supplied wiring, not taken from the file.
-        assert_eq!(cfg.data_dir, dir);
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn load_falls_back_to_defaults() {
-        let dir = std::env::temp_dir().join("dns-base-cfg-missing-xyz");
-        let _ = std::fs::remove_dir_all(&dir);
-        let cfg = DnsConfig::load(&dir).unwrap();
+    fn load_uses_defaults_with_root_supplied_data_dir() {
+        let dir = std::path::Path::new("some/data/root");
+        let cfg = DnsConfig::load(dir).unwrap();
         let defaults = DnsConfig::default();
         assert_eq!(cfg.enabled, defaults.enabled);
         assert_eq!(cfg.cache_size, defaults.cache_size);
         assert_eq!(cfg.listen, defaults.listen);
-        // data_dir still reflects the passed-in root.
+        // data_dir reflects the passed-in root, not the default.
         assert_eq!(cfg.data_dir, dir);
     }
 }

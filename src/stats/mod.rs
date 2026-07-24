@@ -195,6 +195,12 @@ impl SharedState {
         let _ = std::fs::create_dir_all(&settings);
         self = self.with_error_log(logs.join("error-log.jsonl"));
         let store = OverrideStore::new(settings.join("stats-settings.json"));
+        // On first run, write the full default stats settings; an existing file
+        // is used as-is.
+        store.ensure(&StatsOverrides {
+            retention_hours: Some(DEFAULT_RETENTION_HOURS),
+            log_rotate_hours: Some(DEFAULT_LOG_ROTATE_HOURS),
+        });
         let saved: StatsOverrides = store.load();
         let retention = saved.retention_hours.unwrap_or(DEFAULT_RETENTION_HOURS);
         let rotate = saved.log_rotate_hours.unwrap_or(DEFAULT_LOG_ROTATE_HOURS);

@@ -226,9 +226,6 @@ impl Resolver {
                 doh: Mutex::new(None),
             })))
             .collect::<Result<Vec<_>, String>>()?;
-        if upstreams.is_empty() {
-            return Err("no DNS upstreams configured".into());
-        }
         let bootstrap = bootstrap
             .iter()
             .map(|s| {
@@ -317,6 +314,9 @@ impl Resolver {
     }
 
     pub async fn resolve(&self, query: &Query) -> Result<(Message, String), String> {
+        if self.upstreams.is_empty() {
+            return Err("no DNS upstreams configured".into());
+        }
         let (bytes, id) = self.encode(query)?;
         match self.mode {
             UpstreamMode::Parallel if self.upstreams.len() > 1 => {
@@ -668,8 +668,10 @@ mod tests {
     }
 
     #[test]
-    fn resolver_rejects_non_ipv4_bootstrap_and_empty_upstreams() {
-        assert!(Resolver::new(&[], UpstreamMode::Failover, &[], 5000).is_err());
+    fn resolver_allows_empty_upstreams_and_rejects_non_ipv4_bootstrap() {
+        // Empty upstreams is allowed at construction; resolve() returns an error
+        // (rather than panicking) when there is nothing to forward to.
+        assert!(Resolver::new(&[], UpstreamMode::Failover, &[], 5000).is_ok());
         for bad in ["dns.example.com", "::1", "[2620:fe::fe]:53"] {
             let err = Resolver::new(
                 &["tls://1.1.1.1".into()],

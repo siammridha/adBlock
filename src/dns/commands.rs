@@ -62,8 +62,8 @@ impl DnsConfigCommand {
             upstream_mode,
             bootstrap: str_list("bootstrap"),
             cache_size: v.get("cache_size").and_then(Value::as_u64).map(|n| n as usize),
-            min_ttl_secs: v.get("min_ttl_secs").and_then(Value::as_u64).map(|n| n as u32),
-            max_ttl_secs: v.get("max_ttl_secs").and_then(Value::as_u64).map(|n| n as u32),
+            override_min_ttl_secs: v.get("override_min_ttl_secs").and_then(Value::as_u64).map(|n| n as u32),
+            override_max_ttl_secs: v.get("override_max_ttl_secs").and_then(Value::as_u64).map(|n| n as u32),
             ech_probe_domain: v
                 .get("ech_probe_domain")
                 .and_then(Value::as_str)
@@ -101,14 +101,14 @@ mod tests {
             DnsConfigCommand::Reset
         );
         let DnsConfigCommand::Apply(upd) = DnsConfigCommand::parse(
-            br#"{"upstreams": [" udp://1.1.1.1:53 ", ""], "min_ttl_secs": 30}"#,
+            br#"{"upstreams": [" udp://1.1.1.1:53 ", ""], "override_min_ttl_secs": 30}"#,
         )
         .unwrap() else {
             panic!("expected Apply");
         };
         assert_eq!(upd.upstreams, Some(vec!["udp://1.1.1.1:53".to_string()]));
-        assert_eq!(upd.min_ttl_secs, Some(30));
-        assert_eq!(upd.max_ttl_secs, None);
+        assert_eq!(upd.override_min_ttl_secs, Some(30));
+        assert_eq!(upd.override_max_ttl_secs, None);
         assert_eq!(upd.upstream_mode, None);
         assert_eq!(upd.ech_probe_domain, None);
         let DnsConfigCommand::Apply(upd) =

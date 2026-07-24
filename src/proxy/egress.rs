@@ -101,6 +101,13 @@ pub struct EgressPolicy {
 impl EgressPolicy {
     pub fn load(store_path: PathBuf, dns: Arc<DnsService>) -> Arc<Self> {
         let store: OverrideStore<EgressOverrides> = OverrideStore::new(store_path);
+        // On first run, write the full default egress settings; an existing file
+        // is used as-is.
+        store.ensure(&EgressOverrides {
+            resolver_only: Some(true),
+            use_ech: Some(true),
+            disable_ipv6: Some(true),
+        });
         let o = store.load();
         Arc::new(Self {
             dns,

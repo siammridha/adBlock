@@ -1,13 +1,10 @@
-//! Proxy's config sections (`[server]`, `[tls]`, and `[performance]`) and their
-//! validation.
+//! Proxy's config sections (server, TLS, and performance) and their validation.
 
-use serde::Deserialize;
 use std::path::PathBuf;
 
 use super::error::{Error, Result};
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub enabled: bool,
     pub listen: String,
@@ -58,23 +55,15 @@ impl ServerConfig {
     pub fn server_settings_path(&self) -> PathBuf {
         self.settings_dir().join("proxy-server.json")
     }
-
-    /// The pre-split combined settings file, read once to seed the per-service
-    /// files when they are missing.
-    pub fn legacy_server_settings_path(&self) -> PathBuf {
-        self.settings_dir().join("server-settings.json")
-    }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone)]
 pub struct TlsConfig {
     pub ca_cert: PathBuf,
     pub ca_key: PathBuf,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone)]
 pub struct PerformanceConfig {
     pub max_inspect_bytes: usize,
     pub upstream_timeout_ms: u64,
@@ -109,10 +98,8 @@ impl Default for PerformanceConfig {
     }
 }
 
-/// Proxy's base configuration, grouping the sections Proxy owns, loaded from its
-/// base-config file under the data dir.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
+/// Proxy's base configuration, grouping the sections Proxy owns.
+#[derive(Debug, Clone, Default)]
 pub struct ProxyBaseConfig {
     pub server: ServerConfig,
     pub tls: TlsConfig,
@@ -120,26 +107,19 @@ pub struct ProxyBaseConfig {
 }
 
 impl ProxyBaseConfig {
-    /// Load Proxy's base config from Proxy's own file
-    /// (`<data_dir>/settings/proxy-base.toml`), else built-in defaults.
-    /// `data_dir` is root-supplied wiring and always wins for the on-disk data
-    /// root. `admin_listen` is validated by the root, not here.
+    /// Build Proxy's base config from built-in defaults. `data_dir` is
+    /// root-supplied wiring and always wins for the on-disk data root.
+    /// `admin_listen` is validated by the root, not here.
     pub fn load(data_dir: &std::path::Path) -> Result<Self> {
-        let own = data_dir.join("settings").join("proxy-base.toml");
-        let mut cfg = if own.exists() {
-            Self::from_toml_file(&own)?
-        } else {
-            Self::default()
+        let cfg = Self {
+            server: ServerConfig {
+                data_dir: data_dir.to_path_buf(),
+                ..Default::default()
+            },
+            ..Default::default()
         };
-        cfg.server.data_dir = data_dir.to_path_buf();
         cfg.server.validate()?;
         Ok(cfg)
-    }
-
-    fn from_toml_file(path: &std::path::Path) -> Result<Self> {
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| Error::Config(format!("reading {}: {e}", path.display())))?;
-        toml::from_str(&text).map_err(|e| Error::Config(format!("parsing {}: {e}", path.display())))
     }
 }
 
@@ -148,57 +128,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn load_reads_own_sections_and_ignores_others() {
-        let dir = std::env::temp_dir().join("proxy-base-cfg-own");
-        let _ = std::fs::remove_dir_all(&dir);
-        let settings = dir.join("settings");
-        std::fs::create_dir_all(&settings).unwrap();
-        std::fs::write(
-            settings.join("proxy-base.toml"),
-            r#"
-[server]
-enabled = false
-listen = "127.0.0.1:9090"
-admin_listen = "127.0.0.1:9091"
-
-[tls]
-ca_cert = "my-ca.pem"
-ca_key = "my-key.pem"
-
-[performance]
-max_inspect_bytes = 123
-upstream_timeout_ms = 456
-
-[adblock]
-enabled = true
-some_unrelated_field = "ignored"
-"#,
-        )
-        .unwrap();
-
-        let cfg = ProxyBaseConfig::load(&dir).unwrap();
-        assert!(!cfg.server.enabled);
-        assert_eq!(cfg.server.listen, "127.0.0.1:9090");
-        assert_eq!(cfg.server.admin_listen, "127.0.0.1:9091");
-        assert_eq!(cfg.tls.ca_cert, PathBuf::from("my-ca.pem"));
-        assert_eq!(cfg.tls.ca_key, PathBuf::from("my-key.pem"));
-        assert_eq!(cfg.performance.max_inspect_bytes, 123);
-        assert_eq!(cfg.performance.upstream_timeout_ms, 456);
-        // data_dir is root-supplied wiring, not taken from the file.
-        assert_eq!(cfg.server.data_dir, dir);
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn load_falls_back_to_defaults() {
-        let dir = std::env::temp_dir().join("proxy-base-cfg-missing-xyz");
-        let _ = std::fs::remove_dir_all(&dir);
-        let cfg = ProxyBaseConfig::load(&dir).unwrap();
+    fn load_uses_defaults_with_root_supplied_data_dir() {
+        let dir = std::path::Path::new("some/data/root");
+        let cfg = ProxyBaseConfig::load(dir).unwrap();
         let defaults = ServerConfig::default();
         assert_eq!(cfg.server.listen, defaults.listen);
         assert_eq!(cfg.server.enabled, defaults.enabled);
-        // data_dir still reflects the passed-in root.
+        // data_dir reflects the passed-in root, not the default.
         assert_eq!(cfg.server.data_dir, dir);
     }
 }

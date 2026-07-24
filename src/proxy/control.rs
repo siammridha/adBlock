@@ -83,22 +83,21 @@ pub struct ProxyRuntime {
 }
 
 impl ProxyRuntime {
-    /// `legacy_store_path` points at the old combined `server-settings.json`;
-    /// it is read once when the proxy's own settings file does not exist yet.
     pub fn new(
         state: Arc<SharedState>,
         store_path: PathBuf,
-        legacy_store_path: Option<PathBuf>,
         control: Option<Arc<dyn ProxyControl>>,
         cfg_listen: &str,
         cfg_enabled: bool,
     ) -> Result<Arc<Self>> {
-        let store: OverrideStore<ProxyServerOverrides> = OverrideStore::new(store_path.clone());
-        let overrides = if store_path.exists() {
-            store.load()
-        } else {
-            legacy_overrides(legacy_store_path.as_deref(), "proxy_enabled", "proxy_listen")
-        };
+        let store: OverrideStore<ProxyServerOverrides> = OverrideStore::new(store_path);
+        // On first run, write the full default listener settings; an existing
+        // file is used as-is.
+        store.ensure(&ProxyServerOverrides {
+            enabled: Some(cfg_enabled),
+            listen: Some(cfg_listen.to_string()),
+        });
+        let overrides = store.load();
 
         let listen_s = overrides
             .listen
@@ -221,30 +220,6 @@ pub(crate) fn transition_note(
     state.log_event(EventKind::Info, msg);
 }
 
-/// Read this module's keys out of the old combined `server-settings.json`.
-fn legacy_overrides(
-    path: Option<&std::path::Path>,
-    enabled_key: &str,
-    listen_key: &str,
-) -> ProxyServerOverrides {
-    let Some(path) = path else {
-        return ProxyServerOverrides::default();
-    };
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return ProxyServerOverrides::default();
-    };
-    let Ok(v) = serde_json::from_str::<Value>(&text) else {
-        return ProxyServerOverrides::default();
-    };
-    ProxyServerOverrides {
-        enabled: v.get(enabled_key).and_then(Value::as_bool),
-        listen: v
-            .get(listen_key)
-            .and_then(Value::as_str)
-            .map(str::to_string),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,7 +271,6 @@ mod tests {
         ProxyRuntime::new(
             state(),
             dir.join("proxy-server.json"),
-            Some(dir.join("server-settings.json")),
             Some(Arc::new(TcpBinder)),
             "127.0.0.1:0",
             cfg_enabled,
@@ -402,34 +376,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_server_settings_are_read_once_when_own_file_is_missing() {
-        let dir = temp_dir("legacy");
-        let listen = free_addr().to_string();
-        std::fs::write(
-            dir.join("server-settings.json"),
-            format!(
-                r#"{{"proxy_enabled": false, "proxy_listen": "{listen}", "dns_enabled": true}}"#
-            ),
-        )
-        .unwrap();
+    async fn startup_writes_defaults_then_own_file_persists() {
+        let dir = temp_dir("defaults");
 
-        let rt = runtime_in(&dir, true);
-        let status = rt.status().await;
-        assert!(!status.enabled, "legacy proxy_enabled must be honored");
-        assert_eq!(status.listen, listen);
+        // No settings file yet: startup writes the defaults to disk.
+        let rt = runtime_in(&dir, false);
+        assert!(
+            dir.join("proxy-server.json").exists(),
+            "startup creates the settings file from defaults"
+        );
+        assert!(!rt.status().await.enabled, "default disabled is honored");
 
-        // Applying any change writes the module's own file; the legacy file is
-        // no longer consulted afterwards.
-        rt.apply_raw(&body(r#"{"proxy_enabled": false}"#)).await.unwrap();
+        // A change persists and wins over the cfg default on the next start.
         let addr = free_addr();
         rt.apply_raw(&body(&format!(
             r#"{{"proxy_enabled": true, "proxy_listen": "{addr}"}}"#
         )))
         .await
         .unwrap();
-        assert!(dir.join("proxy-server.json").exists());
         let reloaded = runtime_in(&dir, false);
-        assert!(reloaded.status().await.enabled);
+        assert!(reloaded.status().await.enabled, "own file wins over cfg default");
         std::fs::remove_dir_all(dir).ok();
     }
 

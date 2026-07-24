@@ -1,12 +1,10 @@
-//! Adblock's config section (`[adblock]`) and its loader.
+//! Adblock's config section and its loader.
 
-use serde::Deserialize;
 use std::path::PathBuf;
 
-use super::error::{Error, Result};
+use super::error::Result;
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone)]
 pub struct AdblockConfig {
     pub enabled: bool,
     pub custom_rules: Vec<String>,
@@ -38,29 +36,15 @@ impl AdblockConfig {
         Ok(())
     }
 
-    /// Load Adblock's base config from Adblock's own file
-    /// (`<data_dir>/settings/adblock-base.toml`), else built-in defaults.
-    /// `data_dir` is root-supplied wiring and always wins for the on-disk data
-    /// root.
+    /// Build Adblock's config from built-in defaults. `data_dir` is root-supplied
+    /// wiring and always wins for the on-disk data root.
     pub fn load(data_dir: &std::path::Path) -> Result<Self> {
-        let own = data_dir.join("settings").join("adblock-base.toml");
-        let mut cfg = if own.exists() {
-            Self::from_toml_file(&own)?
-        } else {
-            Self::default()
+        let cfg = Self {
+            data_dir: data_dir.to_path_buf(),
+            ..Default::default()
         };
-        cfg.data_dir = data_dir.to_path_buf();
         cfg.validate()?;
         Ok(cfg)
-    }
-
-    fn from_toml_file(path: &std::path::Path) -> Result<Self> {
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| Error::Config(format!("reading {}: {e}", path.display())))?;
-        // The base-config file nests settings under `[adblock]`; unwrap it.
-        let file: BaseFile = toml::from_str(&text)
-            .map_err(|e| Error::Config(format!("parsing {}: {e}", path.display())))?;
-        Ok(file.adblock)
     }
 }
 
@@ -77,57 +61,19 @@ impl Default for AdblockConfig {
     }
 }
 
-/// Wrapper matching the `[adblock]` table. Adblock's config is a single
-/// top-level table, so parsing through this reads its base-config file.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-struct BaseFile {
-    adblock: AdblockConfig,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn load_reads_adblock_table_and_ignores_others() {
-        let dir = std::env::temp_dir().join("adblock-base-cfg-own");
-        let _ = std::fs::remove_dir_all(&dir);
-        let settings = dir.join("settings");
-        std::fs::create_dir_all(&settings).unwrap();
-        std::fs::write(
-            settings.join("adblock-base.toml"),
-            r#"
-[adblock]
-enabled = false
-auto_update_hours = 6
-
-[server]
-listen = "127.0.0.1:9090"
-some_unrelated_field = "ignored"
-"#,
-        )
-        .unwrap();
-
-        let cfg = AdblockConfig::load(&dir).unwrap();
-        assert!(!cfg.enabled);
-        assert_eq!(cfg.auto_update_hours, 6);
-        // data_dir is root-supplied wiring, not taken from the file.
-        assert_eq!(cfg.data_dir, dir);
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn load_falls_back_to_defaults() {
-        let dir = std::env::temp_dir().join("adblock-base-cfg-missing-xyz");
-        let _ = std::fs::remove_dir_all(&dir);
-        let cfg = AdblockConfig::load(&dir).unwrap();
+    fn load_uses_defaults_with_root_supplied_data_dir() {
+        let dir = std::path::Path::new("some/data/root");
+        let cfg = AdblockConfig::load(dir).unwrap();
         let defaults = AdblockConfig::default();
         assert_eq!(cfg.enabled, defaults.enabled);
         assert_eq!(cfg.auto_update_hours, defaults.auto_update_hours);
         assert_eq!(cfg.inject_scriptlets, defaults.inject_scriptlets);
-        // data_dir still reflects the passed-in root.
+        // data_dir reflects the passed-in root, not the default.
         assert_eq!(cfg.data_dir, dir);
     }
 }

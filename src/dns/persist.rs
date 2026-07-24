@@ -91,6 +91,15 @@ impl<T: Default + Serialize + DeserializeOwned> OverrideStore<T> {
             .map_err(|e| format!("writing {}: {e}", self.path.display()))
     }
 
+    /// Create the file populated with `default` when it does not exist yet, so a
+    /// fresh install starts with a full, editable settings file. An existing file
+    /// is left untouched.
+    pub fn ensure(&self, default: &T) {
+        if !self.path.exists() {
+            let _ = self.save(default);
+        }
+    }
+
     pub fn reset(&self) -> std::result::Result<(), String> {
         match std::fs::remove_file(&self.path) {
             Ok(()) => Ok(()),

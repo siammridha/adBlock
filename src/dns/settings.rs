@@ -18,6 +18,13 @@ macro_rules! dns_tunables {
             pub fn merged_with(self, upd: &DnsOverrides) -> Self {
                 Self { $( $field: upd.$field.clone().or(self.$field), )+ }
             }
+
+            /// A fully-populated override built from effective settings. Used to
+            /// seed the settings file with full default values on first run.
+            #[must_use]
+            pub fn from_effective(e: &EffectiveDnsSettings) -> Self {
+                Self { $( $field: Some(e.$field.clone()), )+ }
+            }
         }
 
         #[derive(Clone, Debug, PartialEq)]
@@ -44,8 +51,8 @@ dns_tunables! {
     upstream_mode: UpstreamMode,
     bootstrap: Vec<String>,
     cache_size: usize,
-    min_ttl_secs: u32,
-    max_ttl_secs: u32,
+    override_min_ttl_secs: u32,
+    override_max_ttl_secs: u32,
     ech_probe_domain: String,
     log_ipv6: bool,
 }
@@ -56,14 +63,11 @@ impl EffectiveDnsSettings {
 
     pub fn validate(&self) -> Result<(), String> {
         // 0 disables a bound, so only a conflict between two active bounds is invalid.
-        if self.min_ttl_secs > 0 && self.max_ttl_secs > 0 && self.min_ttl_secs > self.max_ttl_secs {
+        if self.override_min_ttl_secs > 0 && self.override_max_ttl_secs > 0 && self.override_min_ttl_secs > self.override_max_ttl_secs {
             return Err(format!(
-                "min_ttl_secs ({}) exceeds max_ttl_secs ({})",
-                self.min_ttl_secs, self.max_ttl_secs
+                "override_min_ttl_secs ({}) exceeds override_max_ttl_secs ({})",
+                self.override_min_ttl_secs, self.override_max_ttl_secs
             ));
-        }
-        if self.upstreams.is_empty() {
-            return Err("at least one upstream is required".into());
         }
         Ok(())
     }
@@ -90,14 +94,14 @@ mod tests {
         };
         let upd = DnsOverrides {
             upstreams: Some(vec!["tls://1.1.1.1".into()]),
-            min_ttl_secs: Some(30),
+            override_min_ttl_secs: Some(30),
             ..Default::default()
         };
         let merged = saved.merged_with(&upd);
         assert_eq!(merged.upstreams, Some(vec!["tls://1.1.1.1".to_string()]));
-        assert_eq!(merged.min_ttl_secs, Some(30));
+        assert_eq!(merged.override_min_ttl_secs, Some(30));
         assert_eq!(merged.cache_size, Some(512));
-        assert_eq!(merged.max_ttl_secs, None);
+        assert_eq!(merged.override_max_ttl_secs, None);
         assert_eq!(merged.upstream_mode, None);
 
         let saved = DnsOverrides { cache_size: Some(9), ..Default::default() };
@@ -122,20 +126,21 @@ mod tests {
 
         assert!(folded.validate().is_ok());
         let bad = folded.clone().with(&DnsOverrides {
-            min_ttl_secs: Some(100),
-            max_ttl_secs: Some(50),
+            override_min_ttl_secs: Some(100),
+            override_max_ttl_secs: Some(50),
             ..Default::default()
         });
-        assert!(bad.validate().unwrap_err().contains("min_ttl_secs"));
+        assert!(bad.validate().unwrap_err().contains("override_min_ttl_secs"));
         // A disabled max (0) never conflicts with an active min.
         let disabled_max = folded.clone().with(&DnsOverrides {
-            min_ttl_secs: Some(100),
-            max_ttl_secs: Some(0),
+            override_min_ttl_secs: Some(100),
+            override_max_ttl_secs: Some(0),
             ..Default::default()
         });
         assert!(disabled_max.validate().is_ok());
+        // Empty upstreams is allowed now: DNS may run with none configured.
         let empty = folded.with(&DnsOverrides { upstreams: Some(vec![]), ..Default::default() });
-        assert!(empty.validate().is_err());
+        assert!(empty.validate().is_ok());
     }
 
     #[test]
@@ -154,7 +159,7 @@ mod tests {
         };
         store.save(&o).unwrap();
         assert_eq!(store.load(), o);
-        assert_eq!(store.load().min_ttl_secs, None);
+        assert_eq!(store.load().override_min_ttl_secs, None);
         store.reset().unwrap();
         store.reset().unwrap();
         assert_eq!(store.load(), DnsOverrides::default());

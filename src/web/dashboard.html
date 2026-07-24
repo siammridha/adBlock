@@ -2174,8 +2174,8 @@ async function loadDnsCfg(){
     $("up-mode").value = d.upstream_mode || "failover";
     $("up-bootstrap").value = (d.bootstrap || []).join(", ");
     $("ca-size").value = d.cache.capacity;
-    $("ca-min").value = d.cache.min_ttl_secs;
-    $("ca-max").value = d.cache.max_ttl_secs;
+    $("ca-min").value = d.cache.override_min_ttl_secs;
+    $("ca-max").value = d.cache.override_max_ttl_secs;
     $("ech-domain").value = d.ech_probe_domain || "";
     $("lv6-log").checked = !!d.log_ipv6;
   } catch(e){}
@@ -2203,8 +2203,8 @@ $("up-save").addEventListener("click", ()=>{
 $("ca-save").addEventListener("click", ()=>{
   postDnsConfig({
     cache_size: Math.max(0, parseInt($("ca-size").value) || 0),
-    min_ttl_secs: Math.max(0, parseInt($("ca-min").value) || 0),
-    max_ttl_secs: Math.max(0, parseInt($("ca-max").value) || 0),
+    override_min_ttl_secs: Math.max(0, parseInt($("ca-min").value) || 0),
+    override_max_ttl_secs: Math.max(0, parseInt($("ca-max").value) || 0),
   }, "ca-status", "applying…");
 });
 $("ech-save").addEventListener("click", ()=>{

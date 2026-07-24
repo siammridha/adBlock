@@ -13,8 +13,8 @@ use serde::Serialize;
 pub struct CacheStatus {
     pub entries: usize,
     pub capacity: usize,
-    pub min_ttl_secs: u32,
-    pub max_ttl_secs: u32,
+    pub override_min_ttl_secs: u32,
+    pub override_max_ttl_secs: u32,
     pub hits: u64,
     pub misses: u64,
 }
@@ -178,8 +178,8 @@ impl DnsCache {
         CacheStatus {
             entries: self.len(),
             capacity: self.capacity(),
-            min_ttl_secs: self.min_ttl(),
-            max_ttl_secs: self.max_ttl(),
+            override_min_ttl_secs: self.min_ttl(),
+            override_max_ttl_secs: self.max_ttl(),
             hits: self.hits(),
             misses: self.misses(),
         }

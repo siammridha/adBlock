@@ -30,12 +30,13 @@ async fn main() -> Result<()> {
 
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    // The root owns the on-disk data root and hands it to each module so the
-    // module can find its own base-config file (`data/settings/<module>-base.toml`),
-    // falling back to built-in defaults when that file is absent.
+    // The root owns the on-disk data root and hands it to each module. Each
+    // module builds its base config from its own built-in defaults; runtime
+    // changes made in the admin UI persist to per-service files under the data
+    // root and layer over these defaults.
     let data_dir = PathBuf::from("data");
 
-    // Each module loads its own base config from its module-owned file.
+    // Each module builds its own base config from its built-in defaults.
     let proxy_base = ProxyBaseConfig::load(&data_dir)?;
     let adblock_cfg = adBlock::adblock::api::AdblockConfig::load(&data_dir)?;
     let dns_cfg = DnsConfig::load(&data_dir)?;
@@ -120,13 +121,12 @@ async fn main() -> Result<()> {
         client,
         egress.clone(),
     );
-    // Each service owns its lifecycle behind its settings interface; the old
-    // combined server-settings.json seeds them once if their own files are
-    // missing. Each module names its own files (via its config).
+    // Each service owns its lifecycle behind its settings interface. On first
+    // run each writes its own settings file from built-in defaults; an existing
+    // file is used as-is. Each module names its own files (via its config).
     let proxy_runtime = ProxyRuntime::new(
         state.clone(),
         proxy_base.server.server_settings_path(),
-        Some(proxy_base.server.legacy_server_settings_path()),
         Some(std::sync::Arc::new(proxy)),
         &proxy_base.server.listen,
         proxy_base.server.enabled,
@@ -134,7 +134,6 @@ async fn main() -> Result<()> {
     let dns_runtime = DnsRuntime::new(
         state.clone(),
         dns_cfg.server_settings_path(),
-        Some(dns_cfg.legacy_server_settings_path()),
         dns,
         &dns_cfg.listen,
         dns_cfg.enabled,

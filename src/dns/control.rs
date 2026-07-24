@@ -67,22 +67,21 @@ pub struct DnsRuntime {
 }
 
 impl DnsRuntime {
-    /// `legacy_store_path` points at the old combined `server-settings.json`;
-    /// it is read once when the DNS module's own settings file does not exist.
     pub fn new(
         state: Arc<SharedState>,
         store_path: PathBuf,
-        legacy_store_path: Option<PathBuf>,
         service: Arc<DnsService>,
         cfg_listen: &str,
         cfg_enabled: bool,
     ) -> Result<Arc<Self>> {
-        let store: OverrideStore<DnsServerOverrides> = OverrideStore::new(store_path.clone());
-        let overrides = if store_path.exists() {
-            store.load()
-        } else {
-            legacy_overrides(legacy_store_path.as_deref())
-        };
+        let store: OverrideStore<DnsServerOverrides> = OverrideStore::new(store_path);
+        // On first run, write the full default listener settings; an existing
+        // file is used as-is.
+        store.ensure(&DnsServerOverrides {
+            enabled: Some(cfg_enabled),
+            listen: Some(cfg_listen.to_string()),
+        });
+        let overrides = store.load();
 
         let listen_s = overrides
             .listen
@@ -207,26 +206,6 @@ fn transition_note(state: &SharedState, was: Option<SocketAddr>, now: Option<Soc
     state.log_event(EventKind::Info, msg);
 }
 
-/// Read this module's keys out of the old combined `server-settings.json`.
-fn legacy_overrides(path: Option<&std::path::Path>) -> DnsServerOverrides {
-    let Some(path) = path else {
-        return DnsServerOverrides::default();
-    };
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return DnsServerOverrides::default();
-    };
-    let Ok(v) = serde_json::from_str::<Value>(&text) else {
-        return DnsServerOverrides::default();
-    };
-    DnsServerOverrides {
-        enabled: v.get("dns_enabled").and_then(Value::as_bool),
-        listen: v
-            .get("dns_listen")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,7 +248,6 @@ mod tests {
         DnsRuntime::new(
             state,
             dir.join("dns-server.json"),
-            Some(dir.join("server-settings.json")),
             service,
             &dns_cfg.listen,
             cfg_enabled,
@@ -325,31 +303,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn settings_persist_in_own_file_and_legacy_file_seeds_them() {
+    async fn startup_writes_defaults_then_own_file_persists() {
         let dir = temp_dir("persist");
-        let listen = free_addr().to_string();
-        std::fs::write(
-            dir.join("server-settings.json"),
-            format!(r#"{{"dns_enabled": false, "dns_listen": "{listen}"}}"#),
-        )
-        .unwrap();
 
+        // First start with no settings file: the defaults get written to disk.
         let rt = runtime_with(&dir, true, &[]);
-        let status = rt.status().await;
-        assert!(!status.enabled, "legacy dns_enabled must be honored");
-        assert_eq!(status.listen, listen);
+        assert!(
+            dir.join("dns-server.json").exists(),
+            "startup creates the settings file from defaults"
+        );
+        assert!(rt.status().await.enabled, "default enabled is honored");
 
+        // A change persists and wins over the cfg default on the next start.
         let addr = free_addr();
         rt.apply_raw(
             format!(r#"{{"dns_enabled": true, "dns_listen": "{addr}"}}"#).as_bytes(),
         )
         .await
         .unwrap();
-        assert!(dir.join("dns-server.json").exists());
 
         let rt2 = runtime_with(&dir, false, &[]);
         let status = rt2.status().await;
-        assert!(status.enabled, "own file wins once written");
+        assert!(status.enabled, "own file wins over cfg default");
         assert_eq!(status.listen, addr.to_string());
         std::fs::remove_dir_all(dir).ok();
     }

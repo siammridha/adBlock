@@ -110,6 +110,9 @@ impl DnsService {
         let settings = settings::SettingsStore::new(data_dir.join("dns-settings.json"));
 
         let base_eff = EffectiveDnsSettings::from_config(cfg);
+        // On first run, write the full default settings so the file exists and is
+        // editable; an existing file is used as-is.
+        settings.ensure(&DnsOverrides::from_effective(&base_eff));
         let mut eff = base_eff.clone().with(&settings.load());
         let resolver = match upstream::Resolver::new(
             &eff.upstreams,
@@ -135,7 +138,7 @@ impl DnsService {
         Ok(Arc::new(Self {
             adblock,
             state,
-            cache: DnsCache::new(eff.cache_size, eff.min_ttl_secs, eff.max_ttl_secs),
+            cache: DnsCache::new(eff.cache_size, eff.override_min_ttl_secs, eff.override_max_ttl_secs),
             live: RwLock::new(Arc::new(LiveDns { resolver: Arc::new(resolver), settings: eff })),
             rewrites: RewriteStore::load(data_dir.join("dns-rewrites.conf")),
             settings,
@@ -251,7 +254,7 @@ impl DnsService {
 
         persist()?;
 
-        self.cache.set_config(eff.cache_size, eff.min_ttl_secs, eff.max_ttl_secs);
+        self.cache.set_config(eff.cache_size, eff.override_min_ttl_secs, eff.override_max_ttl_secs);
         *self.live.write().expect("live dns lock") = Arc::new(LiveDns { resolver, settings: eff });
         Ok(())
     }
@@ -873,13 +876,10 @@ mod tests {
         let svc = build_service(&[], BlockingMode::NullIp, base_upstreams.clone(), dir.clone());
 
         assert!(svc.apply_settings(DnsOverrides {
-            upstreams: Some(vec![]), ..Default::default()
-        }).is_err());
-        assert!(svc.apply_settings(DnsOverrides {
             upstreams: Some(vec!["quic://nope".into()]), ..Default::default()
         }).is_err());
         assert!(svc.apply_settings(DnsOverrides {
-            min_ttl_secs: Some(100), max_ttl_secs: Some(50), ..Default::default()
+            override_min_ttl_secs: Some(100), override_max_ttl_secs: Some(50), ..Default::default()
         }).is_err());
         assert_eq!(svc.upstream_specs(), base_upstreams);
 
@@ -887,7 +887,7 @@ mod tests {
             upstreams: Some(vec!["udp://127.0.0.2:53".into()]),
             upstream_mode: Some(crate::dns::config::UpstreamMode::Parallel),
             cache_size: Some(2),
-            min_ttl_secs: Some(5),
+            override_min_ttl_secs: Some(5),
             ..Default::default()
         })
         .unwrap();

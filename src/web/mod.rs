@@ -320,7 +320,6 @@ mod tests {
             state.clone(),
             dns_dir.join("proxy-server.json"),
             None,
-            None,
             "127.0.0.1:8080",
             true,
         )
@@ -328,7 +327,6 @@ mod tests {
         let dns_runtime = DnsRuntime::new(
             state.clone(),
             dns_dir.join("dns-server.json"),
-            None,
             dns_svc,
             &dns_cfg.listen,
             dns_cfg.enabled,
@@ -453,7 +451,7 @@ mod tests {
         assert_eq!(v["enabled"], true);
         assert_eq!(v["blocking_mode"], "null-ip");
         assert_eq!(v["strip_ech"], false);
-        assert!(v["upstreams"].as_array().unwrap().len() >= 2);
+        assert_eq!(v["upstreams"].as_array().unwrap().len(), 0, "no upstreams configured by default");
         assert_eq!(v["cache"]["entries"], 0);
 
         let resp = admin.route(post("/api/dns/flush", "")).await;
@@ -518,19 +516,20 @@ mod tests {
         let resp = admin
             .route(post(
                 "/api/dns/config",
-                r#"{"upstreams": ["udp://127.0.0.2:53"], "cache_size": 128, "min_ttl_secs": 30}"#,
+                r#"{"upstreams": ["udp://127.0.0.2:53"], "cache_size": 128, "override_min_ttl_secs": 30}"#,
             ))
             .await;
         assert_eq!(resp.status(), StatusCode::OK);
         let v = body_json(resp).await;
         assert_eq!(v["upstreams"], json!(["udp://127.0.0.2:53"]));
         assert_eq!(v["cache"]["capacity"], 128);
-        assert_eq!(v["cache"]["min_ttl_secs"], 30);
+        assert_eq!(v["cache"]["override_min_ttl_secs"], 30);
 
+        // Empty upstreams is allowed now: DNS may run with none configured.
         let resp = admin.route(post("/api/dns/config", r#"{"upstreams": []}"#)).await;
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(resp.status(), StatusCode::OK);
         let resp = admin
-            .route(post("/api/dns/config", r#"{"min_ttl_secs": 999, "max_ttl_secs": 1}"#))
+            .route(post("/api/dns/config", r#"{"override_min_ttl_secs": 999, "override_max_ttl_secs": 1}"#))
             .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
@@ -538,7 +537,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let v = body_json(resp).await;
         assert_eq!(v["cache"]["capacity"], 4096);
-        assert!(v["upstreams"].as_array().unwrap().len() >= 2);
+        assert_eq!(v["upstreams"].as_array().unwrap().len(), 0, "reset returns the empty default");
     }
 
     #[tokio::test]
