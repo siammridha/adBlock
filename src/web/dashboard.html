@@ -476,13 +476,17 @@
         <button id="up-add">Add server</button>
         <span class="hint" id="up-add-status"></span>
       </div>
-      <p class="hint" style="margin-top:0">Add stores the server's IPv4 address (IPv4 only) and
+      <p class="hint">Add stores the server's IPv4 address (IPv4 only) and
         test-queries it; one that doesn't answer is rejected. The address is fixed — if it changes,
         delete and re-add. Non-standard port: <code>host:8443</code>. A full address like
         <code>tls://dns.nextdns.io</code> overrides the transport picker. Unchecking <b>On</b>
         keeps a server but sends it no queries.
         Need a server? <a href="https://adguard-dns.io/kb/general/dns-providers/?clid=Knriea&amp;utm_campaign=dns_kb_providers&amp;utm_medium=ui&amp;utm_source=home" target="_blank" rel="noopener">Browse DNS providers</a>.</p>
-      <div class="actions" style="flex-wrap:wrap">
+    </div>
+
+    <div class="panel">
+      <h2>Mode &amp; bootstrap</h2>
+      <div class="actions" style="margin-top:0;flex-wrap:wrap">
         <label for="up-mode">Mode</label>
         <select id="up-mode">
           <option value="failover">Failover — in order, from the last that answered</option>
@@ -490,6 +494,16 @@
           <option value="parallel">Parallel — query all at once, first answer wins</option>
         </select>
       </div>
+      <p class="hint" id="up-mode-help">
+        <span data-mode="failover">Sticks to one server — the last that answered — and only moves
+          down the list when it fails. Fewest queries sent, but a slow server stays in use until
+          it breaks.</span>
+        <span data-mode="load-balance">Spreads queries over all enabled servers at random,
+          favouring the ones that answer fastest and least often fail. Good default: it uses every
+          server and routes around slow ones on its own.</span>
+        <span data-mode="parallel">Asks every enabled server at the same time and takes the first
+          answer. Fastest, but it multiplies your traffic and shows every query to every
+          provider.</span></p>
       <div class="actions" style="flex-wrap:wrap">
         <label for="up-bootstrap">Bootstrap (plain-DNS IPs used to resolve the hostnames you add, comma-separated)</label>
         <input type="text" id="up-bootstrap" placeholder="1.1.1.1:53, 8.8.8.8:53" style="flex:1;min-width:220px">
@@ -2205,6 +2219,7 @@ async function loadDnsCfg(){
     }
     renderUpstreamRows(d.upstream_stats || []);
     $("up-mode").value = d.upstream_mode || "failover";
+    upModeHelp();
     $("up-bootstrap").value = (d.bootstrap || []).join(", ");
     $("ca-size").value = d.cache.capacity;
     $("ca-min").value = d.cache.override_min_ttl_secs;
@@ -2302,6 +2317,13 @@ async function postDnsConfig(body, statusEl, busyMsg){
     loadDnsCfg(); refreshDns();
   } catch(e){ say(el, "failed: " + e.message); }
 }
+// Only the selected mode's explanation is shown.
+function upModeHelp(){
+  for(const s of $("up-mode-help").children)
+    s.style.display = s.dataset.mode === $("up-mode").value ? "" : "none";
+}
+$("up-mode").addEventListener("change", upModeHelp);
+upModeHelp();
 $("up-save").addEventListener("click", ()=>{
   const bootstrap = $("up-bootstrap").value.split(",").map(s=>s.trim()).filter(Boolean);
   postDnsConfig({upstream_mode: $("up-mode").value, bootstrap},
