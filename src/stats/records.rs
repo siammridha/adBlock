@@ -177,6 +177,13 @@ pub enum UiMsg {
         slot: CaptureSlot,
         text: Arc<str>,
     },
+    /// A tunnel that was open has finished — the row flips from OPEN to CLOSED.
+    /// Live only: the lean line was written when the tunnel opened, so a
+    /// reloaded history still shows it as OPEN.
+    Closed {
+        seq: u64,
+        ms: u64,
+    },
     Dns(Arc<DnsRecord>),
     Event(Arc<Event>),
 }

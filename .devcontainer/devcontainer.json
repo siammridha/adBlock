@@ -31,8 +31,23 @@
 			"source": "${localEnv:HOME}/.gitconfig",
 			"target": "/home/vscode/.gitconfig",
 			"type": "bind"
-		}
+		},
+		// The Mac's root certificates, read-only. macOS keeps its system roots
+		// as a PEM bundle at /etc/ssl/cert.pem (/etc is a symlink to /private/etc,
+		// and only /private is shared with Docker Desktop by default, so the
+		// source uses the real path). The keychain files themselves are a binary
+		// format nothing in the container can read. postCreateCommand folds this
+		// into the container's trust store, which is what the proxy's upstream
+		// TLS verification reads. On a Linux host use /etc/ssl/cert.pem.
+		// Not included: CAs you added to the login/System keychain — export
+		// those with `security find-certificate -a -p` if you need them.
+		"source=/private/etc/ssl/cert.pem,target=/usr/local/share/mac-roots.pem,type=bind,readonly"
 	],
+
+	// Trust the Mac's roots for anything in here that makes an outbound TLS
+	// connection — the proxy's upstream requests, cargo, curl. rustls reads the
+	// Debian store (/etc/ssl/certs), so the mounted bundle has to land there.
+	"postCreateCommand": "sudo cp /usr/local/share/mac-roots.pem /usr/local/share/ca-certificates/mac-roots.crt && sudo update-ca-certificates",
 
 	// DNS needs UDP, which VS Code's forwardPorts can't do (TCP only), so
 	// publish port 53 straight through docker -p, bound to the Mac's loopback.

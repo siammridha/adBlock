@@ -383,10 +383,14 @@ impl SharedState {
         }
     }
 
-    pub fn record_tunnel(self: &Arc<Self>, facts: RequestFacts<'_>, attribution: &str) {
-        // A tunnel never carries captured bodies, so the exchange just drops
-        // after writing the lean line.
-        let _ = self.begin(RequestKind::Tunnel, facts, 0, attribution.to_string(), false);
+    /// Open a tunnel record. A tunnel never carries captured bodies, so the
+    /// caller keeps the exchange only to report the close.
+    pub fn record_tunnel(
+        self: &Arc<Self>,
+        facts: RequestFacts<'_>,
+        attribution: &str,
+    ) -> Exchange {
+        self.begin(RequestKind::Tunnel, facts, 0, attribution.to_string(), false)
     }
 
     // Open a request record. The lean line lands in the request log now; the
@@ -532,6 +536,15 @@ impl Exchange {
     /// stream — it lands only on the record (and so the persisted sidecar).
     /// Used for the raw compressed body prefixes, which are large and only read
     /// on demand by the decode endpoint.
+    /// Report that an open tunnel finished, `ms` after it opened. Nothing is
+    /// persisted — the row already exists in the log; this only updates a
+    /// watching dashboard.
+    pub fn closed(&self, ms: u64) {
+        if self.live {
+            let _ = self.state.ui.send(UiMsg::Closed { seq: self.seq, ms });
+        }
+    }
+
     pub fn attach_quiet(&self, slot: CaptureSlot, text: impl FnOnce() -> String) {
         let Some(captures) = &self.captures else { return };
         if let Ok(mut record) = captures.lock() {
@@ -608,6 +621,7 @@ mod test_support {
                             slot.apply(r, text.to_string());
                         }
                     }
+                    UiMsg::Closed { .. } => {}
                     UiMsg::Dns(d) => self.dns.push((*d).clone()),
                     UiMsg::Event(e) => self.events.push((*e).clone()),
                 }

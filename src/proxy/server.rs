@@ -158,12 +158,12 @@ impl Proxy {
         tracing::info!(?addr, "proxy listening");
         loop {
             match listener.accept().await {
-                Ok((stream, _peer)) => {
+                Ok((stream, peer)) => {
                     let proxy = self.clone();
                     tokio::spawn(async move {
                         // serve_conn logs its own meaningful failures and stays
                         // quiet on routine closes; nothing to report here.
-                        let _ = proxy.serve_conn(stream).await;
+                        let _ = proxy.serve_conn(stream, peer).await;
                     });
                 }
                 Err(e) => tracing::debug!(error = %e, "proxy accept"),
@@ -171,7 +171,8 @@ impl Proxy {
         }
     }
 
-    async fn serve_conn(&self, stream: TcpStream) -> Result<()> {
+    async fn serve_conn(&self, stream: TcpStream, peer: SocketAddr) -> Result<()> {
+        let opened = std::time::Instant::now();
         let io = TokioIo::new(stream);
         let proxy = self.clone();
         let service = service_fn(move |req| {
@@ -184,9 +185,10 @@ impl Proxy {
             .await
         {
             if !is_routine_close(&e) {
-                tracing::warn!(error = %e, "client connection ended with error");
+                tracing::warn!(%peer, error = %e, "client connection ended with error");
             }
         }
+        tracing::debug!(%peer, ms = opened.elapsed().as_millis(), "client connection closed");
         Ok(())
     }
 
@@ -273,7 +275,8 @@ impl Proxy {
             return Err(Box::new(BlockedDropped));
         }
 
-        state.record_tunnel(
+        // Held for the tunnel's life so its close can be reported to the UI.
+        let exchange = state.record_tunnel(
             RequestFacts {
                 method: "CONNECT",
                 req_type: plan.record_label(),
@@ -289,14 +292,23 @@ impl Proxy {
         tokio::spawn(async move {
             match hyper::upgrade::on(req).await {
                 Ok(upgraded) => {
+                    let opened = std::time::Instant::now();
                     let io = TokioIo::new(upgraded);
                     if blind {
                         let _ = proxy.blind_tunnel(io, &authority).await;
                     } else if let Err(e) = proxy.mitm(io, &host).await {
                         tracing::warn!(%host, error = %e, "could not start MITM (certificate setup failed)");
                     }
+                    let ms = opened.elapsed().as_millis() as u64;
+                    exchange.closed(ms);
+                    tracing::debug!(
+                        %host,
+                        mode = if blind { "blind" } else { "mitm" },
+                        ms,
+                        "tunnel closed",
+                    );
                 }
-                Err(e) => tracing::debug!(error = %e, "upgrade failed"),
+                Err(e) => tracing::debug!(%host, error = %e, "upgrade failed"),
             }
         });
 

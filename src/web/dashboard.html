@@ -217,7 +217,7 @@
      request rows are taller so the URL can wrap. Full request/response detail
      opens in the drawer, not inline. */
   .vhead, .vrow { display:grid; align-items:center; gap:10px; padding:0 8px; }
-  .rqcols  { grid-template-columns:108px 66px 60px 104px minmax(0,1fr) 74px; }
+  .rqcols  { grid-template-columns:108px 66px 72px 104px minmax(0,1fr) 74px; }
   .dnscols { grid-template-columns:84px 76px minmax(0,1.1fr) 50px minmax(0,1.1fr) 150px 40px 74px; }
   .vhead { height:30px; color:var(--muted); font-size:11px; text-transform:uppercase;
     letter-spacing:.06em; font-weight:600; border-bottom:1px solid var(--border);
@@ -1635,7 +1635,8 @@ let rqQuery = "";
 let rqPending = [];         // live rows buffered while scrolled away from top
 
 function rqHay(rec){
-  const st0 = rec.kind==="tunnel" ? "open" : rec.kind==="failed" ? "err error failed" : "blk blocked";
+  const st0 = rec.kind==="tunnel" ? (rec._closed_ms==null ? "open" : "closed")
+    : rec.kind==="failed" ? "err error failed" : "blk blocked";
   return [rec.method, rec.status===0 ? st0 : rec.status,
     rec.type, rec.url, rec.blocked_by, rec.scriptlets, rec.ech ? "ech" : ""].join(" ").toLowerCase();
 }
@@ -1669,11 +1670,17 @@ function rqRowHTML(rec){
     st = rec.status; col = statusColor(rec.status);
     tint = rec.status<300 ? "st-ok" : rec.status<400 ? "st-info" : rec.status<500 ? "st-warn" : "st-err";
   }
-  else if(isTunnel){ st = "OPEN"; col = "var(--muted)"; tint = ""; }
+  else if(isTunnel){
+    st = rec._closed_ms==null ? "OPEN" : "CLOSED"; col = "var(--muted)"; tint = "";
+  }
   else if(isFailed){ st = "ERR"; col = "var(--error)"; tint = "st-err"; }
   else { st = "BLK"; col = "var(--error)"; tint = "st-err"; }
 
   let meta = "";
+  if(rec._closed_ms!=null){
+    meta += `<span class="hint" title="how long the tunnel stayed open">`+
+      `open ${rec._closed_ms<1000 ? rec._closed_ms+" ms" : fmtDur(Math.round(rec._closed_ms/1000))}</span>`;
+  }
   if(rec.ech){
     meta += `<span class="ech-tag" title="SNI hidden — Encrypted Client Hello negotiated using the ECH config from DNS">[ECH]</span>`;
   }
@@ -1773,6 +1780,14 @@ function onLiveAttach(a){
   rec._detail = true; // captures now live in memory; no fetch needed
   if(rqDrawerSeq === a.seq) renderDrawer(rec);
   rqVL.redraw(); // a scriptlet/ech annotation may have landed on a visible row
+}
+// A tunnel finished: flip its row from OPEN to CLOSED. Live only — a row
+// reloaded from the request log has no close time and stays OPEN.
+function onLiveClosed(c){
+  const rec = rqBySeq.get(c.seq);
+  if(!rec) return;
+  rec._closed_ms = c.ms;
+  rqVL.redraw();
 }
 function rqFlush(){
   for(const rec of rqPending) rqAdd(rec, false);
@@ -2474,6 +2489,7 @@ es.addEventListener("stats", e => renderStats(JSON.parse(e.data)));
 es.addEventListener("event", e => handleEvent(JSON.parse(e.data)));
 es.addEventListener("request", e => onLiveRequest(JSON.parse(e.data)));
 es.addEventListener("attach", e => onLiveAttach(JSON.parse(e.data)));
+es.addEventListener("closed", e => onLiveClosed(JSON.parse(e.data)));
 es.addEventListener("dns", e => onLiveDns(JSON.parse(e.data)));
 es.onerror = () => {
   $("hdr-meta").textContent = "proxy unreachable";

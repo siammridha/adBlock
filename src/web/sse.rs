@@ -58,6 +58,7 @@ fn ui_frame(msg: &UiMsg) -> Bytes {
             "attach",
             &json!({ "seq": seq, "slot": slot.as_str(), "text": &**text }),
         ),
+        UiMsg::Closed { seq, ms } => sse_frame("closed", &json!({ "seq": seq, "ms": ms })),
         UiMsg::Event(e) => sse_frame(
             "event",
             &json!({ "ts_ms": e.ts_ms, "kind": e.kind.as_str(), "message": e.message }),
