@@ -30,11 +30,35 @@ pub enum Scheme {
     Https,
 }
 
+impl Scheme {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Udp => "udp",
+            Self::Tcp => "tcp",
+            Self::Tls => "tls",
+            Self::Https => "https",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UpstreamAddr {
     pub spec: String,
+    /// The operator's label for this server, from a trailing `#name` in the
+    /// spec. Empty when the spec carries no label.
+    pub name: String,
+    /// A `!` prefix on the spec parks the server: it stays configured and
+    /// listed, but no query is sent to it.
+    pub enabled: bool,
     pub scheme: Scheme,
+    /// The name this server is reached and verified by — a hostname, or an
+    /// address when that is all the operator gave. Used for TLS SNI and the
+    /// DoH `Host` header.
     pub host: String,
+    /// The address `host` resolved to when it was added, from `?ip=` in the
+    /// spec. Queries connect straight to it, so no lookup is needed at query
+    /// time. Absent for specs that name a host and were never resolved.
+    pub ip: Option<std::net::Ipv4Addr>,
     pub port: u16,
     pub path: String,
 }
@@ -42,13 +66,28 @@ pub struct UpstreamAddr {
 impl UpstreamAddr {
     pub fn parse(spec: &str) -> Result<Self, String> {
         let spec = spec.trim();
-        let (scheme, rest) = match spec.split_once("://") {
+        // A trailing `#name` labels the server; it is not part of the address.
+        let (addr, name) = match spec.split_once('#') {
+            Some((a, n)) => (a.trim_end(), n.trim().to_string()),
+            None => (spec, String::new()),
+        };
+        // A leading `!` parks the server without removing it.
+        let (addr, enabled) = match addr.strip_prefix('!') {
+            Some(a) => (a.trim_start(), false),
+            None => (addr, true),
+        };
+        let (scheme, rest) = match addr.split_once("://") {
             Some(("https", r)) => (Scheme::Https, r),
             Some(("tls", r)) => (Scheme::Tls, r),
             Some(("udp", r)) => (Scheme::Udp, r),
             Some(("tcp", r)) => (Scheme::Tcp, r),
             Some((s, _)) => return Err(format!("upstream '{spec}': unknown scheme '{s}'")),
-            None => (Scheme::Udp, spec),
+            None => (Scheme::Udp, addr),
+        };
+        // `?ip=1.2.3.4` pins the address the host resolved to when it was added.
+        let (rest, ip) = match rest.split_once('?') {
+            Some((r, q)) => (r, parse_pinned_ip(q).map_err(|e| format!("upstream '{spec}': {e}"))?),
+            None => (rest, None),
         };
         let (authority, path) = match rest.split_once('/') {
             Some((a, p)) => (a, format!("/{p}")),
@@ -69,7 +108,36 @@ impl UpstreamAddr {
                 "upstream '{spec}': IPv6 upstreams are not supported (IPv4-only resolver)"
             ));
         }
-        Ok(Self { spec: spec.to_string(), scheme, host, port, path })
+        Ok(Self { spec: spec.to_string(), name, enabled, scheme, host, ip, port, path })
+    }
+
+    /// What the query log and status show: the operator's name when set, else
+    /// the raw spec.
+    pub fn label(&self) -> String {
+        if self.name.is_empty() {
+            self.spec.clone()
+        } else {
+            self.name.clone()
+        }
+    }
+
+    /// The hostname queries are sent to, or empty when the operator gave a bare
+    /// address and there is no name involved.
+    pub fn hostname(&self) -> &str {
+        if self.host.parse::<std::net::Ipv4Addr>().is_ok() {
+            ""
+        } else {
+            &self.host
+        }
+    }
+
+    /// `ip:port`, the address queries actually connect to. Falls back to the
+    /// hostname when no address is pinned (it is looked up at query time).
+    pub fn address(&self) -> String {
+        match self.ip {
+            Some(ip) => format!("{ip}:{}", self.port),
+            None => format!("{}:{}", self.host, self.port),
+        }
     }
 
     fn host_header(&self) -> String {
@@ -78,6 +146,42 @@ impl UpstreamAddr {
         } else {
             format!("{}:{}", self.host, self.port)
         }
+    }
+}
+
+/// The wire form of an ECH probe: an HTTPS query for the canary domain.
+fn probe_query(domain: &str) -> Option<(Vec<u8>, u16)> {
+    let name = match Name::from_utf8(domain) {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!(%domain, error = %e, "invalid ech_probe_domain; skipping ECH probe");
+            return None;
+        }
+    };
+    let mut wire = Message::query();
+    wire.metadata.id = random_id();
+    wire.metadata.recursion_desired = true;
+    wire.add_query(Query::query(name, RecordType::HTTPS));
+    let mut edns = hickory_proto::op::Edns::new();
+    edns.set_max_payload(1232);
+    wire.edns = Some(edns);
+    let id = wire.metadata.id;
+    match wire.to_vec() {
+        Ok(bytes) => Some((bytes, id)),
+        Err(e) => {
+            tracing::warn!(error = %e, "encoding ECH probe query");
+            None
+        }
+    }
+}
+
+fn parse_pinned_ip(query: &str) -> Result<Option<std::net::Ipv4Addr>, String> {
+    match query.split('&').find_map(|kv| kv.trim().strip_prefix("ip=")) {
+        None => Ok(None),
+        Some(v) => v
+            .parse()
+            .map(Some)
+            .map_err(|_| format!("'{v}' is not an IPv4 address")),
     }
 }
 
@@ -174,6 +278,11 @@ impl EchSupport {
 #[derive(Clone, Debug, Serialize)]
 pub struct UpstreamStat {
     pub spec: String,
+    pub name: String,
+    pub host: String,
+    pub address: String,
+    pub scheme: &'static str,
+    pub enabled: bool,
     pub queries: u64,
     pub failures: u64,
     pub avg_rtt_ms: Option<u64>,
@@ -251,6 +360,11 @@ impl Resolver {
             .iter()
             .map(|u| UpstreamStat {
                 spec: u.addr.spec.clone(),
+                name: u.addr.label(),
+                host: u.addr.hostname().to_string(),
+                address: u.addr.address(),
+                scheme: u.addr.scheme.as_str(),
+                enabled: u.addr.enabled,
                 queries: u.stats.queries.load(Ordering::Relaxed),
                 failures: u.stats.failures.load(Ordering::Relaxed),
                 avg_rtt_ms: match u.stats.ewma_rtt_us.load(Ordering::Relaxed) {
@@ -268,64 +382,90 @@ impl Resolver {
         }
     }
 
-    pub async fn probe_ech(&self, domain: &str) {
-        let name = match Name::from_utf8(domain) {
-            Ok(n) => n,
-            Err(e) => {
-                tracing::warn!(%domain, error = %e, "invalid ech_probe_domain; skipping ECH probe");
-                return;
-            }
-        };
-        let mut wire = Message::query();
-        wire.metadata.id = random_id();
-        wire.metadata.recursion_desired = true;
-        wire.add_query(Query::query(name, RecordType::HTTPS));
-        let mut edns = hickory_proto::op::Edns::new();
-        edns.set_max_payload(1232);
-        wire.edns = Some(edns);
-        let id = wire.metadata.id;
-        let bytes = match wire.to_vec() {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!(error = %e, "encoding ECH probe query");
-                return;
-            }
-        };
+    /// Indices of the upstreams that may be queried. A parked (`!`-prefixed)
+    /// server keeps its slot and its stats but is never selected.
+    fn active(&self) -> Vec<usize> {
+        (0..self.upstreams.len())
+            .filter(|&i| self.upstreams[i].addr.enabled)
+            .collect()
+    }
 
+    /// Resolve a hostname to an IPv4 address using the bootstrap servers. An
+    /// address is returned as-is.
+    pub async fn resolve_host(&self, host: &str) -> Result<IpAddr, String> {
+        match host.parse::<IpAddr>() {
+            Ok(ip) => Ok(ip),
+            Err(_) => self.bootstrap_lookup(host).await.map(|(ip, _)| ip),
+        }
+    }
+
+    /// Copy learned ECH results from the resolver this one replaces. A settings
+    /// change rebuilds the resolver; without this, every server would read as
+    /// "not probed" until the next probe even though nothing about it changed.
+    pub fn inherit_ech(&self, old: &Resolver) {
+        for up in &self.upstreams {
+            let same = old.upstreams.iter().find(|o| {
+                (o.addr.scheme, &o.addr.host, o.addr.port) == (up.addr.scheme, &up.addr.host, up.addr.port)
+            });
+            if let Some(prev) = same {
+                up.ech.store(prev.ech.load(Ordering::Relaxed), Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Probe every enabled upstream for ECH support. Returns how many answered.
+    pub async fn probe_ech(&self, domain: &str) -> usize {
+        let Some((bytes, id)) = probe_query(domain) else { return 0 };
         let probes: FuturesUnordered<_> = self
-            .upstreams
-            .iter()
-            .map(|up| async {
-                match tokio::time::timeout(self.timeout, self.query_one(up, &bytes)).await {
-                    Ok(Ok(resp)) if resp.metadata.id == id => {
-                        let support = if answer_has_ech(&resp) {
-                            EchSupport::Supported
-                        } else {
-                            EchSupport::Unsupported
-                        };
-                        up.set_ech(support);
-                        tracing::debug!(upstream = %up.addr.spec, ech = support.as_str(), "ECH probe");
-                    }
-                    _ => {}
-                }
-            })
+            .active()
+            .into_iter()
+            .map(|i| self.probe_one(&self.upstreams[i], &bytes, id))
             .collect();
-        probes.collect::<Vec<_>>().await;
+        probes.filter(|got| std::future::ready(got.is_some())).count().await
+    }
+
+    /// Probe the single upstream with this spec. `None` means it did not answer —
+    /// which is how a newly added server's test query is judged.
+    pub async fn probe_ech_spec(&self, spec: &str, domain: &str) -> Option<EchSupport> {
+        let up = self.upstreams.iter().find(|u| u.addr.spec == spec)?;
+        let (bytes, id) = probe_query(domain)?;
+        self.probe_one(up, &bytes, id).await
+    }
+
+    async fn probe_one(&self, up: &Upstream, bytes: &[u8], id: u16) -> Option<EchSupport> {
+        match tokio::time::timeout(self.timeout, self.query_one(up, bytes)).await {
+            Ok(Ok(resp)) if resp.metadata.id == id => {
+                let support = if answer_has_ech(&resp) {
+                    EchSupport::Supported
+                } else {
+                    EchSupport::Unsupported
+                };
+                up.set_ech(support);
+                tracing::debug!(upstream = %up.addr.spec, ech = support.as_str(), "ECH probe");
+                Some(support)
+            }
+            _ => None,
+        }
     }
 
     pub async fn resolve(&self, query: &Query) -> Result<(Message, String), String> {
-        if self.upstreams.is_empty() {
-            return Err("no DNS upstreams configured".into());
+        let active = self.active();
+        if active.is_empty() {
+            return Err(if self.upstreams.is_empty() {
+                "no DNS upstreams configured".into()
+            } else {
+                "every DNS upstream is disabled".to_string()
+            });
         }
         let (bytes, id) = self.encode(query)?;
         match self.mode {
-            UpstreamMode::Parallel if self.upstreams.len() > 1 => {
-                self.resolve_parallel(&bytes, id).await
+            UpstreamMode::Parallel if active.len() > 1 => {
+                self.resolve_parallel(&active, &bytes, id).await
             }
-            UpstreamMode::LoadBalance if self.upstreams.len() > 1 => {
-                self.resolve_sequential(self.load_balanced_order(), &bytes, id).await
+            UpstreamMode::LoadBalance if active.len() > 1 => {
+                self.resolve_sequential(self.load_balanced_order(active), &bytes, id).await
             }
-            _ => self.resolve_sequential(self.failover_order(), &bytes, id).await,
+            _ => self.resolve_sequential(self.failover_order(active), &bytes, id).await,
         }
     }
 
@@ -342,17 +482,17 @@ impl Resolver {
         Ok((bytes, id))
     }
 
-    fn failover_order(&self) -> Vec<usize> {
-        let start = self.preferred.load(Ordering::Relaxed) % self.upstreams.len();
-        (0..self.upstreams.len())
-            .map(|i| (start + i) % self.upstreams.len())
-            .collect()
+    fn failover_order(&self, active: Vec<usize>) -> Vec<usize> {
+        let preferred = self.preferred.load(Ordering::Relaxed);
+        let start = active.iter().position(|&i| i == preferred).unwrap_or(0);
+        (0..active.len()).map(|k| active[(start + k) % active.len()]).collect()
     }
 
-    fn load_balanced_order(&self) -> Vec<usize> {
-        let weights: Vec<u64> = self.upstreams.iter().map(|u| u.stats.weight()).collect();
-        let picked = pick_weighted(&weights, random_u64());
-        let mut order: Vec<usize> = (0..self.upstreams.len()).collect();
+    fn load_balanced_order(&self, active: Vec<usize>) -> Vec<usize> {
+        let weights: Vec<u64> =
+            active.iter().map(|&i| self.upstreams[i].stats.weight()).collect();
+        let picked = active[pick_weighted(&weights, random_u64())];
+        let mut order = active;
         order.sort_by_key(|&i| self.upstreams[i].stats.ewma_rtt_us.load(Ordering::Relaxed));
         order.retain(|&i| i != picked);
         order.insert(0, picked);
@@ -373,7 +513,7 @@ impl Resolver {
                 Ok(Ok(resp)) if resp.metadata.id == id => {
                     up.stats.record(started.elapsed(), false);
                     self.preferred.store(idx, Ordering::Relaxed);
-                    return Ok((resp, up.addr.spec.clone()));
+                    return Ok((resp, up.addr.label()));
                 }
                 Ok(Ok(_)) => last_err = format!("{}: response id mismatch", up.addr.spec),
                 Ok(Err(e)) => last_err = format!("{}: {e}", up.addr.spec),
@@ -385,10 +525,15 @@ impl Resolver {
         Err(last_err)
     }
 
-    async fn resolve_parallel(&self, bytes: &[u8], id: u16) -> Result<(Message, String), String> {
-        let mut in_flight: FuturesUnordered<_> = self
-            .upstreams
+    async fn resolve_parallel(
+        &self,
+        active: &[usize],
+        bytes: &[u8],
+        id: u16,
+    ) -> Result<(Message, String), String> {
+        let mut in_flight: FuturesUnordered<_> = active
             .iter()
+            .map(|&i| &self.upstreams[i])
             .map(|up| async move {
                 let started = Instant::now();
                 let outcome = tokio::time::timeout(self.timeout, self.query_one(up, bytes)).await;
@@ -401,7 +546,7 @@ impl Resolver {
             match outcome {
                 Ok(Ok(resp)) if resp.metadata.id == id => {
                     up.stats.record(elapsed, false);
-                    return Ok((resp, up.addr.spec.clone()));
+                    return Ok((resp, up.addr.label()));
                 }
                 Ok(Ok(_)) => last_err = format!("{}: response id mismatch", up.addr.spec),
                 Ok(Err(e)) => last_err = format!("{}: {e}", up.addr.spec),
@@ -516,6 +661,11 @@ impl Resolver {
     }
 
     async fn target_addr(&self, up: &Upstream) -> Result<SocketAddr, String> {
+        // A pinned address wins: it was resolved when the server was added, so
+        // no lookup (and no bootstrap server) is needed to use it.
+        if let Some(ip) = up.addr.ip {
+            return Ok(SocketAddr::new(IpAddr::V4(ip), up.addr.port));
+        }
         if let Ok(ip) = up.addr.host.parse::<IpAddr>() {
             return Ok(SocketAddr::new(ip, up.addr.port));
         }
@@ -645,6 +795,64 @@ mod tests {
         assert_eq!((u.scheme, u.port), (Scheme::Udp, 53));
         let u = UpstreamAddr::parse("udp://9.9.9.9:5300").unwrap();
         assert_eq!((u.scheme, u.port), (Scheme::Udp, 5300));
+    }
+
+    #[test]
+    fn a_spec_carries_its_name_pinned_address_and_on_off_state() {
+        let u = UpstreamAddr::parse(
+            "https://dns.example:443/dns-query?ip=1.1.1.1#Cloudflare",
+        )
+        .unwrap();
+        assert_eq!((u.name.as_str(), u.enabled), ("Cloudflare", true));
+        // The hostname is what TLS verifies; the pinned address is what we dial.
+        assert_eq!((u.host.as_str(), u.hostname()), ("dns.example", "dns.example"));
+        assert_eq!(u.path, "/dns-query");
+        assert_eq!(u.address(), "1.1.1.1:443");
+        assert_eq!(u.label(), "Cloudflare");
+
+        let u = UpstreamAddr::parse("!tls://9.9.9.9#Quad 9").unwrap();
+        assert_eq!((u.name.as_str(), u.enabled, u.port), ("Quad 9", false, 853));
+        assert_eq!(u.scheme.as_str(), "tls");
+        // A bare address is its own target, and reads as "no hostname".
+        assert_eq!((u.ip, u.hostname(), u.address().as_str()), (None, "", "9.9.9.9:853"));
+
+        // An unnamed spec falls back to itself as the label.
+        let u = UpstreamAddr::parse("udp://8.8.8.8").unwrap();
+        assert_eq!((u.name.as_str(), u.label().as_str()), ("", "udp://8.8.8.8"));
+
+        let err = UpstreamAddr::parse("tls://dns.example?ip=nope").unwrap_err();
+        assert!(err.contains("not an IPv4 address"), "err: {err}");
+    }
+
+    #[tokio::test]
+    async fn disabled_upstreams_are_never_queried() {
+        let up = udp_upstream(std::net::Ipv4Addr::new(4, 4, 4, 4), Duration::ZERO).await;
+        for mode in [UpstreamMode::Failover, UpstreamMode::LoadBalance, UpstreamMode::Parallel] {
+            let resolver = Resolver::new(
+                &[format!("!udp://{up}#parked"), "udp://127.0.0.1:1#live".into()],
+                mode,
+                &[],
+                300,
+            )
+            .unwrap();
+            // The only reachable server is parked, so the query fails on the live
+            // (dead) one instead of quietly using it.
+            let err = resolver.resolve(&a_query("example.com.")).await.unwrap_err();
+            assert!(err.starts_with("udp://127.0.0.1:1#live"), "{mode:?}: {err}");
+            let parked = resolver.upstream_stats().into_iter().find(|s| !s.enabled).unwrap();
+            assert_eq!((parked.queries, parked.name.as_str()), (0, "parked"));
+        }
+
+        let all_off = Resolver::new(&[format!("!udp://{up}")], UpstreamMode::Failover, &[], 300).unwrap();
+        let err = all_off.resolve(&a_query("example.com.")).await.unwrap_err();
+        assert!(err.contains("every DNS upstream is disabled"), "err: {err}");
+    }
+
+    #[tokio::test]
+    async fn resolve_host_passes_addresses_through_and_needs_bootstrap_for_names() {
+        let resolver = Resolver::new(&[], UpstreamMode::Failover, &[], 300).unwrap();
+        assert_eq!(resolver.resolve_host("1.2.3.4").await.unwrap().to_string(), "1.2.3.4");
+        assert!(resolver.resolve_host("dns.example").await.is_err());
     }
 
     #[test]

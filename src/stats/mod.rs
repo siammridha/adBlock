@@ -338,6 +338,9 @@ impl SharedState {
             .map(|b| b.to_string());
         let event = Event { ts_ms: now_ms(), kind, message: message.into(), trace };
         if kind == EventKind::Error {
+            // Every error also goes to the terminal — the dashboard's error count
+            // is otherwise the only place it shows up. Blocked/Info stay quiet.
+            tracing::error!("{}", event.message);
             self.errors.push(&event);
         }
         if self.ui_connected() {

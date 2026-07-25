@@ -107,6 +107,10 @@ impl DnsRuntime {
     }
 
     pub async fn start_initial(self: &Arc<Self>) -> Result<()> {
+        // The resolver serves in-process callers whether or not the listener is
+        // enabled, so probe ECH for the life of the process, not the listener.
+        // Detached: it runs until the process exits.
+        let _ = self.service.spawn_ech_probe();
         let mut inner = self.inner.lock().await;
         if inner.enabled {
             match self.service.start(inner.listen).await {

@@ -70,7 +70,7 @@
   /* dashboard overview cards */
   .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; }
   .cards .card { background:var(--panel2); border:1px solid var(--border);
-    border-radius:10px; padding:14px 16px; }
+    border-radius:10px; padding:15px 15px; }
   .cards .cv { font-size:22px; font-weight:700; font-variant-numeric:tabular-nums; }
   .cards .cl { color:var(--muted); font-size:11px; text-transform:uppercase;
     letter-spacing:.06em; margin-top:2px; }
@@ -114,6 +114,8 @@
   .row:last-child { border-bottom:none; }
   .row .hint { color:var(--muted); font-size:12px; }
   .hint { color:var(--muted); font-size:12px; }
+  /* A status line reporting a failure, set by say(). */
+  .hint.bad, .bad { color:var(--error); }
   button { background:var(--accent); color:#fff; border:none; border-radius:8px;
     padding:8px 14px; font-weight:600; cursor:pointer; }
   button.ghost { background:var(--panel2); border:1px solid var(--border); color:var(--fg); }
@@ -333,7 +335,7 @@
         <svg class="spark" viewBox="0 0 143 26" preserveAspectRatio="none"><polyline id="sp-dq" style="stroke:var(--info)"/></svg></div>
       <div class="card"><div class="cv" id="ov-db" style="color:var(--blocked)">–</div><div class="cl" id="ov-db-l">dns blocked</div>
         <svg class="spark" viewBox="0 0 143 26" preserveAspectRatio="none"><polyline id="sp-db" style="stroke:var(--blocked)"/></svg></div>
-      <div class="card"><div class="cv" id="ov-dc">–</div><div class="cl" id="ov-dc-l">dns from cache</div>
+      <div class="card"><div class="cv" id="ov-dc">–</div><div class="cl" id="ov-dc-l">dns cache</div>
         <svg class="spark" viewBox="0 0 143 26" preserveAspectRatio="none"><polyline id="sp-dc" style="stroke:var(--ok)"/></svg></div>
     </div>
     <p class="hint" style="margin-bottom:0">Everything above covers the <b>last 24 hours</b>
@@ -405,7 +407,6 @@
     </div>
     <div class="log vscroll" id="dq-log"></div>
     <div class="empty" id="dq-empty">no DNS queries logged yet — browse through the proxy or point a client at the DNS listener</div>
-    <p class="hint" id="dns-conf">loading resolver status…</p>
   </section>
 
   <section class="tabpane" id="pane-dnsrw">
@@ -452,11 +453,35 @@
 
     <div class="panel">
       <h2>Upstream servers</h2>
-      <p class="hint" style="margin-top:0">One per line (IPv4 only — the resolver
-        doesn't speak IPv6): <code>https://host/dns-query</code> (DoH) ·
-        <code>tls://host</code> (DoT) ·
-        <code>udp://ip</code> / bare IP / <code>tcp://ip</code> (plain DNS).</p>
-      <textarea id="up-list" spellcheck="false" rows="4"></textarea>
+      <div class="log" id="up-cfg-log">
+        <table>
+          <thead><tr><th style="width:44px">On</th><th>Name</th>
+            <th style="width:70px">Type</th>
+            <th title="the hostname queries are sent to — what TLS verifies against">Host</th>
+            <th title="the address it resolved to when it was added">Address</th>
+            <th style="width:100px" title="Does this server return ECH configs in HTTPS answers?">ECH</th>
+            <th style="width:60px"></th></tr></thead>
+          <tbody id="up-rows"></tbody>
+        </table>
+      </div>
+      <div class="actions" style="flex-wrap:wrap">
+        <input type="text" id="up-name" placeholder="Name — e.g. Cloudflare" style="flex:1;min-width:150px">
+        <input type="text" id="up-host" placeholder="Host — one.one.one.one · 9.9.9.9 · tls://dns.nextdns.io" style="flex:2;min-width:210px">
+        <select id="up-scheme">
+          <option value="https">DoH — HTTPS</option>
+          <option value="tls">DoT — TLS</option>
+          <option value="udp">Plain DNS — UDP</option>
+          <option value="tcp">Plain DNS — TCP</option>
+        </select>
+        <button id="up-add">Add server</button>
+        <span class="hint" id="up-add-status"></span>
+      </div>
+      <p class="hint" style="margin-top:0">Add stores the server's IPv4 address (IPv4 only) and
+        test-queries it; one that doesn't answer is rejected. The address is fixed — if it changes,
+        delete and re-add. Non-standard port: <code>host:8443</code>. A full address like
+        <code>tls://dns.nextdns.io</code> overrides the transport picker. Unchecking <b>On</b>
+        keeps a server but sends it no queries.
+        Need a server? <a href="https://adguard-dns.io/kb/general/dns-providers/?clid=Knriea&amp;utm_campaign=dns_kb_providers&amp;utm_medium=ui&amp;utm_source=home" target="_blank" rel="noopener">Browse DNS providers</a>.</p>
       <div class="actions" style="flex-wrap:wrap">
         <label for="up-mode">Mode</label>
         <select id="up-mode">
@@ -466,11 +491,11 @@
         </select>
       </div>
       <div class="actions" style="flex-wrap:wrap">
-        <label for="up-bootstrap">Bootstrap (plain-DNS IPs that resolve upstream <em>hostnames</em>, comma-separated)</label>
+        <label for="up-bootstrap">Bootstrap (plain-DNS IPs used to resolve the hostnames you add, comma-separated)</label>
         <input type="text" id="up-bootstrap" placeholder="1.1.1.1:53, 8.8.8.8:53" style="flex:1;min-width:220px">
       </div>
       <div class="actions">
-        <button id="up-save">Save upstreams</button>
+        <button id="up-save">Save mode &amp; bootstrap</button>
         <span class="hint" id="up-status"></span>
       </div>
     </div>
@@ -516,12 +541,16 @@
       <div class="actions" style="margin-top:0;flex-wrap:wrap">
         <label for="ech-domain">Probe (canary) domain</label>
         <input type="text" id="ech-domain" placeholder="crypto.cloudflare.com" style="flex:1;min-width:220px">
+        <label for="ech-mins">Re-probe every (minutes, 0 disables)</label>
+        <input type="number" id="ech-mins" min="0" step="1" style="width:90px">
         <button id="ech-save">Save</button>
+        <button class="ghost" id="ech-probe" title="probe every enabled upstream right now">Probe now</button>
         <span class="hint" id="ech-status"></span>
       </div>
       <p class="hint">Must be a domain that publishes an ECHConfigList, or every upstream reads as
-        "no ECH". Leave blank to disable detection. Results appear in the <b>ECH</b> column of the
-        DNS upstreams table on the <b>Dashboard</b>; each upstream is re-probed hourly.</p>
+        "no ECH". Leave the domain blank, or set the interval to 0, to disable detection. Results
+        appear in the <b>ECH</b> column of the upstream tables here and on the <b>Dashboard</b>.
+        Disabled servers are not probed.</p>
     </div>
 
     <div class="panel">
@@ -832,6 +861,15 @@
 const $ = id => document.getElementById(id);
 let errorTotal = 0;
 
+// Write a status line under a form. Every one of them uses the same two
+// shapes — "failed: …" (plus a couple of "… is required" guards) for problems,
+// anything else for progress or success — so the colour follows the text and
+// each caller stays a plain one-liner.
+function say(el, msg){
+  el.textContent = msg;
+  el.classList.toggle("bad", /^failed|required$|^DNS resolver disabled/.test(msg));
+}
+
 function fmtDur(s){
   const d=Math.floor(s/86400), h=Math.floor(s%86400/3600),
         m=Math.floor(s%3600/60), sec=s%60;
@@ -946,7 +984,7 @@ function renderStats(s){
     $("ov-db").textContent = t.dns_blocked.toLocaleString();
     $("ov-db-l").textContent = "dns blocked" + pctOf(t.dns_blocked, t.dns_queries);
     $("ov-dc").textContent = t.dns_cached.toLocaleString();
-    $("ov-dc-l").textContent = "dns from cache" + pctOf(t.dns_cached, t.dns_queries);
+    $("ov-dc-l").textContent = "dns cache" + pctOf(t.dns_cached, t.dns_queries);
     spark("sp-req", w.series.requests);
     spark("sp-blk", w.series.blocked);
     spark("sp-err", w.series.errors);
@@ -998,15 +1036,15 @@ async function refreshServer(){
 
 async function postServer(body, statusId, busyMsg){
   const el = $(statusId);
-  el.textContent = busyMsg;
+  say(el, busyMsg);
   try {
     const r = await fetch("/api/server/config", {method:"POST",
       headers:{"content-type":"application/json"}, body:JSON.stringify(body)});
     const d = await r.json();
     if(!r.ok) throw new Error(d.error || r.status);
-    el.textContent = "saved ✓ (applied live, persisted)";
+    say(el, "saved ✓ (applied live, persisted)");
     refreshServer();
-  } catch(e){ el.textContent = "failed: " + e.message; }
+  } catch(e){ say(el, "failed: " + e.message); }
 }
 $("px-enabled").addEventListener("change", ()=>{ $("px-listen").disabled = !$("px-enabled").checked; });
 $("px-save").addEventListener("click", ()=>{
@@ -1015,7 +1053,7 @@ $("px-save").addEventListener("click", ()=>{
   const body = {proxy_enabled: enabled};
   if(enabled){
     const listen = $("px-listen").value.trim();
-    if(!listen){ $("px-status").textContent = "a listen address is required"; return; }
+    if(!listen){ say($("px-status"), "a listen address is required"); return; }
     body.proxy_listen = listen;
   }
   postServer(body, "px-status", "applying…");
@@ -1030,7 +1068,7 @@ async function refreshProxyCfg(){
   } catch(e){}
 }
 $("eg-save").addEventListener("click", async ()=>{
-  const el = $("eg-status"); el.textContent = "saving…";
+  const el = $("eg-status"); say(el, "saving…");
   const body = {
     resolver_only: $("eg-resolver-only").checked,
     use_ech: $("eg-use-ech").checked,
@@ -1041,9 +1079,9 @@ $("eg-save").addEventListener("click", async ()=>{
       headers:{"content-type":"application/json"}, body: JSON.stringify(body)});
     const d = await r.json();
     if(!r.ok) throw new Error(d.error || r.status);
-    el.textContent = "saved ✓ (applied live, persisted)";
+    say(el, "saved ✓ (applied live, persisted)");
     refreshProxyCfg();
-  } catch(e){ el.textContent = "failed: " + e.message; }
+  } catch(e){ say(el, "failed: " + e.message); }
 });
 
 // ---- certificates tab -----------------------------------------------------
@@ -1081,21 +1119,21 @@ async function refreshCerts(){
         if(!confirm("Delete stored CA \""+b.dataset.name+"\"?")) return;
         certAction({action:"delete", name:b.dataset.name}, "deleting…", status, false);
       });
-    status.textContent = "";
-  } catch(e){ status.textContent = "failed: " + e.message; }
+    say(status, "");
+  } catch(e){ say(status, "failed: " + e.message); }
 }
 
 async function certAction(body, busyMsg, statusEl, restartHint){
-  statusEl.textContent = busyMsg;
+  say(statusEl, busyMsg);
   try {
     const r = await fetch("/api/certs", {method:"POST",
       headers:{"content-type":"application/json"}, body: JSON.stringify(body)});
     const d = await r.json();
     if(!r.ok) throw new Error(d.error || r.status);
-    statusEl.textContent = restartHint ? "done ✓ — restart the proxy to apply" : "done ✓";
+    say(statusEl, restartHint ? "done ✓ — restart the proxy to apply" : "done ✓");
     refreshCerts();
     return d;
-  } catch(e){ statusEl.textContent = "failed: " + e.message; throw e; }
+  } catch(e){ say(statusEl, "failed: " + e.message); throw e; }
 }
 
 $("ca-add-btn").addEventListener("click", async ()=>{
@@ -1121,7 +1159,7 @@ $("ca-gen-btn").addEventListener("click", async ()=>{
       const a = document.createElement("a");
       a.href = url; a.download = name + ".pem"; a.click();
       URL.revokeObjectURL(url);
-      status.textContent = "generated ✓ — certificate downloaded; activate it to use it (needs restart)";
+      say(status, "generated ✓ — certificate downloaded; activate it to use it (needs restart)");
     }
   } catch(e){}
 });
@@ -1133,7 +1171,7 @@ $("dns-svc-save").addEventListener("click", ()=>{
   const body = {dns_enabled: enabled};
   if(enabled){
     const listen = $("dns-listen").value.trim();
-    if(!listen){ $("dns-svc-status").textContent = "a listen address is required"; return; }
+    if(!listen){ say($("dns-svc-status"), "a listen address is required"); return; }
     body.dns_listen = listen;
   }
   postServer(body, "dns-svc-status", "applying…");
@@ -1336,18 +1374,18 @@ async function refreshBlocklists(){
 
 // ---- custom filters tab: always-open editor for the `custom` list ---------
 async function loadCustom(){
-  $("cf-status").textContent = "loading…";
+  say($("cf-status"), "loading…");
   try {
     const r = await fetch("/api/blocklist?name=custom");
     const d = await r.json();
     if(d.error) throw new Error(d.error);
     $("cf-text").value = d.text;
-    $("cf-status").textContent = "";
-  } catch(e){ $("cf-status").textContent = "failed: " + e.message; }
+    say($("cf-status"), "");
+  } catch(e){ say($("cf-status"), "failed: " + e.message); }
 }
 $("cf-reload").addEventListener("click", loadCustom);
 $("cf-save").addEventListener("click", async ()=>{
-  $("cf-status").textContent = "saving + rebuilding engine…";
+  say($("cf-status"), "saving + rebuilding engine…");
   $("cf-save").disabled = true;
   try {
     const r = await fetch("/api/blocklists",{method:"POST",
@@ -1355,9 +1393,9 @@ $("cf-save").addEventListener("click", async ()=>{
       body:JSON.stringify({name:"custom", rules:$("cf-text").value, replace:true})});
     const d = await r.json();
     if(!r.ok) throw new Error(d.error || r.status);
-    $("cf-status").textContent = "saved ✓ (engine rebuilt)";
+    say($("cf-status"), "saved ✓ (engine rebuilt)");
     refreshBlocklists();
-  } catch(e){ $("cf-status").textContent = "failed: " + e.message; }
+  } catch(e){ say($("cf-status"), "failed: " + e.message); }
   $("cf-save").disabled = false;
 });
 
@@ -1367,17 +1405,17 @@ async function deleteList(name){
 }
 
 async function postBlocklist(body, busyMsg){
-  $("bl-status").textContent = busyMsg;
+  say($("bl-status"), busyMsg);
   $("bl-add").disabled = true;
   try {
     const r = await fetch("/api/blocklists",{method:"POST",
       headers:{"content-type":"application/json"}, body:JSON.stringify(body)});
     const d = await r.json();
     if(!r.ok) throw new Error(d.error || r.status);
-    $("bl-status").textContent = "done ✓ (engine rebuilt)";
+    say($("bl-status"), "done ✓ (engine rebuilt)");
     $("bl-url").value = "";
     refreshBlocklists();
-  } catch(e){ $("bl-status").textContent = "failed: " + e.message; }
+  } catch(e){ say($("bl-status"), "failed: " + e.message); }
   $("bl-add").disabled = false;
 }
 $("bl-add").addEventListener("click", ()=>{
@@ -1403,17 +1441,17 @@ async function refreshExclusions(){
 }
 
 async function postExclusion(body, busyMsg){
-  $("ex-status").textContent = busyMsg;
+  say($("ex-status"), busyMsg);
   $("ex-add").disabled = true;
   try {
     const r = await fetch("/api/exclusions",{method:"POST",
       headers:{"content-type":"application/json"}, body:JSON.stringify(body)});
     const d = await r.json();
     if(!r.ok) throw new Error(d.error || r.status);
-    $("ex-status").textContent = "done ✓";
+    say($("ex-status"), "done ✓");
     $("ex-domain").value = "";
     refreshExclusions();
-  } catch(e){ $("ex-status").textContent = "failed: " + e.message; }
+  } catch(e){ say($("ex-status"), "failed: " + e.message); }
   $("ex-add").disabled = false;
 }
 $("ex-add").addEventListener("click", ()=>{
@@ -1440,17 +1478,17 @@ async function refreshStatsExclusions(){
 }
 
 async function postStatsExclusion(body, busyMsg){
-  $("sx-status").textContent = busyMsg;
+  say($("sx-status"), busyMsg);
   $("sx-add").disabled = true;
   try {
     const r = await fetch("/api/stats/exclusions",{method:"POST",
       headers:{"content-type":"application/json"}, body:JSON.stringify(body)});
     const d = await r.json();
     if(!r.ok) throw new Error(d.error || r.status);
-    $("sx-status").textContent = "done ✓";
+    say($("sx-status"), "done ✓");
     $("sx-domain").value = "";
     refreshStatsExclusions();
-  } catch(e){ $("sx-status").textContent = "failed: " + e.message; }
+  } catch(e){ say($("sx-status"), "failed: " + e.message); }
   $("sx-add").disabled = false;
 }
 $("sx-add").addEventListener("click", ()=>{
@@ -1479,7 +1517,7 @@ async function runRuleTest(){
     else if(!blocked) html += `<p class="hint">no rule matched this URL for type
       “${esc(d.request_type)}”. Try a different type, or add a rule above.</p>`;
     $("rt-result").innerHTML = html;
-  } catch(e){ $("rt-result").innerHTML = `<p class="hint">failed: ${esc(e.message)}</p>`; }
+  } catch(e){ $("rt-result").innerHTML = `<p class="hint bad">failed: ${esc(e.message)}</p>`; }
 }
 $("rt-run").addEventListener("click", runRuleTest);
 $("rt-url").addEventListener("keydown", e=>{ if(e.key==="Enter") runRuleTest(); });
@@ -2066,17 +2104,7 @@ $("dq-reload").addEventListener("click", ()=>{
 async function refreshDns(){
   try {
     const r = await fetch("/api/dns"); const d = await r.json();
-    if(!d.enabled){
-      $("dns-conf").textContent = "DNS resolver disabled (set dns.enabled = true).";
-      return;
-    }
-    const total = d.cache.hits + d.cache.misses;
-    const rate = total ? ` · hit rate ${(100*d.cache.hits/total).toFixed(0)}%` : "";
-    $("dns-conf").textContent =
-      `listening on ${d.listen} (UDP + TCP) · upstreams (${d.upstream_mode}): ${d.upstreams.join(", ")}`+
-      ` · blocking: ${d.blocking_mode}`+
-      ` · ECH: ${d.strip_ech ? "stripped from answers" : "passed through"}`+
-      ` · cache ${d.cache.entries}/${d.cache.capacity}${rate}`;
+    if(!d.enabled) return;
     // Show every configured upstream from the start, even ones no query has
     // hit yet (idle ones report zero queries and no timing until traffic).
     const stats = d.upstream_stats || [];
@@ -2090,7 +2118,12 @@ async function refreshDns(){
       unsupported: ['k error', 'no ECH','strips or omits ECH configs from HTTPS answers'],
     };
     stats.forEach((s, i)=>{
-      trs[i].querySelector(".us-spec").textContent = s.spec;
+      const spec = trs[i].querySelector(".us-spec");
+      spec.textContent = s.name;
+      spec.title = s.spec;
+      spec.insertAdjacentHTML("beforeend",
+        `<span class="hint" style="margin-left:8px">${esc(s.scheme)} · ${esc(s.host || s.address)}</span>`+
+        (s.enabled ? "" : `<span class="k" style="margin-left:6px" title="parked — gets no queries">off</span>`));
       trs[i].querySelector(".us-q").textContent = s.queries;
       trs[i].querySelector(".us-f").textContent = s.failures;
       trs[i].querySelector(".us-rtt").textContent =
@@ -2141,17 +2174,17 @@ async function refreshRewrites(){
 }
 
 async function postRewrite(body, busyMsg){
-  $("rw-status").textContent = busyMsg;
+  say($("rw-status"), busyMsg);
   $("rw-add").disabled = true;
   try {
     const r = await fetch("/api/dns/rewrites",{method:"POST",
       headers:{"content-type":"application/json"}, body:JSON.stringify(body)});
     const d = await r.json();
     if(!r.ok) throw new Error(d.error || r.status);
-    $("rw-status").textContent = "done ✓ (takes effect on the next query)";
+    say($("rw-status"), "done ✓ (takes effect on the next query)");
     $("rw-domain").value = ""; $("rw-answer").value = "";
     refreshRewrites();
-  } catch(e){ $("rw-status").textContent = "failed: " + e.message; }
+  } catch(e){ say($("rw-status"), "failed: " + e.message); }
   $("rw-add").disabled = false;
 }
 $("rw-add").addEventListener("click", ()=>{
@@ -2166,38 +2199,112 @@ async function loadDnsCfg(){
   try {
     const r = await fetch("/api/dns"); const d = await r.json();
     if(!d.enabled){
-      for(const id of ["rw-add","up-save","ca-save","ech-save","lv6-save","dnscfg-reset"]) $(id).disabled = true;
-      $("up-status").textContent = "DNS resolver disabled (set dns.enabled = true)";
+      for(const id of ["rw-add","up-add","up-save","ca-save","ech-save","ech-probe","lv6-save","dnscfg-reset"]) $(id).disabled = true;
+      say($("up-status"), "DNS resolver disabled (set dns.enabled = true)");
       return;
     }
-    $("up-list").value = (d.upstreams || []).join("\n");
+    renderUpstreamRows(d.upstream_stats || []);
     $("up-mode").value = d.upstream_mode || "failover";
     $("up-bootstrap").value = (d.bootstrap || []).join(", ");
     $("ca-size").value = d.cache.capacity;
     $("ca-min").value = d.cache.override_min_ttl_secs;
     $("ca-max").value = d.cache.override_max_ttl_secs;
     $("ech-domain").value = d.ech_probe_domain || "";
+    $("ech-mins").value = d.ech_probe_mins;
     $("lv6-log").checked = !!d.log_ipv6;
   } catch(e){}
 }
 
+// The upstream server table on the DNS settings tab: one row per configured
+// server, with its on/off switch and delete button.
+function renderUpstreamRows(stats){
+  const echBadge = {
+    supported:   ['k ok',    'ECH',    'returns ECH configs in HTTPS answers'],
+    unsupported: ['k error', 'no ECH', 'strips or omits ECH configs from HTTPS answers'],
+  };
+  $("up-rows").innerHTML = stats.map(()=>
+    `<tr><td><input type="checkbox" class="ur-on"></td><td class="msg ur-name"></td>`+
+    `<td class="ur-scheme"></td><td class="msg ur-host"></td><td class="msg ur-addr"></td>`+
+    `<td class="ur-ech"></td><td><button class="ghost mini ur-del">del</button></td></tr>`
+  ).join("") || `<tr><td colspan="7" class="hint">no upstream servers — add one below</td></tr>`;
+  const trs = $("up-rows").querySelectorAll("tr");
+  stats.forEach((s, i)=>{
+    const tr = trs[i];
+    tr.querySelector(".ur-name").textContent = s.name;
+    const hostCell = tr.querySelector(".ur-host");
+    hostCell.textContent = s.host || "—";
+    if(!s.host) hostCell.title = "added as a plain address — no hostname";
+    tr.querySelector(".ur-addr").textContent = s.address;
+    tr.querySelector(".ur-scheme").textContent = s.scheme;
+    const cell = tr.querySelector(".ur-ech"), b = echBadge[s.ech];
+    if(b){ cell.innerHTML = `<span class="${b[0]}" title="${b[2]}">${b[1]}</span>`; }
+    else { cell.textContent = "—"; cell.title = "not yet probed"; }
+    const on = tr.querySelector(".ur-on");
+    on.checked = s.enabled;
+    on.title = s.enabled ? "sending queries — uncheck to park" : "parked — no queries sent";
+    on.addEventListener("change", ()=>
+      postUpstream({spec:s.spec, enabled:on.checked},
+        (on.checked ? "enabling " : "disabling ") + s.name + "…"));
+    tr.querySelector(".ur-del").addEventListener("click", ()=>{
+      if(confirm(`Remove upstream "${s.name}" (${s.address})?`))
+        postUpstream({spec:s.spec, delete:true}, "removing " + s.name + "…");
+    });
+  });
+}
+
+async function postUpstream(body, busyMsg){
+  const el = $("up-add-status");
+  say(el, busyMsg);
+  $("up-add").disabled = true;
+  try {
+    const r = await fetch("/api/dns/upstreams",{method:"POST",
+      headers:{"content-type":"application/json"}, body:JSON.stringify(body)});
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.error || r.status);
+    say(el, "done ✓");
+    // Only an add came from the form, so only an add empties it.
+    if(body.name){ $("up-name").value = ""; $("up-host").value = ""; }
+    loadDnsCfg(); refreshDns();
+  } catch(e){ say(el, "failed: " + e.message); loadDnsCfg(); }
+  $("up-add").disabled = false;
+}
+$("up-add").addEventListener("click", ()=>{
+  const name = $("up-name").value.trim(), host = $("up-host").value.trim();
+  if(!name || !host){ say($("up-add-status"), "a name and a host are required"); return; }
+  postUpstream({name, host, scheme: $("up-scheme").value},
+    "resolving " + host + " and probing ECH…");
+});
+$("up-host").addEventListener("keydown", e=>{ if(e.key==="Enter") $("up-add").click(); });
+
+$("ech-probe").addEventListener("click", async ()=>{
+  const b = $("ech-probe");
+  b.disabled = true;
+  say($("ech-status"), "probing every enabled upstream…");
+  try {
+    const r = await fetch("/api/dns/ech-probe", {method:"POST"});
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.error || r.status);
+    say($("ech-status"), `${d.answered} upstream(s) answered`);
+    loadDnsCfg(); refreshDns();
+  } catch(e){ say($("ech-status"), "failed: " + e.message); }
+  b.disabled = false;
+});
+
 async function postDnsConfig(body, statusEl, busyMsg){
   const el = $(statusEl);
-  el.textContent = busyMsg;
+  say(el, busyMsg);
   try {
     const r = await fetch("/api/dns/config",{method:"POST",
       headers:{"content-type":"application/json"}, body:JSON.stringify(body)});
     const d = await r.json();
     if(!r.ok) throw new Error(d.error || r.status);
-    el.textContent = "saved ✓ (applied live, persisted)";
+    say(el, "saved ✓ (applied live, persisted)");
     loadDnsCfg(); refreshDns();
-  } catch(e){ el.textContent = "failed: " + e.message; }
+  } catch(e){ say(el, "failed: " + e.message); }
 }
 $("up-save").addEventListener("click", ()=>{
-  const upstreams = $("up-list").value.split("\n").map(s=>s.trim()).filter(Boolean);
   const bootstrap = $("up-bootstrap").value.split(",").map(s=>s.trim()).filter(Boolean);
-  if(!upstreams.length){ $("up-status").textContent = "at least one upstream is required"; return; }
-  postDnsConfig({upstreams, upstream_mode: $("up-mode").value, bootstrap},
+  postDnsConfig({upstream_mode: $("up-mode").value, bootstrap},
     "up-status", "validating + applying…");
 });
 $("ca-save").addEventListener("click", ()=>{
@@ -2209,20 +2316,23 @@ $("ca-save").addEventListener("click", ()=>{
 });
 $("ech-save").addEventListener("click", ()=>{
   // Empty is valid — it disables ECH probing — so send it verbatim (trimmed).
-  postDnsConfig({ech_probe_domain: $("ech-domain").value.trim()}, "ech-status", "applying…");
+  postDnsConfig({
+    ech_probe_domain: $("ech-domain").value.trim(),
+    ech_probe_mins: Math.max(0, parseInt($("ech-mins").value) || 0),
+  }, "ech-status", "applying…");
 });
 $("lv6-save").addEventListener("click", ()=>{
   postDnsConfig({log_ipv6: $("lv6-log").checked}, "lv6-status", "applying…");
 });
 $("dnscfg-reset").addEventListener("click", ()=>{
-  if(!confirm("Drop every saved DNS override (upstreams, mode, bootstrap, cache, ECH probe domain, query-log IPv6) and return to base config?")) return;
+  if(!confirm("Drop every saved DNS override (upstream servers, mode, bootstrap, cache, ECH probing, query-log IPv6) and return to base config?")) return;
   postDnsConfig({reset:true}, "ca-status", "resetting…");
 });
 
 async function runDnsTest(){
   const domain = $("dt-domain").value.trim();
   if(!domain) return;
-  $("dt-result").textContent = "checking…";
+  say($("dt-result"), "checking…");
   try {
     const r = await fetch("/api/dns/test", {method:"POST",
       headers:{"content-type":"application/json"}, body:JSON.stringify({domain})});
@@ -2235,7 +2345,7 @@ async function runDnsTest(){
       const c = $("dt-result").querySelector("code");
       c.textContent = d.filter + (d.list ? ` — ${d.list}` : "");
     }
-  } catch(e){ $("dt-result").textContent = "failed: " + e.message; }
+  } catch(e){ say($("dt-result"), "failed: " + e.message); }
 }
 $("dt-run").addEventListener("click", runDnsTest);
 $("dt-domain").addEventListener("keydown", e=>{ if(e.key==="Enter") runDnsTest(); });
@@ -2253,7 +2363,7 @@ async function loadStatsCfg(){
 }
 $("st-save").addEventListener("click", async ()=>{
   const el = $("st-status");
-  el.textContent = "applying…";
+  say(el, "applying…");
   try {
     const r = await fetch("/api/stats/config",{method:"POST",
       headers:{"content-type":"application/json"},
@@ -2263,9 +2373,9 @@ $("st-save").addEventListener("click", async ()=>{
       })});
     const d = await r.json();
     if(!r.ok) throw new Error(d.error || r.status);
-    el.textContent = "saved ✓ (applied live, persisted)";
+    say(el, "saved ✓ (applied live, persisted)");
     loadStatsCfg();
-  } catch(e){ el.textContent = "failed: " + e.message; }
+  } catch(e){ say(el, "failed: " + e.message); }
 });
 
 let slLibrary = [];

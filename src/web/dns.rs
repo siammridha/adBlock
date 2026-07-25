@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 
 use crate::adblock::api::DnsRuleTest;
 use crate::adblock::api::AdBlocker;
-use crate::dns::api::{DnsConfigCommand, RewriteCommand};
+use crate::dns::api::{DnsConfigCommand, RewriteCommand, UpstreamCommand};
 use crate::dns::api::{DnsService, DnsStatus};
 use crate::stats::api::SharedState;
 
@@ -87,6 +87,31 @@ pub(super) fn edit_rewrites(
     match outcome {
         Ok(()) => json_ok(rewrites_json(dns)),
         Err(e) => json_status(StatusCode::BAD_REQUEST, json!({"error": e.to_string()})),
+    }
+}
+
+pub(super) async fn edit_dns_upstreams(
+    state: &Arc<SharedState>,
+    dns: &Arc<DnsService>,
+    body: &[u8],
+) -> AdminResponse {
+    let cmd = match command(UpstreamCommand::parse(body)) {
+        Ok(cmd) => cmd,
+        Err(resp) => return resp,
+    };
+    match dns.edit_upstreams(cmd).await {
+        Ok(msg) => {
+            state.log_event(crate::stats::api::EventKind::Info, msg);
+            json_ok(dns_json(state, dns))
+        }
+        Err(e) => json_status(StatusCode::BAD_REQUEST, json!({"error": e})),
+    }
+}
+
+pub(super) async fn probe_ech(state: &Arc<SharedState>, dns: &Arc<DnsService>) -> AdminResponse {
+    match dns.probe_ech_now().await {
+        Ok(answered) => json_ok(json!({ "answered": answered, "dns": dns_json(state, dns) })),
+        Err(e) => json_status(StatusCode::BAD_REQUEST, json!({"error": e})),
     }
 }
 

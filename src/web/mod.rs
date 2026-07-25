@@ -38,7 +38,10 @@ mod stats;
 use self::blocklists::{
     blocklist_text_json, blocklists_json, check_rule, scriptlet_source_json, scriptlets_json,
 };
-use self::dns::{check_dns_rule, dns_json, edit_dns_config, edit_rewrites, rewrites_json};
+use self::dns::{
+    check_dns_rule, dns_json, edit_dns_config, edit_dns_upstreams, edit_rewrites, probe_ech,
+    rewrites_json,
+};
 use self::exclusions::{edit_exclusions, exclusions_json};
 use self::respond::{html, json_ok, json_status, text_status};
 use self::server::{edit_proxy_config, edit_server_config};
@@ -222,6 +225,10 @@ impl Admin {
             "/api/dns/test" => check_dns_rule(&self.adblock, body),
             "/api/dns/rewrites" => self.with_dns(|dns| edit_rewrites(&self.state, &dns, body)),
             "/api/dns/config" => self.with_dns(|dns| edit_dns_config(&self.state, &dns, body)),
+            "/api/dns/upstreams" => {
+                edit_dns_upstreams(&self.state, &self.dns_runtime.service(), body).await
+            }
+            "/api/dns/ech-probe" => probe_ech(&self.state, &self.dns_runtime.service()).await,
             _ => text_status(StatusCode::NOT_FOUND, "not found"),
         }
     }

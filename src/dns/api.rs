@@ -5,7 +5,7 @@
 //! lint (`tests/boundaries.rs`) fails any cross-module path that does not go
 //! through a module's `api`.
 
-pub use super::commands::{DnsConfigCommand, RewriteCommand};
+pub use super::commands::{DnsConfigCommand, RewriteCommand, UpstreamCommand};
 pub use super::control::DnsRuntime;
 pub use super::error::{Error, Result};
 pub use super::{BlockingMode, DnsConfig, DnsService, DnsStatus};

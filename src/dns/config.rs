@@ -19,6 +19,7 @@ pub struct DnsConfig {
     pub blocked_ttl_secs: u32,
     pub strip_ech: bool,
     pub ech_probe_domain: String,
+    pub ech_probe_mins: u32,
     pub log_ipv6: bool,
     pub upstream_timeout_ms: u64,
     /// Root of the DNS module's on-disk data tree; its rewrite and settings files
@@ -105,6 +106,7 @@ impl Default for DnsConfig {
             blocked_ttl_secs: 10,
             strip_ech: false,
             ech_probe_domain: "crypto.cloudflare.com".into(),
+            ech_probe_mins: 60,
             log_ipv6: false,
             upstream_timeout_ms: 5_000,
             data_dir: PathBuf::from("data"),

@@ -53,6 +53,7 @@ pub struct DnsStatus {
     pub blocking_mode: &'static str,
     pub strip_ech: bool,
     pub ech_probe_domain: String,
+    pub ech_probe_mins: u32,
     pub log_ipv6: bool,
     pub cache: CacheStatus,
 }
@@ -60,12 +61,11 @@ pub struct DnsStatus {
 pub struct DnsHandles {
     udp: tokio::task::JoinHandle<()>,
     tcp: tokio::task::JoinHandle<()>,
-    probe: tokio::task::JoinHandle<()>,
 }
 
 impl DnsHandles {
     pub async fn shutdown(self) {
-        let tasks = [self.udp, self.tcp, self.probe];
+        let tasks = [self.udp, self.tcp];
         for t in &tasks {
             t.abort();
         }
@@ -84,6 +84,9 @@ pub struct DnsService {
     settings: settings::SettingsStore,
     base: DnsConfig,
     listen: RwLock<SocketAddr>,
+    // Wakes the ECH probe loop when it is parked (empty probe domain) after a
+    // settings change re-enables it.
+    probe_wake: tokio::sync::Notify,
 }
 
 struct LiveDns {
@@ -144,6 +147,7 @@ impl DnsService {
             settings,
             base: cfg.clone(),
             listen: RwLock::new(listen),
+            probe_wake: tokio::sync::Notify::new(),
         }))
     }
 
@@ -154,26 +158,128 @@ impl DnsService {
         let (udp, tcp) = server::bind(listen).await?;
         *self.listen.write().expect("dns listen lock") = listen;
         let (udp, tcp) = server::spawn_listeners(self.clone(), udp, tcp);
-        let probe = self.spawn_ech_probe();
-        Ok(DnsHandles { udp, tcp, probe })
+        Ok(DnsHandles { udp, tcp })
     }
 
-    fn spawn_ech_probe(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
+    /// Spawn the periodic ECH probe. Runs for the life of the resolver, not the
+    /// listener: the resolver serves in-process callers (e.g. the proxy) even
+    /// while the listener is off, so its upstreams' ECH status is still shown
+    /// and still worth probing. Call once.
+    pub(crate) fn spawn_ech_probe(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
         let svc = self.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(5)).await;
             loop {
-                let domain = svc.ech_probe_domain();
-                if !domain.is_empty() {
-                    svc.resolver().probe_ech(&domain).await;
+                let (domain, mins) = svc.probe_schedule();
+                if domain.is_empty() || mins == 0 {
+                    // Nothing to probe. Park until a settings change re-enables it
+                    // instead of waking on a timer to do nothing.
+                    svc.probe_wake.notified().await;
+                    continue;
                 }
-                tokio::time::sleep(Duration::from_secs(3600)).await;
+                svc.resolver().probe_ech(&domain).await;
+                // Re-probe on the configured interval, but wake early if settings
+                // change (e.g. new upstreams or a different probe domain).
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(u64::from(mins) * 60)) => {}
+                    _ = svc.probe_wake.notified() => {}
+                }
             }
         })
     }
 
-    fn ech_probe_domain(&self) -> String {
-        self.live().settings.ech_probe_domain.clone()
+    fn probe_schedule(&self) -> (String, u32) {
+        let live = self.live();
+        (live.settings.ech_probe_domain.clone(), live.settings.ech_probe_mins)
+    }
+
+    /// Probe every enabled upstream for ECH support right now, ignoring the
+    /// interval. Returns how many answered.
+    pub async fn probe_ech_now(&self) -> std::result::Result<usize, String> {
+        let live = self.live();
+        if live.settings.ech_probe_domain.is_empty() {
+            return Err("set an ECH probe domain first".into());
+        }
+        Ok(live.resolver.probe_ech(&live.settings.ech_probe_domain).await)
+    }
+
+    /// Add, remove, or park an upstream server. Adding resolves the hostname so
+    /// only the plain address is stored, then re-probes ECH so the new server's
+    /// support shows immediately.
+    pub async fn edit_upstreams(
+        &self,
+        cmd: commands::UpstreamCommand,
+    ) -> std::result::Result<String, String> {
+        use commands::UpstreamCommand as Cmd;
+        let previous = self.live().settings.upstreams.clone();
+        let mut list = previous.clone();
+        let mut added = None;
+        let find = |list: &[String], spec: &str| {
+            list.iter()
+                .position(|s| s == spec)
+                .ok_or_else(|| format!("no upstream '{spec}'"))
+        };
+        let msg = match cmd {
+            Cmd::Delete { spec } => {
+                list.remove(find(&list, &spec)?);
+                format!("dns upstream removed: {spec}")
+            }
+            Cmd::SetEnabled { spec, enabled } => {
+                let i = find(&list, &spec)?;
+                let bare = spec.trim_start_matches('!').trim_start().to_string();
+                list[i] = if enabled { bare } else { format!("!{bare}") };
+                let addr = upstream::UpstreamAddr::parse(&list[i])?;
+                format!(
+                    "dns upstream {}: {}",
+                    if enabled { "enabled" } else { "disabled" },
+                    addr.label()
+                )
+            }
+            Cmd::Add { name, host, scheme } => {
+                // Parse what was typed first: that validates the transport, the
+                // port, and rejects IPv6 before any network access.
+                let typed = upstream::UpstreamAddr::parse(&format!("{scheme}://{host}"))?;
+                let ip = self.resolver().resolve_host(&typed.host).await?;
+                let std::net::IpAddr::V4(ip) = ip else {
+                    return Err(format!("'{host}' resolves to IPv6 only; the resolver is IPv4-only"));
+                };
+                // Keep the hostname — it is what TLS verifies against — and pin
+                // the address it resolved to so queries skip the lookup.
+                let path = if typed.scheme == upstream::Scheme::Https { &typed.path } else { "" };
+                let pin = if typed.hostname().is_empty() { String::new() } else { format!("?ip={ip}") };
+                let spec = format!("{scheme}://{}:{}{path}{pin}#{name}", typed.host, typed.port);
+                let addr = upstream::UpstreamAddr::parse(&spec)?;
+                if list
+                    .iter()
+                    .filter_map(|s| upstream::UpstreamAddr::parse(s).ok())
+                    .any(|a| (a.scheme, &a.host, a.port) == (addr.scheme, &addr.host, addr.port))
+                {
+                    return Err(format!("{} is already configured", addr.host));
+                }
+                list.push(spec.clone());
+                added = Some((spec, format!("{name} ({})", addr.address())));
+                format!("dns upstream added: {name} ({ip})")
+            }
+        };
+        self.apply_settings(DnsOverrides { upstreams: Some(list), ..Default::default() })?;
+        // Only the new server needs a probe — the others kept their result across
+        // the rebuild. It doubles as the connectivity test: a server that cannot
+        // answer is not worth keeping, so undo the add and say why.
+        if let Some((spec, what)) = added {
+            let live = self.live();
+            let domain = &live.settings.ech_probe_domain;
+            if !domain.is_empty() && live.resolver.probe_ech_spec(&spec, domain).await.is_none() {
+                self.apply_settings(DnsOverrides {
+                    upstreams: Some(previous),
+                    ..Default::default()
+                })?;
+                return Err(format!(
+                    "{what} did not answer a test query — check the host, the port, and the \
+                     transport (DoH, DoT, or plain DNS)"
+                ));
+            }
+        }
+        Ok(msg)
     }
 
     pub fn cache(&self) -> &DnsCache {
@@ -217,6 +323,7 @@ impl DnsService {
             blocking_mode: self.blocking_mode(),
             strip_ech: self.base.strip_ech,
             ech_probe_domain: live.settings.ech_probe_domain.clone(),
+            ech_probe_mins: live.settings.ech_probe_mins,
             log_ipv6: live.settings.log_ipv6,
             cache: self.cache.status(),
         }
@@ -242,12 +349,16 @@ impl DnsService {
             || eff.upstream_mode != current.settings.upstream_mode
             || eff.bootstrap != current.settings.bootstrap
         {
-            Arc::new(upstream::Resolver::new(
+            let next = upstream::Resolver::new(
                 &eff.upstreams,
                 eff.upstream_mode,
                 &eff.bootstrap,
                 self.base.upstream_timeout_ms,
-            )?)
+            )?;
+            // Servers that are still configured keep their known ECH support, so
+            // one edit does not blank the whole table.
+            next.inherit_ech(&current.resolver);
+            Arc::new(next)
         } else {
             current.resolver.clone()
         };
@@ -256,6 +367,7 @@ impl DnsService {
 
         self.cache.set_config(eff.cache_size, eff.override_min_ttl_secs, eff.override_max_ttl_secs);
         *self.live.write().expect("live dns lock") = Arc::new(LiveDns { resolver, settings: eff });
+        self.probe_wake.notify_one();
         Ok(())
     }
 
@@ -852,6 +964,116 @@ mod tests {
             RData::CNAME(CNAME(Name::from_str("target.example.").unwrap()))
         );
         assert_eq!(resp.answers[1].data, RData::A(A(std::net::Ipv4Addr::new(5, 6, 7, 8))));
+    }
+
+    #[tokio::test]
+    async fn upstreams_are_added_by_name_parked_and_removed() {
+        use commands::UpstreamCommand as Cmd;
+
+        let up = fake_upstream(std::net::Ipv4Addr::new(7, 7, 7, 7)).await;
+        let svc = service_in("upstream-edit", vec![]);
+        let add = |name: &str, host: String| Cmd::Add {
+            name: name.into(),
+            host,
+            scheme: "udp",
+        };
+
+        svc.edit_upstreams(add("Lab", up.to_string())).await.unwrap();
+        let spec = format!("udp://{up}#Lab");
+        assert_eq!(svc.upstream_specs(), vec![spec.clone()]);
+
+        // The name, not the address, is what the query log shows.
+        let resp = svc.handle(&query_msg("fine.example.com.", RecordType::A)).await;
+        assert_eq!(resp.answers[0].data, RData::A(A(std::net::Ipv4Addr::new(7, 7, 7, 7))));
+        let stats = svc.status().upstream_stats;
+        assert_eq!((stats[0].name.as_str(), stats[0].enabled), ("Lab", true));
+
+        // Same address twice is refused, whatever it is called.
+        let err = svc.edit_upstreams(add("Lab again", up.to_string())).await.unwrap_err();
+        assert!(err.contains("already configured"), "err: {err}");
+
+        // A server that fails the test query is rolled back, not kept.
+        let err = svc.edit_upstreams(add("Dead", "127.0.0.1:1".into())).await.unwrap_err();
+        assert!(err.contains("did not answer"), "err: {err}");
+        assert_eq!(svc.upstream_specs(), vec![spec.clone()]);
+        assert_eq!(svc.status().upstream_stats[0].ech.as_str(), "supported");
+
+        // Parking keeps the row but takes it out of rotation.
+        svc.edit_upstreams(Cmd::SetEnabled { spec: spec.clone(), enabled: false })
+            .await
+            .unwrap();
+        let parked = format!("!{spec}");
+        assert_eq!(svc.upstream_specs(), vec![parked.clone()]);
+        let stats = &svc.status().upstream_stats[0];
+        assert!(!stats.enabled);
+        // Editing rebuilds the resolver; a server that did not change keeps its
+        // known ECH result instead of reading as "not probed".
+        assert_eq!(stats.ech.as_str(), "supported");
+        let resp = svc.handle(&query_msg("other.example.com.", RecordType::A)).await;
+        assert_eq!(resp.metadata.response_code, ResponseCode::ServFail);
+
+        svc.edit_upstreams(Cmd::SetEnabled { spec: parked.clone(), enabled: true })
+            .await
+            .unwrap();
+        assert_eq!(svc.upstream_specs(), vec![spec.clone()]);
+
+        assert!(svc.edit_upstreams(Cmd::Delete { spec: parked }).await.is_err());
+        svc.edit_upstreams(Cmd::Delete { spec }).await.unwrap();
+        assert!(svc.upstream_specs().is_empty());
+    }
+
+    #[tokio::test]
+    async fn adding_by_hostname_keeps_the_name_and_pins_the_resolved_address() {
+        use commands::UpstreamCommand as Cmd;
+
+        // One fake answers the bootstrap A query (with 127.0.0.1); the other is
+        // the upstream itself, reached at that address on its own port.
+        let boot = fake_upstream(std::net::Ipv4Addr::LOCALHOST).await;
+        let real = fake_upstream(std::net::Ipv4Addr::new(7, 7, 7, 7)).await;
+        let svc = service_in("upstream-hostname", vec![]);
+        svc.apply_settings(DnsOverrides {
+            bootstrap: Some(vec![boot.to_string()]),
+            ..Default::default()
+        })
+        .unwrap();
+
+        // A host pasted with its own transport is accepted, picker or not.
+        let cmd = Cmd::parse(
+            format!(r#"{{"name": "Named", "host": "udp://dns.example:{}", "scheme": "https"}}"#, real.port())
+                .as_bytes(),
+        )
+        .unwrap();
+        svc.edit_upstreams(cmd).await.unwrap();
+
+        let spec = format!("udp://dns.example:{}?ip=127.0.0.1#Named", real.port());
+        assert_eq!(svc.upstream_specs(), vec![spec]);
+        let stat = &svc.status().upstream_stats[0];
+        assert_eq!(stat.name, "Named");
+        assert_eq!(stat.host, "dns.example");
+        assert_eq!(stat.address, format!("127.0.0.1:{}", real.port()));
+        assert_eq!(stat.ech.as_str(), "supported");
+
+        // Queries go to the pinned address without another lookup.
+        let resp = svc.handle(&query_msg("fine.example.com.", RecordType::A)).await;
+        assert_eq!(resp.answers[0].data, RData::A(A(std::net::Ipv4Addr::new(7, 7, 7, 7))));
+    }
+
+    #[tokio::test]
+    async fn ech_probing_reports_support_and_can_be_run_on_demand() {
+        let up = fake_upstream(std::net::Ipv4Addr::new(1, 1, 1, 1)).await;
+        // The fake upstream answers every HTTPS query with an ECH config.
+        let svc = service_in("ech-probe", vec![format!("udp://{up}#Probe me")]);
+        assert_eq!(svc.probe_ech_now().await.unwrap(), 1);
+        assert_eq!(svc.status().upstream_stats[0].ech.as_str(), "supported");
+
+        // No probe domain means nothing to probe against.
+        svc.apply_settings(DnsOverrides {
+            ech_probe_domain: Some(String::new()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(svc.probe_ech_now().await.is_err());
+        assert_eq!(svc.status().ech_probe_mins, DnsConfig::default().ech_probe_mins);
     }
 
     #[tokio::test]

@@ -438,7 +438,7 @@ impl Proxy {
             Err(e) => {
                 state.count(Metric::Errors, &plan.host);
                 let cause = format!("upstream {}: {}", plan.host, error_chain(e.as_ref()));
-                tracing::debug!(url = %plan.url, error = %cause, "upstream send failed");
+                tracing::warn!(url = %plan.url, error = %cause, "upstream send failed");
                 let exchange = state.record_failed(request_facts(&plan), &cause);
                 if !req_bytes.is_empty() {
                     capture::request_body(&exchange, &req_bytes, req_enc);
