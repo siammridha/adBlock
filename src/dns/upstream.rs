@@ -795,6 +795,12 @@ mod tests {
         assert_eq!((u.scheme, u.port), (Scheme::Udp, 53));
         let u = UpstreamAddr::parse("udp://9.9.9.9:5300").unwrap();
         assert_eq!((u.scheme, u.port), (Scheme::Udp, 5300));
+        // The shape the UI saves: port, pinned ip and label all at once.
+        let u = UpstreamAddr::parse("tls://dns.nextdns.io:853?ip=45.90.30.0#NextDNS").unwrap();
+        assert_eq!(
+            (u.host.as_str(), u.port, u.ip, u.name.as_str()),
+            ("dns.nextdns.io", 853, Some("45.90.30.0".parse().unwrap()), "NextDNS")
+        );
     }
 
     #[test]
