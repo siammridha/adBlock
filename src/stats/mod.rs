@@ -209,6 +209,19 @@ impl SharedState {
         self.request_log = Some(RotatingLog::open(logs.join("request-log.jsonl"), rotate));
         self.request_detail = Some(RotatingLog::open(logs.join("request-detail.jsonl"), rotate));
         self.query_log = Some(RotatingLog::open(logs.join("query-log.jsonl"), rotate));
+        // A seq is a row's identity in the UI and the key the detail sidecar is
+        // looked up by, but the counter only lives in this process. Restarting
+        // from 1 would hand out seqs the logs already contain, and a detail
+        // fetch would then match an earlier run's request. Resume above what is
+        // already on disk. Records are appended in seq order, so the newest line
+        // carries the highest seq.
+        let on_disk = [&self.request_log, &self.request_detail, &self.query_log]
+            .into_iter()
+            .flatten()
+            .filter_map(|log| line_seq(&log.find(|_| true)?))
+            .max()
+            .unwrap_or(0);
+        self.next_seq = AtomicU64::new(on_disk + 1);
         self.settings_store = Some(store);
         self.stats_exclusions =
             Some(StatsExclusions::load(settings.join("stats-excluded-domains.conf")));
@@ -988,6 +1001,47 @@ mod tests {
             std::fs::read_to_string(logs.join("request-log.jsonl")).unwrap().lines().count(),
             2
         );
+    }
+
+    // A restart must not reissue seqs the logs already hold — a repeat would
+    // make the detail lookup for a new row return an older run's request.
+    #[test]
+    fn seqs_resume_above_the_records_already_on_disk() {
+        let dir = std::env::temp_dir().join("proxy-stats-seq-resume-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let info = || StaticInfo {
+            version: "test".into(),
+            listen: String::new(),
+            admin_listen: String::new(),
+            started: Instant::now(),
+        };
+        let logging =
+            LoggingConfig { level: "info".into(), log_actions: true, log_requests: true, ..Default::default() };
+
+        let s = Arc::new(SharedState::new(info(), &logging).with_data_dir(&dir));
+        let first = s.record_forwarded(doc("https://one.example/"), 200, false);
+        let first_seq = first.seq;
+        first.attach(CaptureSlot::ReqBody, || "first-run-body".into());
+        drop(first);
+        s.flush_logs();
+
+        // Restart: a fresh state over the same data dir.
+        let s2 = Arc::new(SharedState::new(info(), &logging).with_data_dir(&dir));
+        let second = s2.record_tunnel(
+            RequestFacts {
+                method: "CONNECT",
+                req_type: "tunnel",
+                url: "https://two.example/",
+                host: "two.example",
+            },
+            "",
+        );
+        assert!(second.seq > first_seq, "restart reissued seq {}", second.seq);
+        // A tunnel captures nothing, so its detail must come back empty rather
+        // than as whatever the previous run logged under that seq.
+        assert_eq!(s2.request_detail(second.seq).req_body, "");
+        assert_eq!(s2.request_detail(first_seq).req_body, "first-run-body");
     }
 
     #[test]
