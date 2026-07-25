@@ -270,7 +270,7 @@
     border-bottom:1px solid var(--border); flex-shrink:0; }
   .drawer-head .dt { font-size:13px; font-weight:600; text-transform:uppercase; letter-spacing:.06em;
     color:var(--muted); }
-  .drawer-x { margin-left:auto; }
+  .drawer-head .drawer-copy { margin-left:auto; }
   .drawer-body { padding:14px 16px; overflow:auto; flex:1; }
   .drawer-body .rq-detail { font-size:12px; }
   /* skeleton shimmer: shown in the drawer while a request's detail loads */
@@ -281,9 +281,9 @@
   .skel-box { height:120px; margin:2px 0; }
   @keyframes skel { 0%{background-position:100% 50%} 100%{background-position:0 50%} }
   @media (prefers-reduced-motion: reduce){ .skel{ animation:none } }
-  /* a body label carrying its "decompress" control on the right */
+  /* a section label carrying its "decompress"/"copy" controls on the right */
   .rq-detail .lbl.row { display:flex; align-items:center; gap:8px; }
-  .rq-detail .lbl .decomp { margin-left:auto; }
+  .rq-detail .lbl .tools { margin-left:auto; display:flex; align-items:center; gap:6px; }
 </style>
 </head>
 <body>
@@ -866,6 +866,7 @@
 <aside class="drawer" id="drawer">
   <div class="drawer-head">
     <span class="dt">Request detail</span>
+    <button class="ghost mini drawer-copy" id="drawer-copy">copy</button>
     <button class="ghost mini drawer-x" id="drawer-x">✕ close</button>
   </div>
   <div class="drawer-body" id="drawer-body"></div>
@@ -1584,7 +1585,10 @@ function ruleButton(domain, isBlocked){
 // A windowed renderer over a fixed-height row list. `render(item, el)` fills a
 // recycled row element; `onNearBottom()` fires when the tail scrolls into view
 // (the caller pages more in). Call setItems() to swap the backing array.
-function makeVirtualList(scroller, render, onNearBottom, rowH){
+// `onTop()` fires when the user scrolls back to the top (the caller drains its
+// buffered live rows there); it must be a no-op when there is nothing buffered,
+// since toTop() re-enters this listener.
+function makeVirtualList(scroller, render, onNearBottom, rowH, onTop){
   const inner = document.createElement("div");
   inner.className = "vinner";
   scroller.appendChild(inner);
@@ -1616,7 +1620,10 @@ function makeVirtualList(scroller, render, onNearBottom, rowH){
   }
   let raf = 0;
   const schedule = ()=>{ if(raf) return; raf = requestAnimationFrame(()=>{ raf = 0; draw(); }); };
-  scroller.addEventListener("scroll", schedule);
+  scroller.addEventListener("scroll", ()=>{
+    schedule();
+    if(onTop && scroller.scrollTop <= 4) onTop();
+  });
   window.addEventListener("resize", schedule);
   return {
     setItems(a){ items = a; draw(); },
@@ -1733,7 +1740,7 @@ function rqRender(rec, el){
   el.innerHTML = rqRowHTML(rec);
 }
 
-const rqVL = makeVirtualList($("rq-log"), rqRender, ()=>rqLoadOlder(), RQ_ROW_H);
+const rqVL = makeVirtualList($("rq-log"), rqRender, ()=>rqLoadOlder(), RQ_ROW_H, ()=>rqFlush());
 
 async function rqLoadNewest(){
   try {
@@ -1790,6 +1797,7 @@ function onLiveClosed(c){
   rqVL.redraw();
 }
 function rqFlush(){
+  if(!rqPending.length) return;
   for(const rec of rqPending) rqAdd(rec, false);
   rqPending = [];
   rqSync(); rqChip(); rqVL.toTop();
@@ -1820,6 +1828,36 @@ function closeDrawer(){
   $("drawer").classList.remove("open");
   $("drawer-back").classList.remove("open");
 }
+// Copy the open drawer as plain text. Read back out of the DOM so whatever is
+// on screen is what gets copied — including a body that was decompressed.
+function drawerText(){
+  const c = $("drawer-body"), out = [];
+  const gen = c.querySelectorAll(".gen > *");
+  for(let i=0; i+1<gen.length; i+=2) out.push(gen[i].textContent + ": " + gen[i+1].textContent);
+  for(const [sel,label] of [[".qh","Request headers"], [".qb","Request body"],
+                            [".sh","Response headers"], [".sb","Response body"]]){
+    const pre = c.querySelector(sel);
+    if(pre) out.push("\n" + label + "\n" + pre.textContent);
+  }
+  return out.join("\n");
+}
+// Copy `text`, flashing the result on the button that asked for it.
+async function copyToClipboard(text, btn){
+  const label = btn.textContent;
+  let ok = true;
+  try { await navigator.clipboard.writeText(text); }
+  catch { // no clipboard API (page served over plain http on a LAN address)
+    const ta = document.createElement("textarea");
+    ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta); ta.select();
+    try { ok = document.execCommand("copy"); } catch { ok = false; }
+    ta.remove();
+  }
+  btn.textContent = ok ? "copied" : "copy failed";
+  setTimeout(()=>{ btn.textContent = label; }, 1200);
+}
+$("drawer-copy").addEventListener("click", e=>copyToClipboard(drawerText(), e.currentTarget));
+
 $("drawer-x").addEventListener("click", closeDrawer);
 $("drawer-back").addEventListener("click", closeDrawer);
 document.addEventListener("keydown", e=>{ if(e.key === "Escape") closeDrawer(); });
@@ -1840,10 +1878,10 @@ function renderDrawer(d, loading){
   cell.innerHTML =
     `<div class="rq-detail"><div class="gen"></div>`+
     `<div class="cols">`+
-      `<div><div class="lbl">Request headers</div><pre class="qh"></pre>`+
-           `<div class="lbl row">Request body<span class="qb-tools"></span></div><pre class="qb"></pre></div>`+
-      `<div><div class="lbl">Response headers</div><pre class="sh"></pre>`+
-           `<div class="lbl row">Response body<span class="sb-tools"></span></div><pre class="sb"></pre></div>`+
+      `<div><div class="lbl row">Request headers<span class="tools qh-tools"></span></div><pre class="qh"></pre>`+
+           `<div class="lbl row">Request body<span class="tools qb-tools"></span></div><pre class="qb"></pre></div>`+
+      `<div><div class="lbl row">Response headers<span class="tools sh-tools"></span></div><pre class="sh"></pre>`+
+           `<div class="lbl row">Response body<span class="tools sb-tools"></span></div><pre class="sb"></pre></div>`+
     `</div></div>`;
   const g = cell.querySelector(".gen");
   for(const [l,v] of gen){
@@ -1876,6 +1914,20 @@ function renderDrawer(d, loading){
   fillBody(d.seq, "req", cell.querySelector(".qb"), cell.querySelector(".qb-tools"), d.req_body || "(empty)");
   fillBody(d.seq, "resp", cell.querySelector(".sb"), cell.querySelector(".sb-tools"),
     d.resp_body || (d.blocked_by ? none : "(empty)"));
+
+  // One copy button per section, copying just that block as it stands.
+  for(const s of ["qh","qb","sh","sb"]) addCopyBtn(cell.querySelector("."+s), cell.querySelector("."+s+"-tools"));
+}
+
+// Copy control for a single headers/body block. Skipped when the block holds
+// only a placeholder like "(none)" — nothing worth copying.
+function addCopyBtn(pre, tools){
+  if(!pre || !tools || /^\(.*\)$/.test(pre.textContent.trim())) return;
+  const btn = document.createElement("button");
+  btn.className = "ghost mini";
+  btn.textContent = "copy";
+  btn.addEventListener("click", e=>copyToClipboard(pre.textContent, e.currentTarget));
+  tools.appendChild(btn);
 }
 
 function skelLines(n){
@@ -1898,7 +1950,7 @@ function fillBody(seq, slot, pre, tools, text){
   const binary = BINARY_RE.test(text);
   if(!compressed && !binary) return;
   const btn = document.createElement("button");
-  btn.className = "ghost mini decomp";
+  btn.className = "ghost mini";
   btn.textContent = compressed ? "decompress" : "view bytes";
   btn.addEventListener("click", ()=>decompressBody(seq, slot, pre, btn));
   tools.appendChild(btn);
@@ -1927,7 +1979,7 @@ function showBinaryBody(seq, slot, pre, btn, bytes){
   btn.remove();
   const blob = new Blob([bytes], {type:"application/octet-stream"});
   const dl = document.createElement("a");
-  dl.className = "ghost mini decomp";
+  dl.className = "ghost mini";
   dl.textContent = "download";
   dl.href = URL.createObjectURL(blob);
   dl.download = `body-${slot}-${seq}.bin`;
@@ -2057,7 +2109,7 @@ function dqRender(d, el){
   el.className = "vrow dnscols" + (tint ? " " + tint : "");
   el.innerHTML = dqRowHTML(d);
 }
-const dqVL = makeVirtualList($("dq-log"), dqRender, ()=>dqLoadOlder(), DQ_ROW_H);
+const dqVL = makeVirtualList($("dq-log"), dqRender, ()=>dqLoadOlder(), DQ_ROW_H, ()=>dqFlush());
 
 async function dqLoadNewest(){
   try {
@@ -2096,6 +2148,7 @@ function onLiveDns(d){
   }
 }
 function dqFlush(){
+  if(!dqPending.length) return;
   for(const d of dqPending) dqAdd(d, false);
   dqPending = [];
   dqSync(); dqChip(); dqVL.toTop();
