@@ -16,6 +16,7 @@ use tokio_rustls::TlsAcceptor;
 use crate::adblock::api::AdBlocker;
 use crate::proxy::error::{Error, Result};
 use crate::proxy::exclusions::ExclusionStore;
+use crate::proxy::injection::InjectionPolicy;
 use crate::stats::api::Metric;
 use super::http_client::HttpClient;
 use crate::proxy::blackhole::{BlackholeProbe, EgressResolver, Resolver};
@@ -88,7 +89,11 @@ impl std::fmt::Display for ProxyError {
     }
 }
 
-impl std::error::Error for ProxyError {}
+impl std::error::Error for ProxyError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&*self.0)
+    }
+}
 
 impl From<BoxError> for ProxyError {
     fn from(e: BoxError) -> Self {
@@ -105,6 +110,7 @@ struct Inner {
     max_inspect_bytes: usize,
     adblock: Arc<AdBlocker>,
     exclusions: Arc<ExclusionStore>,
+    injection: Arc<InjectionPolicy>,
     ca: Arc<CertAuthority>,
     state: Arc<SharedState>,
     client: Arc<dyn Upstream>,
@@ -116,19 +122,31 @@ impl Proxy {
         max_inspect_bytes: usize,
         adblock: Arc<AdBlocker>,
         exclusions: Arc<ExclusionStore>,
+        injection: Arc<InjectionPolicy>,
         ca: Arc<CertAuthority>,
         state: Arc<SharedState>,
         client: Arc<HttpClient>,
         egress: Arc<crate::proxy::egress::EgressPolicy>,
     ) -> Self {
         let resolver = Arc::new(EgressResolver(egress));
-        Self::with_seams(max_inspect_bytes, adblock, exclusions, ca, state, client, resolver)
+        Self::with_seams(
+            max_inspect_bytes,
+            adblock,
+            exclusions,
+            injection,
+            ca,
+            state,
+            client,
+            resolver,
+        )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn with_seams(
         max_inspect_bytes: usize,
         adblock: Arc<AdBlocker>,
         exclusions: Arc<ExclusionStore>,
+        injection: Arc<InjectionPolicy>,
         ca: Arc<CertAuthority>,
         state: Arc<SharedState>,
         client: Arc<dyn Upstream>,
@@ -139,6 +157,7 @@ impl Proxy {
                 max_inspect_bytes,
                 adblock,
                 exclusions,
+                injection,
                 ca,
                 state,
                 client,
@@ -175,20 +194,31 @@ impl Proxy {
         let opened = std::time::Instant::now();
         let io = TokioIo::new(stream);
         let proxy = self.clone();
+        let served = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = served.clone();
         let service = service_fn(move |req| {
             let proxy = proxy.clone();
+            seen.store(true, std::sync::atomic::Ordering::Relaxed);
             async move { proxy.dispatch(req).await }
         });
+        let mut blocked_drop = false;
         if let Err(e) = hyper::server::conn::http1::Builder::new()
             .serve_connection(io, service)
             .with_upgrades()
             .await
         {
+            blocked_drop = is_blocked_drop(&e);
             if !is_routine_close(&e) {
                 tracing::warn!(%peer, error = %e, "client connection ended with error");
             }
         }
-        tracing::debug!(%peer, ms = opened.elapsed().as_millis(), "client connection closed");
+        // A connection we dropped on purpose for a blocked host is already
+        // reported as a block; don't log its close too. Nor a connection that
+        // never carried a request — a client's spare connection, usually one it
+        // gives up on right after we killed a blocked one.
+        if !blocked_drop && served.load(std::sync::atomic::Ordering::Relaxed) {
+            tracing::debug!(%peer, ms = opened.elapsed().as_millis(), "client connection closed");
+        }
         Ok(())
     }
 
@@ -488,18 +518,27 @@ impl Proxy {
         exchange: Exchange,
     ) -> std::result::Result<Response<ResBody>, BoxError> {
         if pipeline::response_wants_inspection(injection_target, resp.status(), resp.headers()) {
-            let injection = self.inner.adblock.scriptlet_injection(url);
-            let script = injection.as_ref().map(|i| i.js.as_str()).unwrap_or("");
+            // The switches are the proxy's: ask Adblock only for what is on.
+            let inject = self.inner.injection.settings();
+            let injection = inject
+                .scriptlets
+                .then(|| self.inner.adblock.scriptlet_injection(url))
+                .flatten();
             let plan = pipeline::plan_inspection(
-                self.inner.adblock.scriptlets_enabled(),
+                inject.scriptlets && self.inner.adblock.scriptlets_enabled(),
                 self.inner.max_inspect_bytes,
             );
+            let script = injection.as_ref().map(|i| i.js.as_str()).unwrap_or("");
             let (mut parts, body) = resp.into_parts();
             let resp_enc = capture::BodyEncoding::from_headers(&parts.headers);
             let collected = body.collect().await?.to_bytes();
             capture::response_body(&exchange, &collected, resp_enc);
             let mutated = plan.apply(&mut parts, &collected, script, |classes, ids| {
-                self.inner.adblock.cosmetic_css(url, classes, ids)
+                if inject.cosmetic {
+                    self.inner.adblock.cosmetic_css(url, classes, ids)
+                } else {
+                    String::new()
+                }
             });
             if let Some(html) = mutated {
                 if let Some(inj) = &injection {
@@ -557,6 +596,19 @@ impl std::fmt::Display for BlockedDropped {
 }
 
 impl std::error::Error for BlockedDropped {}
+
+/// Whether a connection ended because we deliberately dropped it for a blocked
+/// host. The block itself is already recorded, so the close is not news.
+fn is_blocked_drop(err: &(dyn std::error::Error + 'static)) -> bool {
+    let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(e) = cur {
+        if e.is::<BlockedDropped>() {
+            return true;
+        }
+        cur = e.source();
+    }
+    false
+}
 
 /// Whether a finished connection's error is routine and not worth a log line: a
 /// client that simply disconnected, a connection we deliberately dropped for a
@@ -696,13 +748,14 @@ mod tests {
         };
         let (adblock, _curation) =
             crate::adblock::api::with_store(&cfg, Arc::new(MemoryListStore::new())).unwrap();
-        proxy_with_adblock(adblock, client, resolver)
+        proxy_with_adblock(adblock, client, resolver, InjectionPolicy::all_on())
     }
 
     fn proxy_with_adblock(
         adblock: Arc<AdBlocker>,
         client: Arc<dyn Upstream>,
         resolver: Arc<dyn Resolver>,
+        injection: Arc<InjectionPolicy>,
     ) -> (Proxy, Arc<SharedState>) {
         let state = Arc::new(SharedState::new(
             StaticInfo {
@@ -726,6 +779,7 @@ mod tests {
             PerformanceConfig::default().max_inspect_bytes,
             adblock,
             exclusions,
+            injection,
             ca,
             state.clone(),
             client,
@@ -855,6 +909,35 @@ mod tests {
         assert!(err.is::<BlockedDropped>(), "a fully blocked host drops the connection: {err}");
     }
 
+    /// The close log is suppressed by finding `BlockedDropped` in the error hyper
+    /// hands back, so the chain has to survive hyper's own wrapping.
+    #[tokio::test]
+    async fn hyper_error_for_a_dropped_block_is_recognised() {
+        let (mut client, server) = tokio::io::duplex(1024);
+        let serving = tokio::spawn(async move {
+            hyper::server::conn::http1::Builder::new()
+                .serve_connection(
+                    TokioIo::new(server),
+                    service_fn(|_req: Request<Incoming>| async {
+                        std::result::Result::<Response<ResBody>, ProxyError>::Err(
+                            ProxyError::from(Box::new(BlockedDropped) as BoxError),
+                        )
+                    }),
+                )
+                .with_upgrades()
+                .await
+        });
+
+        use tokio::io::AsyncWriteExt;
+        client
+            .write_all(b"CONNECT blocked.example:443 HTTP/1.1\r\nHost: blocked.example:443\r\n\r\n")
+            .await
+            .unwrap();
+
+        let err = serving.await.unwrap().expect_err("the drop must surface as an error");
+        assert!(is_blocked_drop(&err), "hyper error must still name the block: {err}");
+    }
+
     #[tokio::test(start_paused = true)]
     async fn dns_blackhole_is_denied_and_verdict_cached_until_ttl() {
         let upstream = CannedUpstream::new(StatusCode::OK, vec![], b"");
@@ -907,6 +990,42 @@ mod tests {
         assert_eq!(recs[0].status, 200);
         assert!(recs[0].resp_headers.contains("content-type: text/html"));
         assert!(recs[0].resp_body.contains("<html>"));
+    }
+
+    #[tokio::test]
+    async fn cosmetic_css_is_not_injected_once_the_setting_is_off() {
+        let upstream = CannedUpstream::new(
+            StatusCode::OK,
+            vec![("content-type", "text/html")],
+            b"<html><head></head><body>x</body></html>",
+        );
+        let injection = InjectionPolicy::all_on();
+        injection.apply(&crate::proxy::injection::InjectionOverrides {
+            cosmetic: Some(false),
+            scriptlets: None,
+        });
+        let cfg = AdblockConfig {
+            enabled: true,
+            custom_rules: vec!["example.com##.ad-banner".into()],
+            data_dir: std::path::PathBuf::from("/nonexistent-for-tests"),
+            auto_update_hours: 0,
+            inject_scriptlets: false,
+            scriptlet_resources: std::path::PathBuf::new(),
+        };
+        let (adblock, _curation) =
+            crate::adblock::api::with_store(&cfg, Arc::new(MemoryListStore::new())).unwrap();
+        let (proxy, _state) = proxy_with_adblock(
+            adblock,
+            upstream,
+            FixedResolver::to(&["93.184.216.34:80"]),
+            injection,
+        );
+
+        let req = get("http://example.com/", &[("accept", "text/html")]);
+        let resp = proxy.handle_forward(req, false).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let html = std::str::from_utf8(&body).unwrap();
+        assert!(!html.contains("display:none"), "html: {html}");
     }
 
     #[tokio::test]
@@ -974,6 +1093,7 @@ mod tests {
             adblock,
             upstream,
             FixedResolver::to(&["93.184.216.34:80"]),
+            InjectionPolicy::all_on(),
         );
 
         let mut obs = state.observe();

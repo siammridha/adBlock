@@ -19,6 +19,7 @@ use crate::dns::api::DnsRuntime;
 use crate::dns::api::DnsService;
 use crate::proxy::api::ProxyRuntime;
 use crate::proxy::api::EgressPolicy;
+use crate::proxy::api::InjectionPolicy;
 use crate::proxy::api::CertStore;
 use crate::proxy::api::ExclusionStore;
 use crate::adblock::api::BlocklistFetcher;
@@ -44,7 +45,7 @@ use self::dns::{
 };
 use self::exclusions::{edit_exclusions, exclusions_json};
 use self::respond::{html, json_ok, json_status, text_status};
-use self::server::{edit_proxy_config, edit_server_config};
+use self::server::{edit_proxy_config, edit_server_config, proxy_settings_json};
 use self::sse::sse_stream;
 use self::stats::stats_json;
 
@@ -86,6 +87,7 @@ pub struct Admin {
     proxy_runtime: Arc<ProxyRuntime>,
     dns_runtime: Arc<DnsRuntime>,
     egress: Arc<EgressPolicy>,
+    injection: Arc<InjectionPolicy>,
     certs: Arc<CertStore>,
 }
 
@@ -101,6 +103,7 @@ impl Admin {
         proxy_runtime: Arc<ProxyRuntime>,
         dns_runtime: Arc<DnsRuntime>,
         egress: Arc<EgressPolicy>,
+        injection: Arc<InjectionPolicy>,
         certs: Arc<CertStore>,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -113,6 +116,7 @@ impl Admin {
             proxy_runtime,
             dns_runtime,
             egress,
+            injection,
             certs,
         })
     }
@@ -171,7 +175,7 @@ impl Admin {
                 json_ok(server::server_status_json(&self.proxy_runtime, &self.dns_runtime).await)
             }
             (&Method::GET, "/api/proxy") => {
-                json_ok(serde_json::to_value(self.egress.settings()).unwrap_or_default())
+                json_ok(proxy_settings_json(&self.egress, &self.injection))
             }
             (&Method::GET, "/api/dns") => {
                 json_ok(dns_json(&self.state, &self.dns_runtime.service()))
@@ -209,7 +213,9 @@ impl Admin {
             "/api/server/config" => {
                 edit_server_config(&self.proxy_runtime, &self.dns_runtime, body).await
             }
-            "/api/proxy/config" => edit_proxy_config(&self.state, &self.egress, body),
+            "/api/proxy/config" => {
+                edit_proxy_config(&self.state, &self.egress, &self.injection, body)
+            }
             "/api/certs" => certs::edit_certs(&self.certs, &self.state, body),
             "/api/blocklists" => self.add_blocklist(body).await,
             "/api/exclusions" => edit_exclusions(&self.state, &self.exclusions, body),
@@ -355,6 +361,7 @@ mod tests {
             proxy_runtime,
             dns_runtime,
             egress,
+            crate::proxy::api::InjectionPolicy::all_on(),
             certs,
         )
     }

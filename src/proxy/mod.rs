@@ -12,6 +12,7 @@ pub mod error;
 pub mod exclusions;
 pub(crate) mod html;
 pub mod http_client;
+pub mod injection;
 pub(crate) mod persist;
 pub(crate) mod pipeline;
 pub mod server;

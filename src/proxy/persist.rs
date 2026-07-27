@@ -81,23 +81,54 @@ impl<T: Default + Serialize + DeserializeOwned> OverrideStore<T> {
             .unwrap_or_default()
     }
 
+    /// Write these keys into the file, leaving every other key it holds alone.
+    /// Several settings groups share one file, each writing only what it owns.
     pub fn save(&self, overrides: &T) -> std::result::Result<(), String> {
+        let mut merged = self.raw();
+        let next = serde_json::to_value(overrides).map_err(|e| e.to_string())?;
+        merge(&mut merged, next);
+        self.write(&merged)
+    }
+
+    /// Fill in `default` for the keys the file does not have yet, so a fresh
+    /// install starts with a full, editable settings file. Values already in the
+    /// file win.
+    pub fn ensure(&self, default: &T) {
+        let existing = self.raw();
+        let Ok(mut merged) = serde_json::to_value(default) else { return };
+        merge(&mut merged, existing);
+        let _ = self.write(&merged);
+    }
+
+    /// The file as raw JSON, or `Null` when it is missing or unreadable.
+    fn raw(&self) -> serde_json::Value {
+        std::fs::read_to_string(&self.path)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or(serde_json::Value::Null)
+    }
+
+    fn write(&self, value: &serde_json::Value) -> std::result::Result<(), String> {
+        // No path means no settings file — an in-memory policy, nothing to do.
+        if self.path.as_os_str().is_empty() {
+            return Ok(());
+        }
         if let Some(dir) = self.path.parent().filter(|d| !d.as_os_str().is_empty()) {
             std::fs::create_dir_all(dir)
                 .map_err(|e| format!("creating {}: {e}", dir.display()))?;
         }
-        let body = serde_json::to_string_pretty(overrides).map_err(|e| e.to_string())?;
+        let body = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
         std::fs::write(&self.path, body)
             .map_err(|e| format!("writing {}: {e}", self.path.display()))
     }
+}
 
-    /// Create the file populated with `default` when it does not exist yet, so a
-    /// fresh install starts with a full, editable settings file. An existing file
-    /// is left untouched.
-    pub fn ensure(&self, default: &T) {
-        if !self.path.exists() {
-            let _ = self.save(default);
-        }
+/// Copy `next`'s keys over `base`. Only objects merge; anything else replaces.
+fn merge(base: &mut serde_json::Value, next: serde_json::Value) {
+    match (base.as_object_mut(), next) {
+        (Some(base), serde_json::Value::Object(next)) => base.extend(next),
+        (_, serde_json::Value::Null) => {}
+        (_, next) => *base = next,
     }
 }
 
@@ -220,5 +251,34 @@ mod tests {
 
         std::fs::write(&path, "{ not json").unwrap();
         assert_eq!(store.load(), Knobs::default(), "corrupt file = no overrides, not a crash");
+    }
+
+    #[derive(Default, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
+    struct OtherKnobs {
+        colour: Option<String>,
+    }
+
+    #[test]
+    fn two_settings_groups_share_one_file_without_wiping_each_other() {
+        let dir = std::env::temp_dir().join("proxy-persist-test-shared");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let speed: OverrideStore<Knobs> = OverrideStore::new(path.clone());
+        let colour: OverrideStore<OtherKnobs> = OverrideStore::new(path.clone());
+
+        speed.ensure(&Knobs { speed: Some(1) });
+        colour.ensure(&OtherKnobs { colour: Some("red".into()) });
+        speed.save(&Knobs { speed: Some(9) }).unwrap();
+
+        assert_eq!(speed.load().speed, Some(9));
+        assert_eq!(colour.load().colour, Some("red".into()), "the other group survived");
+
+        colour.save(&OtherKnobs { colour: Some("blue".into()) }).unwrap();
+        assert_eq!(speed.load().speed, Some(9), "still there after the other group wrote");
+
+        speed.ensure(&Knobs { speed: Some(1) });
+        assert_eq!(speed.load().speed, Some(9), "ensure never overwrites a saved value");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

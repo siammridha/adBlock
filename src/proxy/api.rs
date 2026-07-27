@@ -13,4 +13,5 @@ pub use super::egress::{EgressOverrides, EgressPolicy};
 pub use super::error::{Error, Result};
 pub use super::exclusions::{ExclusionCommand, ExclusionStore};
 pub use super::http_client::HttpClient;
+pub use super::injection::{InjectionOverrides, InjectionPolicy, InjectionSettings};
 pub use super::Proxy;

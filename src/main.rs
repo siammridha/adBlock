@@ -11,8 +11,8 @@ use std::time::Instant;
 use adBlock::adblock::api::{spawn_blocklist_updater, BlocklistFetcher, ScriptletUpdater};
 use adBlock::dns::api::{DnsConfig, DnsRuntime, DnsService};
 use adBlock::proxy::api::{
-    CertAuthority, CertStore, EgressPolicy, ExclusionStore, HttpClient, Proxy, ProxyBaseConfig,
-    ProxyRuntime,
+    CertAuthority, CertStore, EgressPolicy, ExclusionStore, HttpClient, InjectionPolicy, Proxy,
+    ProxyBaseConfig, ProxyRuntime,
 };
 use adBlock::stats::api::{LoggingConfig, SharedState, StaticInfo};
 use adBlock::web;
@@ -95,7 +95,8 @@ async fn main() -> Result<()> {
         adblock.clone(),
         state.clone(),
     )?;
-    let egress = EgressPolicy::load(proxy_base.server.egress_settings_path(), dns.clone());
+    let egress = EgressPolicy::load(proxy_base.server.settings_path(), dns.clone());
+    let injection = InjectionPolicy::load(proxy_base.server.settings_path());
 
     // Each module owns its outbound networking: the proxy's pooled client
     // dials through the egress policy, adblock fetches lists with its own
@@ -116,6 +117,7 @@ async fn main() -> Result<()> {
         proxy_base.performance.max_inspect_bytes,
         adblock.clone(),
         exclusions.clone(),
+        injection.clone(),
         ca,
         state.clone(),
         client,
@@ -151,6 +153,7 @@ async fn main() -> Result<()> {
             proxy_runtime.clone(),
             dns_runtime.clone(),
             egress.clone(),
+            injection.clone(),
             certs.clone(),
         );
         tokio::spawn(async move {
