@@ -321,7 +321,7 @@ impl DnsService {
             upstream_stats: live.resolver.upstream_stats(),
             bootstrap: live.settings.bootstrap.clone(),
             blocking_mode: self.blocking_mode(),
-            strip_ech: self.base.strip_ech,
+            strip_ech: live.settings.strip_ech,
             ech_probe_domain: live.settings.ech_probe_domain.clone(),
             ech_probe_mins: live.settings.ech_probe_mins,
             log_ipv6: live.settings.log_ipv6,
@@ -429,9 +429,12 @@ impl DnsService {
                 resp
             }
             plan::Verdict::Resolve(key) => {
+                // Read once: the setting is live, and the cached and freshly
+                // resolved paths must not disagree mid-request.
+                let strip_ech = self.live().settings.strip_ech;
                 if let Some(mut cached) = self.cache.get(&key) {
                     self.state.count(Metric::DnsCached, &domain);
-                    if self.base.strip_ech {
+                    if strip_ech {
                         strip_ech_params(&mut cached);
                     }
                     let resp = finish_response(cached, request);
@@ -441,7 +444,7 @@ impl DnsService {
                 match self.resolver().resolve(&query).await {
                     Ok((mut resp, upstream)) => {
                         self.cache.put(key, &resp);
-                        if self.base.strip_ech {
+                        if strip_ech {
                             let stripped = strip_ech_params(&mut resp);
                             if stripped > 0 {
                                 tracing::debug!(%domain, stripped, "removed ECH configs from answer");
@@ -868,6 +871,33 @@ mod tests {
         assert_eq!(summarize_answers(&resp), "HTTPS");
         assert_eq!(svc.cache().hits(), hits + 1);
 
+        assert_eq!(svc.ech_config_list("site.example").await, None);
+    }
+
+    #[tokio::test]
+    async fn strip_ech_can_be_turned_on_at_runtime() {
+        let up = fake_upstream(std::net::Ipv4Addr::new(1, 1, 1, 1)).await;
+        let cfg = DnsConfig {
+            upstreams: vec![format!("udp://{up}")],
+            upstream_timeout_ms: 500,
+            ..DnsConfig::default()
+        };
+        // A writable settings dir: applying the setting persists it.
+        let dir = std::env::temp_dir().join("proxy-dns-strip-ech");
+        let _ = std::fs::remove_dir_all(&dir);
+        let svc = build_service_cfg(&[], cfg, dir);
+
+        let resp = svc.handle(&query_msg("site.example.", RecordType::HTTPS)).await;
+        assert_eq!(summarize_answers(&resp), "HTTPS +ech", "off by default");
+        assert!(!svc.status().strip_ech);
+
+        svc.apply_settings(DnsOverrides { strip_ech: Some(true), ..Default::default() }).unwrap();
+
+        // The cached answer still holds the ech param; stripping happens on the
+        // way out, so the new setting takes effect without clearing the cache.
+        let resp = svc.handle(&query_msg("site.example.", RecordType::HTTPS)).await;
+        assert_eq!(summarize_answers(&resp), "HTTPS");
+        assert!(svc.status().strip_ech);
         assert_eq!(svc.ech_config_list("site.example").await, None);
     }
 

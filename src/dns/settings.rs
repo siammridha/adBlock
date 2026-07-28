@@ -55,6 +55,7 @@ dns_tunables! {
     override_max_ttl_secs: u32,
     ech_probe_domain: String,
     ech_probe_mins: u32,
+    strip_ech: bool,
     log_ipv6: bool,
 }
 

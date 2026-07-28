@@ -568,6 +568,21 @@
     </div>
 
     <div class="panel">
+      <h2>ECH stripping</h2>
+      <div class="actions" style="margin-top:0">
+        <label style="display:flex;align-items:center;gap:7px">
+          <input type="checkbox" id="sech-strip"> Remove ECH configs from answers</label>
+        <button id="sech-save">Save</button>
+        <span class="hint" id="sech-status"></span>
+      </div>
+      <p class="hint">Drops the <code>ech</code> parameter from HTTPS records before the answer goes
+        out, so clients cannot use Encrypted Client Hello and their TLS handshakes stay readable.
+        Applies to this app's own proxy too: with stripping on, the proxy gets no ECH config and its
+        outbound connections stop using ECH, so requests lose the
+        <span class="ech-tag">[ECH]</span> tag. Applied live and persisted.</p>
+    </div>
+
+    <div class="panel">
       <h2>Check domain <span class="hint">— test a domain against the DNS filter without sending a query</span></h2>
       <div class="actions" style="flex-wrap:wrap">
         <input type="text" id="dt-domain" placeholder="ads.example.com" style="flex:1;min-width:220px">
@@ -610,13 +625,6 @@
           <p class="hint">Resolve the hosts the proxy dials over IPv4 only: send a Type A query and
             never a Type AAAA (type 28) one, and never open an IPv6 connection. On by default. Turn it
             off to also query AAAA and let the proxy connect over IPv6 when a host publishes one.</p>
-        </div>
-        <div>
-          <label class="sw"><input type="checkbox" id="eg-use-ech"> Encrypted Client Hello (ECH)</label>
-          <p class="hint">Read the target's ECH config from its HTTPS DNS record and negotiate Encrypted
-            Client Hello on the outbound TLS connection, hiding the server name from the network. Requests
-            whose connection used it are tagged <span class="ech-tag">[ECH]</span> in the
-            <b>Requests</b> log.</p>
         </div>
       </div>
       <div class="actions">
@@ -1095,12 +1103,11 @@ $("px-save").addEventListener("click", ()=>{
   }
   postServer(body, "px-status", "applying…");
 });
-// ---- proxy egress policy: resolver-only DNS, ECH, disable-IPv6 -------------
+// ---- proxy egress policy: resolver-only DNS, disable-IPv6 ------------------
 async function refreshProxyCfg(){
   try {
     const r = await fetch("/api/proxy"); const d = await r.json();
     $("eg-resolver-only").checked = !!d.resolver_only;
-    $("eg-use-ech").checked = !!d.use_ech;
     $("eg-disable-ipv6").checked = !!d.disable_ipv6;
   } catch(e){}
 }
@@ -1108,7 +1115,6 @@ $("eg-save").addEventListener("click", async ()=>{
   const el = $("eg-status"); say(el, "saving…");
   const body = {
     resolver_only: $("eg-resolver-only").checked,
-    use_ech: $("eg-use-ech").checked,
     disable_ipv6: $("eg-disable-ipv6").checked,
   };
   try {
@@ -2339,6 +2345,7 @@ async function loadDnsCfg(){
     $("ca-max").value = d.cache.override_max_ttl_secs;
     $("ech-domain").value = d.ech_probe_domain || "";
     $("ech-mins").value = d.ech_probe_mins;
+    $("sech-strip").checked = !!d.strip_ech;
     $("lv6-log").checked = !!d.log_ipv6;
   } catch(e){}
 }
@@ -2456,11 +2463,14 @@ $("ech-save").addEventListener("click", ()=>{
     ech_probe_mins: Math.max(0, parseInt($("ech-mins").value) || 0),
   }, "ech-status", "applying…");
 });
+$("sech-save").addEventListener("click", ()=>{
+  postDnsConfig({strip_ech: $("sech-strip").checked}, "sech-status", "applying…");
+});
 $("lv6-save").addEventListener("click", ()=>{
   postDnsConfig({log_ipv6: $("lv6-log").checked}, "lv6-status", "applying…");
 });
 $("dnscfg-reset").addEventListener("click", ()=>{
-  if(!confirm("Drop every saved DNS override (upstream servers, mode, bootstrap, cache, ECH probing, query-log IPv6) and return to base config?")) return;
+  if(!confirm("Drop every saved DNS override (upstream servers, mode, bootstrap, cache, ECH probing and stripping, query-log IPv6) and return to base config?")) return;
   postDnsConfig({reset:true}, "ca-status", "resetting…");
 });
 

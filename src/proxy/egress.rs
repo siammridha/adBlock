@@ -1,5 +1,5 @@
-//! Outbound connection policy: resolves hosts through the built-in DNS and
-//! controls ECH, IPv6, and resolver-only mode.
+//! Outbound connection policy: resolves hosts through the built-in DNS, hands
+//! out their ECH configs, and controls IPv6 and resolver-only mode.
 
 use std::net::IpAddr;
 use std::num::NonZeroUsize;
@@ -59,7 +59,6 @@ impl<T: Clone> TtlCache<T> {
 #[serde(default)]
 pub struct EgressOverrides {
     pub resolver_only: Option<bool>,
-    pub use_ech: Option<bool>,
     pub disable_ipv6: Option<bool>,
 }
 
@@ -75,7 +74,6 @@ impl EgressOverrides {
         let flag = |key: &str| -> Option<bool> { v.get(key).and_then(serde_json::Value::as_bool) };
         Ok(EgressOverrides {
             resolver_only: flag("resolver_only"),
-            use_ech: flag("use_ech"),
             disable_ipv6: flag("disable_ipv6"),
         })
     }
@@ -84,14 +82,12 @@ impl EgressOverrides {
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct EgressSettings {
     pub resolver_only: bool,
-    pub use_ech: bool,
     pub disable_ipv6: bool,
 }
 
 pub struct EgressPolicy {
     dns: Arc<DnsService>,
     resolver_only: AtomicBool,
-    use_ech: AtomicBool,
     disable_ipv6: AtomicBool,
     store: OverrideStore<EgressOverrides>,
     addr_cache: TtlCache<Vec<IpAddr>>,
@@ -105,14 +101,12 @@ impl EgressPolicy {
         // is used as-is.
         store.ensure(&EgressOverrides {
             resolver_only: Some(true),
-            use_ech: Some(true),
             disable_ipv6: Some(true),
         });
         let o = store.load();
         Arc::new(Self {
             dns,
             resolver_only: AtomicBool::new(o.resolver_only.unwrap_or(true)),
-            use_ech: AtomicBool::new(o.use_ech.unwrap_or(true)),
             disable_ipv6: AtomicBool::new(o.disable_ipv6.unwrap_or(true)),
             store,
             addr_cache: TtlCache::new(RESOLVE_CACHE_CAP),
@@ -124,10 +118,6 @@ impl EgressPolicy {
         self.resolver_only.load(Ordering::Relaxed)
     }
 
-    pub fn use_ech(&self) -> bool {
-        self.use_ech.load(Ordering::Relaxed)
-    }
-
     pub fn disable_ipv6(&self) -> bool {
         self.disable_ipv6.load(Ordering::Relaxed)
     }
@@ -135,7 +125,6 @@ impl EgressPolicy {
     pub fn settings(&self) -> EgressSettings {
         EgressSettings {
             resolver_only: self.resolver_only(),
-            use_ech: self.use_ech(),
             disable_ipv6: self.disable_ipv6(),
         }
     }
@@ -144,23 +133,19 @@ impl EgressPolicy {
         if let Some(v) = upd.resolver_only {
             self.resolver_only.store(v, Ordering::Relaxed);
         }
-        if let Some(v) = upd.use_ech {
-            self.use_ech.store(v, Ordering::Relaxed);
-        }
         if let Some(v) = upd.disable_ipv6 {
             self.disable_ipv6.store(v, Ordering::Relaxed);
         }
         let snap = self.settings();
         let persisted = EgressOverrides {
             resolver_only: Some(snap.resolver_only),
-            use_ech: Some(snap.use_ech),
             disable_ipv6: Some(snap.disable_ipv6),
         };
         if let Err(e) = self.store.save(&persisted) {
             tracing::warn!(error = %e, "persisting proxy egress settings");
         }
-        // Settings like disable_ipv6 and use_ech change what a resolve returns,
-        // so drop anything cached under the old settings.
+        // A setting like disable_ipv6 changes what a resolve returns, so drop
+        // anything cached under the old settings.
         self.addr_cache.clear();
         self.ech_cache.clear();
         snap
@@ -176,9 +161,6 @@ impl EgressPolicy {
     }
 
     pub async fn ech_config_list(&self, host: &str) -> Option<Vec<u8>> {
-        if !self.use_ech() {
-            return None;
-        }
         if let Some(list) = self.ech_cache.get(host) {
             return list;
         }
@@ -202,10 +184,9 @@ mod tests {
     fn proxy_config_parses_present_flags_only() {
         let upd = EgressOverrides::parse(br#"{"resolver_only": true}"#).unwrap();
         assert_eq!(upd.resolver_only, Some(true));
-        assert_eq!(upd.use_ech, None);
         assert_eq!(upd.disable_ipv6, None);
-        let upd = EgressOverrides::parse(br#"{"use_ech": "yes"}"#).unwrap();
-        assert_eq!(upd.use_ech, None);
+        let upd = EgressOverrides::parse(br#"{"disable_ipv6": "yes"}"#).unwrap();
+        assert_eq!(upd.disable_ipv6, None);
         assert!(EgressOverrides::parse(b"[]").is_err());
     }
 

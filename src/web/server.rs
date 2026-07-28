@@ -81,10 +81,9 @@ pub(super) fn edit_proxy_config(
     state.log_event(
         crate::stats::api::EventKind::Info,
         format!(
-            "proxy egress: resolver-only={} ech={} disable-ipv6={}; \
+            "proxy egress: resolver-only={} disable-ipv6={}; \
              page injection: cosmetic={} scriptlets={}",
             settings.resolver_only,
-            settings.use_ech,
             settings.disable_ipv6,
             inj.cosmetic,
             inj.scriptlets

@@ -44,6 +44,17 @@ struct Pool<C = Pooled> {
     idle: Mutex<HashMap<PoolKey, Vec<C>>>,
 }
 
+/// Newest live connection, dropping the corpses it walks past.
+fn take_live<C: Idle>(v: &mut Vec<C>, require_ech: bool) -> Option<C> {
+    while let Some(pos) = v.iter().rposition(|p| p.is_live() && (!require_ech || p.ech())) {
+        let p = v.remove(pos);
+        if p.is_live() {
+            return Some(p);
+        }
+    }
+    None
+}
+
 const MAX_IDLE_PER_HOST: usize = 8;
 
 impl<C: Idle> Pool<C> {
@@ -51,16 +62,18 @@ impl<C: Idle> Pool<C> {
         Self { idle: Mutex::new(HashMap::new()) }
     }
 
+    /// An ECH wish is a preference, not a requirement: only hosts that publish
+    /// an ECH config ask for one, and even there a dial can fall back to plain.
+    /// Reuse that plain connection rather than opening a fresh one per request.
     fn checkout(&self, key: &PoolKey, want_ech: bool) -> Option<C> {
         let mut idle = self.idle.lock().expect("pool lock");
         let v = idle.get_mut(key)?;
-        while let Some(pos) = v.iter().rposition(|p| p.is_live() && (!want_ech || p.ech())) {
-            let p = v.remove(pos);
-            if p.is_live() {
+        if want_ech {
+            if let Some(p) = take_live(v, true) {
                 return Some(p);
             }
         }
-        None
+        take_live(v, false)
     }
 
     fn park(&self, key: PoolKey, entry: C) {
@@ -153,7 +166,13 @@ impl HttpClient {
         tls: bool,
     ) -> std::result::Result<(Response<Incoming>, bool), BoxError> {
         let key: PoolKey = (host.to_string(), port, tls);
-        let want_ech = tls && self.egress.as_ref().is_some_and(|e| e.use_ech());
+        // Only a host whose DNS HTTPS record carries an ECH config can ever hold
+        // an ECH connection, so only such a host asks for one. The lookup is
+        // cached by the egress policy, and `dial` needs the config anyway.
+        let want_ech = match (tls, self.egress.as_ref()) {
+            (true, Some(e)) => e.ech_config_list(host).await.is_some(),
+            _ => false,
+        };
         let mut req = to_origin_form(req);
 
         if let Some(mut pooled) = self.pool.checkout(&key, want_ech) {
@@ -185,7 +204,7 @@ impl HttpClient {
             return Ok((handshake(TokioIo::new(tcp)).await?, false));
         }
 
-        if let Some(egress) = self.egress.as_ref().filter(|e| e.use_ech()) {
+        if let Some(egress) = self.egress.as_ref() {
             if let Some(list) = egress.ech_config_list(host).await {
                 match ech_connect(&list, host, tcp).await {
                     Ok((stream, ech_used)) => {
@@ -658,7 +677,7 @@ mod tests {
     }
 
     #[test]
-    fn checkout_is_newest_first_and_only_ech_satisfies_an_ech_wish() {
+    fn checkout_is_newest_first_and_prefers_ech_when_asked() {
         let pool: Pool<FakeConn> = Pool::new();
         pool.park(key(), FakeConn::new(1, false, u32::MAX));
         pool.park(key(), FakeConn::new(2, true, u32::MAX));
@@ -668,6 +687,18 @@ mod tests {
         assert_eq!(pool.checkout(&key(), false).unwrap().id, 3);
         assert_eq!(pool.checkout(&key(), false).unwrap().id, 1);
         assert!(pool.checkout(&key(), false).is_none());
+    }
+
+    #[test]
+    fn an_ech_wish_still_reuses_a_plain_connection() {
+        let pool: Pool<FakeConn> = Pool::new();
+        pool.park(key(), FakeConn::new(1, false, u32::MAX));
+
+        assert_eq!(
+            pool.checkout(&key(), true).unwrap().id,
+            1,
+            "a host with no ECH config must still get connection reuse",
+        );
     }
 
     #[test]

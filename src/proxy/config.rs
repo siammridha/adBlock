@@ -46,7 +46,7 @@ impl ServerConfig {
         self.settings_dir().join("excluded-domains.conf")
     }
 
-    /// The proxy's persisted settings: egress policy (resolver-only/ECH/IPv6)
+    /// The proxy's persisted settings: egress policy (resolver-only/IPv6)
     /// and page injection (cosmetic CSS, scriptlets). One file, one group of
     /// keys per settings interface.
     pub fn settings_path(&self) -> PathBuf {

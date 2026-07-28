@@ -132,6 +132,7 @@ impl DnsConfigCommand {
                 .and_then(Value::as_str)
                 .map(|s| s.trim().to_string()),
             ech_probe_mins: v.get("ech_probe_mins").and_then(Value::as_u64).map(|n| n as u32),
+            strip_ech: v.get("strip_ech").and_then(Value::as_bool),
             log_ipv6: v.get("log_ipv6").and_then(Value::as_bool),
         }))
     }
