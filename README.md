@@ -3,10 +3,20 @@
 An intercepting HTTP/HTTPS proxy in Rust that blocks ads and trackers:
 
 - **Network filtering** using standard EasyList / uBlock-Origin filter lists
-  (`||host^`, `/path`, typed and party-scoped rules). Always on; blocked
-  requests drop the connection (network error, like a real ad blocker).
+  (`||host^`, `/path`, typed and party-scoped rules). Always on; a blocked
+  whole host drops the connection (network error, like a real ad blocker), a
+  blocked path gets an empty 403.
+- **Redirect rules** (`$redirect`, `$redirect-rule`) serve uBO's neutered
+  stand-in for a blocked resource — a do-nothing analytics script, an empty
+  pixel — so the page's own code keeps running instead of tripping over a
+  missing file. This is most of what "breaks fewer pages" means.
+- **Parameter stripping** (`$removeparam`) removes tracking parameters from the
+  request before it is forwarded.
 - **Cosmetic filtering** — injects element-hiding CSS from `##selector` rules
-  into HTML pages to hide leftover ad containers. Toggleable at runtime.
+  into HTML pages to hide leftover ad containers, plus the `:style()` unbreak
+  rules that put a page's scroll back after a modal is hidden. A small injected
+  script keeps asking about elements the page builds later. Toggleable at
+  runtime. See [Cosmetic filtering](#cosmetic-filtering).
 - **Scriptlet injection** — resolves uBlock Origin `##+js(…)` rules against the
   full uBO scriptlet library and injects the resulting JS into HTML pages.
   Strips CSP so the injected script runs (a deliberate security tradeoff).
@@ -53,7 +63,7 @@ allowed dependency edges, and how they are enforced are in
 
 | Module    | Owns                                                                                |
 |-----------|-------------------------------------------------------------------------------------|
-| `adblock` | Filter engine and block decisions, cosmetic CSS, the uBO scriptlet library, blocklist storage/fetching/auto-update, custom filters, the rule tester. |
+| `adblock` | Filter engine and block decisions (including `$redirect` bodies and `$removeparam` URLs), cosmetic CSS, the uBO scriptlet library, blocklist storage/fetching/auto-update, custom filters, the rule tester. |
 | `proxy`   | The accept loop, plain-HTTP forwarding, CONNECT/MITM, the signing CA and managed cert store, MITM exclusions, its pooled upstream HTTP client, egress policy (resolver-only, IPv6), injection toggles. |
 | `dns`     | The DNS listener, cache, upstream pool (UDP/TCP/DoT/DoH) and health, rewrites, ECH stripping and probing. |
 | `stats`   | Counters, the rolling 24 h window, the event log, the request/query logs and their rotating files on disk, body capture storage and decoding, retention. |
@@ -230,6 +240,7 @@ JSON API (all on `admin_listen`):
 | `/api/blocklists`        | GET/POST | list / add-append-replace-delete               |
 | `/api/blocklist?name=`   | GET      | one list's raw rule text (for editing)         |
 | `/api/check`             | POST     | test a URL against rules (`{url,type?,source?}`)|
+| `/api/cosmetic`          | POST     | generic cosmetic CSS for class/id names a live page grew (`{url,classes,ids}`); CORS-open, called by the injected runtime, not the dashboard |
 | `/api/exclusions`        | GET/POST | domains that bypass MITM (add / delete)        |
 | `/api/server`            | GET      | proxy + DNS listener status (enabled / listen / running) |
 | `/api/server/config`     | POST     | start/stop or rebind the proxy & DNS listeners live (persisted) |
@@ -247,23 +258,92 @@ JSON API (all on `admin_listen`):
 | `/ca-cert.pem`           | GET      | download the active CA                         |
 
 Bind it to `127.0.0.1` only (the default) — it exposes controls. Set
-`PROXY_ADMIN_LISTEN=""` to disable it entirely.
+`PROXY_ADMIN_LISTEN=""` to disable it entirely (which also turns off the
+live-DOM cosmetic runtime, since it has nothing left to ask).
+
+`/api/cosmetic` is the one endpoint that answers cross-origin, because the page
+calling it sits on someone else's domain. It only reads filter rules — it
+changes nothing and exposes no controls. Every other endpoint stays same-origin.
 
 ---
 
 ## Blocking behavior
 
-- **Blocked requests drop the connection**, so the client sees a network
+- **A blocked whole host drops the connection**, so the client sees a network
   error — how real ad blockers behave, and what block-tester pages score as
-  blocked. There is no 403 mode and no live on/off toggle.
+  blocked. A blocked *path* on an otherwise-fine host gets an empty 403
+  instead, so the other requests sharing that connection survive. There is no
+  live on/off toggle.
+- **`$redirect` rules answer 200 with a stand-in body** rather than blocking
+  outright. The bodies are the uBO resources already in
+  `data/scriptlets/scriptlets.json`, so nothing extra is downloaded, and they
+  load whether or not scriptlet injection is switched on. A `$redirect-rule`
+  only supplies a body — it never blocks on its own, so the stand-in is used
+  only once something else has decided to block.
+- **`$removeparam` rewrites the forwarded URL only.** The site receives the
+  cleaned URL; the browser is never told, so the parameter stays in its address
+  bar. (uBO redirects the browser instead, which also fixes the address bar but
+  turns a misfiring rule into a redirect loop.)
 - **Cosmetic (`##`) rules** apply only to uncompressed HTML. The proxy requests
   `Accept-Encoding: identity` for document loads so it can inject the hide-CSS;
-  compressed HTML streams through unmodified.
+  compressed HTML streams through unmodified. Text *encoding* is not a
+  constraint — splicing happens on raw bytes, so a windows-1252 or Shift_JIS
+  page, or one with a single bad byte, is filtered like any other.
 - **Cert-pinned / bypassed hosts.** Some hosts (e.g. Apple's own `*.apple.com`)
   are pinned by the client, so MITM fails; `||host^` rules are enforced at the
   CONNECT stage instead. Traffic that skips the proxy entirely (HTTP/3/QUIC, OS
   proxy-bypass lists) can't be filtered here — block those via DNS, `/etc/hosts`,
   or an app-layer firewall on the client.
+
+---
+
+## Cosmetic filtering
+
+Cosmetic rules hide the leftovers that request blocking can't: the empty ad
+slot, the placeholder, the "disable your ad blocker" overlay. Three kinds come
+out of the engine, and they need different amounts of work.
+
+**Hide rules** (`example.com##.ad-banner`) become one `display:none !important`
+line each. Site-specific ones ship in full, because the URL says which site it
+is.
+
+**Unbreak rules** (`example.com##body:style(overflow: auto !important)`) are
+pure CSS too, and go in right after the hide rules so they win on a shared
+element. These matter more than their small count suggests: hiding a modal
+without restoring the page's scroll leaves it frozen, which is worse than not
+filtering at all.
+
+**Operator rules** (`:has-text()`, `:upward()`, `:xpath()`) need a live DOM to
+evaluate and are dropped. The engine is built with its `css-validation` feature
+on so it classifies these correctly — without it the engine treats them as
+plain CSS and they end up emitted into pages as invalid rules.
+
+### Generic rules and pages that build themselves
+
+Generic rules (`##.adsbox`, matching anywhere) number in the hundreds of
+thousands, so they can't all be sent. Instead the proxy scans the served HTML
+for class and id names and sends only the generic rules that match one.
+
+That works on a page that arrives as finished HTML. It fails on a page that
+arrives nearly empty and builds itself in JavaScript, which is most large sites
+now — by the time the ad container exists, the one chance to look has passed.
+
+So the proxy also injects a small script that watches for new elements, batches
+up any class or id name it hasn't asked about, posts them to `/api/cosmetic` on
+the admin server, and applies the CSS that comes back. Names are deduplicated,
+sent at most 500 per request, and the whole thing stops after 20 rounds so a
+page that rewrites itself forever can't ask forever.
+
+Two things to know about it:
+
+- It is injected only when **Cosmetic filtering** is on *and* the admin server
+  is running (`PROXY_ADMIN_LISTEN` non-empty). The endpoint URL is built from
+  the configured admin address, with a wildcard bind treated as loopback — so a
+  browser on a *different machine* than the proxy can't reach it, and only the
+  one-shot scan applies there.
+- Because it is an inline script, it strips CSP on the pages it goes into, the
+  same way scriptlet injection does. That means CSP can now be stripped with
+  scriptlet injection switched off.
 
 ---
 
@@ -283,6 +363,10 @@ Adblock loads the library from `data/scriptlets/scriptlets.json` — a JSON arra
 of `adblock::resources::Resource` objects (the adblock-rust format). A
 pre-generated copy ships in the repo and in the Docker image, so scriptlets work
 out of the box.
+
+The same file holds the `$redirect` stand-in bodies, which apply whether or not
+scriptlet injection is on. So the file is loaded whenever it exists; the
+**Scriptlet injection** switch controls injection, not loading.
 
 ### Refreshing the library
 
@@ -318,10 +402,12 @@ How injection works:
 - For each HTML page, matching `##+js(…)` rules are resolved to JS (dependencies
   inlined, args substituted) and injected as a `<script>` right after `<head>`,
   so it runs before the page's own scripts.
-- **CSP is stripped** on every HTML response injected into, because a strict
-  `Content-Security-Policy` would otherwise refuse the inline script. This is a
-  real, site-wide security downgrade — it's the tradeoff for the feature being on
-  by default (set `inject_scriptlets = false` to opt out).
+- **CSP is stripped** on every HTML response an inline script goes into, because
+  a strict `Content-Security-Policy` would otherwise refuse it. This is a real,
+  site-wide security downgrade — the tradeoff for the feature being on by
+  default. Note it is keyed on *any* injected script, so the live-DOM cosmetic
+  runtime triggers it too; turning **Scriptlet injection** off no longer
+  guarantees the CSP survives.
 - The **Scriptlets** dashboard tab and the `scriptlets injected` log lines show
   which scriptlets fired into which page, for debugging.
 
@@ -334,14 +420,17 @@ cargo test                    # unit + integration + the boundary lint
 ./scripts/check-boundaries.sh # just the boundary lint
 ```
 
-Covers ad-block match/allow/disabled, runtime list add/rebuild, list-store
+Covers ad-block match/allow/disabled, `$redirect` body decoding and
+`$removeparam` URL rewriting, runtime list add/rebuild, list-store
 reconciliation (in-memory store), the blocklist fetch flow (canned downloader,
 no network), the request/response/CONNECT pipeline decisions (target, type,
 cosmetic injectability, deny/tunnel/MITM), the IO shell driven in-process through its seams (canned
 upstream/DNS/clock), request-log recording + capture (buffered and streaming),
 DNS upstream parsing/health and listener control, the admin API end-to-end
 in-process, the upstream HTTP client (loopback + redirects), cosmetic CSS
-generation, scriptlet resolution + naming, and config validation/exclusions.
+generation (hide, `:style()`, and dropping operator rules), injection into
+non-UTF-8 pages, the live-DOM runtime and its endpoint, scriptlet resolution +
+naming, and config validation/exclusions.
 
 `tests/boundaries.rs` is the module-boundary lint: it fails on any cross-module
 `use` that skips a module's `api` facade or takes an edge the architecture

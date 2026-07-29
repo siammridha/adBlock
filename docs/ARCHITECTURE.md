@@ -71,7 +71,10 @@ pre-validate.
 ## Adblock
 
 **Exposes to Proxy and DNS:** an API to ask whether a given domain or path should be
-blocked, and to retrieve cosmetic filtering rules.
+blocked, and to retrieve cosmetic filtering rules. A block decision carries what
+to do about it as well as the verdict: a stand-in body to serve instead
+(`$redirect`), or a cleaned URL to forward (`$removeparam`). Adblock decodes
+both; the caller only picks the response.
 
 **Exposes to the Web App:** APIs for custom filter management, the rule tester,
 blocklist management, and its own settings.
