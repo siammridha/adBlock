@@ -37,7 +37,8 @@ mod sse;
 mod stats;
 
 use self::blocklists::{
-    blocklist_text_json, blocklists_json, check_rule, scriptlet_source_json, scriptlets_json,
+    blocklist_text_json, blocklists_json, check_rule, cosmetic_for_page, scriptlet_source_json,
+    scriptlets_json,
 };
 use self::dns::{
     check_dns_rule, dns_json, edit_dns_config, edit_dns_upstreams, edit_rewrites, probe_ech,
@@ -220,6 +221,7 @@ impl Admin {
             "/api/blocklists" => self.add_blocklist(body).await,
             "/api/exclusions" => edit_exclusions(&self.state, &self.exclusions, body),
             "/api/check" => check_rule(&self.adblock, body),
+            "/api/cosmetic" => cosmetic_for_page(&self.adblock, body),
             "/api/dns/flush" => self.with_dns(|dns| {
                 let cleared = dns.cache().clear();
                 self.state.log_event(
@@ -453,6 +455,33 @@ mod tests {
         let v = body_json(resp).await;
         assert_eq!(v["blocked"], true);
         assert_eq!(v["list"], "custom");
+    }
+
+    #[tokio::test]
+    async fn a_filtered_page_can_ask_about_names_it_grew_later() {
+        let admin = admin(&["##.adsbox", "##.promo-unit"], Arc::new(CannedDownloader("")));
+
+        let resp = admin
+            .route(post(
+                "/api/cosmetic",
+                r#"{"url": "https://spa.example/feed", "classes": ["adsbox"], "ids": []}"#,
+            ))
+            .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get("access-control-allow-origin").unwrap(),
+            "*",
+            "the page lives on another origin and could not read the answer otherwise"
+        );
+        let v = body_json(resp).await;
+        let css = v["css"].as_str().unwrap();
+        assert!(css.contains(".adsbox{display:none !important}"), "css was: {css}");
+        assert!(!css.contains(".promo-unit"), "only the names asked about: {css}");
+
+        // Adblock owns the validating; the web app just renders the refusal.
+        let resp = admin.route(post("/api/cosmetic", r#"{"classes": []}"#)).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(body_json(resp).await["error"], "missing 'url'");
     }
 
     #[tokio::test]

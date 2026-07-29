@@ -1,53 +1,98 @@
 //! HTML rewriting: injects cosmetic-filter CSS and scriptlet JS, and extracts
 //! classes/ids for cosmetic filtering.
 
+const COSMETIC_RUNTIME: &str = include_str!("cosmetic_runtime.js");
+
+/// The live-DOM cosmetic script, pointed at the admin server's cosmetic
+/// endpoint. `None` when there is no admin server to ask, in which case pages
+/// keep the one-shot scan and nothing else.
+///
+/// ponytail: the endpoint is built from the configured admin address, so a
+/// browser on another machine cannot reach it — a wildcard bind becomes
+/// loopback here. Serve the endpoint through the proxy itself if remote
+/// clients ever need it.
+pub(crate) fn cosmetic_runtime(admin_listen: &str) -> Option<String> {
+    let addr = admin_listen.trim();
+    if addr.is_empty() {
+        return None;
+    }
+    let port = addr.rsplit(':').next().filter(|p| !p.is_empty())?;
+    let host = match addr.rsplit_once(':').map(|(h, _)| h.trim_matches(['[', ']'])) {
+        Some("0.0.0.0") | Some("::") | Some("") | None => "127.0.0.1",
+        Some(h) if h.contains(':') => return Some(endpoint(&format!("[{h}]"), port)),
+        Some(h) => h,
+    };
+    Some(endpoint(host, port))
+}
+
+fn endpoint(host: &str, port: &str) -> String {
+    COSMETIC_RUNTIME.replace(
+        "__COSMETIC_ENDPOINT__",
+        &format!("http://{host}:{port}/api/cosmetic"),
+    )
+}
+
+/// Splice the CSS and scriptlets into a served page.
+///
+/// This works on raw bytes, never on a `&str`. The insertion points are all
+/// ASCII tags that look identical in every encoding a browser accepts, so a
+/// windows-1252 or Shift_JIS page — or one with a single bad byte — still gets
+/// filtered, and everything outside the splice is copied through untouched.
 pub(crate) fn inject_into_html(html: &[u8], css: &str, script: &str) -> Option<Vec<u8>> {
     if css.is_empty() && script.is_empty() {
         return None;
     }
-    let s = std::str::from_utf8(html).ok()?;
-    let lower = s.to_ascii_lowercase();
 
     let style = (!css.is_empty()).then(|| format!("<style type=\"text/css\">{css}</style>"));
-    let script_tag =
-        (!script.is_empty()).then(|| format!("<script>try{{\n{script}\n}}catch(e){{}}</script>"));
+    // `document.currentScript.remove()` takes our own <script> tag back out of
+    // the DOM once it has run, so anti-adblock code cannot find it in
+    // `document.scripts` and read the scriptlet source back. It sits after the
+    // catch, so a scriptlet that throws still leaves the tag cleaned up.
+    let script_tag = (!script.is_empty()).then(|| {
+        format!("<script>try{{\n{script}\n}}catch(e){{}}document.currentScript.remove()</script>")
+    });
 
-    let mut out = String::with_capacity(s.len() + 256);
+    let mut out: Vec<u8> = Vec::with_capacity(html.len() + 256);
     let mut cursor = 0usize;
 
     if let Some(tag) = script_tag {
-        let after_head = lower
-            .find("<head")
-            .and_then(|h| lower[h..].find('>').map(|g| h + g + 1));
+        let after_head =
+            find_ascii(html, b"<head", 0).and_then(|h| find_ascii(html, b">", h).map(|g| g + 1));
         match after_head {
             Some(p) => {
-                out.push_str(&s[..p]);
-                out.push_str(&tag);
+                out.extend_from_slice(&html[..p]);
+                out.extend_from_slice(tag.as_bytes());
                 cursor = p;
             }
-            None => out.push_str(&tag),
+            None => out.extend_from_slice(tag.as_bytes()),
         }
     }
 
     if let Some(style) = style {
-        let pos = lower[cursor..]
-            .find("</head>")
-            .or_else(|| lower[cursor..].find("</body>"))
-            .map(|p| cursor + p);
+        let pos = find_ascii(html, b"</head>", cursor)
+            .or_else(|| find_ascii(html, b"</body>", cursor));
         match pos {
             Some(p) => {
-                out.push_str(&s[cursor..p]);
-                out.push_str(&style);
+                out.extend_from_slice(&html[cursor..p]);
+                out.extend_from_slice(style.as_bytes());
                 cursor = p;
             }
-            None => {
-                out.push_str(&style);
-            }
+            None => out.extend_from_slice(style.as_bytes()),
         }
     }
 
-    out.push_str(&s[cursor..]);
-    Some(out.into_bytes())
+    out.extend_from_slice(&html[cursor..]);
+    Some(out)
+}
+
+/// Case-insensitive search for an ASCII needle in raw page bytes, starting at
+/// `from`.
+fn find_ascii(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+    haystack
+        .get(from..)?
+        .windows(needle.len())
+        .position(|w| w.eq_ignore_ascii_case(needle))
+        .map(|p| from + p)
 }
 
 pub(crate) fn html_classes_and_ids(html: &str) -> (Vec<String>, Vec<String>) {
@@ -147,7 +192,35 @@ mod tests {
     }
 
     #[test]
-    fn inject_leaves_non_utf8_alone() {
-        assert!(inject_into_html(&[0xff, 0xfe, b'<'], "c", "s").is_none());
+    fn a_page_that_is_not_utf8_still_gets_filtered() {
+        // 0xff/0xfe are not valid UTF-8. Splicing on bytes means the page is
+        // still injected and the bad bytes survive the round trip untouched.
+        let mut page = b"<html><head></head><body>".to_vec();
+        page.extend_from_slice(&[0xff, 0xfe]);
+        page.extend_from_slice(b"</body></html>");
+        let out = inject_into_html(&page, ".ad{}", "hook()").unwrap();
+        assert!(out.windows(6).any(|w| w == b"hook()"), "scriptlets must still be injected");
+        assert!(out.windows(6).any(|w| w == b"<style"), "css must still be injected");
+        assert!(out.windows(2).any(|w| w == [0xff, 0xfe]), "the original bytes must survive");
+    }
+
+    #[test]
+    fn the_runtime_points_at_the_admin_endpoint() {
+        assert!(cosmetic_runtime("").is_none(), "no admin server, no runtime");
+        let js = cosmetic_runtime("127.0.0.1:8081").unwrap();
+        assert!(js.contains("\"http://127.0.0.1:8081/api/cosmetic\""), "{js}");
+        assert!(!js.contains("__COSMETIC_ENDPOINT__"), "placeholder must be replaced");
+        assert!(
+            cosmetic_runtime("0.0.0.0:8081").unwrap().contains("http://127.0.0.1:8081/"),
+            "a wildcard bind is not reachable from a page; use loopback"
+        );
+        assert!(cosmetic_runtime("[::1]:8081").unwrap().contains("http://[::1]:8081/"));
+    }
+
+    #[test]
+    fn the_injected_script_tag_removes_itself() {
+        let out = inject_into_html(b"<html><head></head></html>", "", "hook()").unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("}catch(e){}document.currentScript.remove()</script>"), "{s}");
     }
 }

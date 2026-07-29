@@ -30,7 +30,11 @@ rcgen = { version = "0.13", default-features = false, features = ["pem", "ring",
 x509-parser = "0.16"
 
 # Ad blocking
-adblock = { version = "0.9", default-features = false, features = ["embedded-domain-resolver", "full-regex-handling"] }
+# `css-validation` pulls in the real selector parser. Without it the engine
+# stubs out validation and wraps every selector as plain CSS, so procedural
+# rules (`:has-text()`, `:upward()`, …) are mistaken for hide rules instead of
+# being classified as procedural.
+adblock = { version = "0.9", default-features = false, features = ["css-validation", "embedded-domain-resolver", "full-regex-handling"] }
 # Pin transitive `rmp` to a version compatible with adblock's rmp-serde 0.15.
 rmp = "=0.8.11"
 

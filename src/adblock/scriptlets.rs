@@ -30,22 +30,24 @@ pub struct ScriptletLibrary {
 }
 
 impl ScriptletLibrary {
+    // The resource file holds both scriptlets and the `$redirect` stand-in
+    // bodies, and redirects apply whether or not scriptlet injection is on. So
+    // load the file whenever there is one; `inject` only gates injection.
     pub fn from_config(cfg: &AdblockConfig) -> Result<Self> {
-        let resources = if cfg.inject_scriptlets && !cfg.scriptlet_resources.as_os_str().is_empty()
-        {
-            if cfg.scriptlet_resources.exists() {
-                let resources = load_resources(&cfg.scriptlet_resources)?;
-                tracing::info!(count = resources.len(), "scriptlet resources loaded");
-                resources
-            } else {
+        let resources = if cfg.scriptlet_resources.as_os_str().is_empty() {
+            Vec::new()
+        } else if cfg.scriptlet_resources.exists() {
+            let resources = load_resources(&cfg.scriptlet_resources)?;
+            tracing::info!(count = resources.len(), "scriptlet resources loaded");
+            resources
+        } else {
+            if cfg.inject_scriptlets {
                 tracing::warn!(
                     path = %cfg.scriptlet_resources.display(),
                     "scriptlet injection is on but the resource file is missing — no \
                      scriptlets loaded; use the admin UI's \"Update from uBO\" button"
                 );
-                Vec::new()
             }
-        } else {
             Vec::new()
         };
         Ok(Self {

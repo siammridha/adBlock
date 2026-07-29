@@ -115,9 +115,13 @@ struct Inner {
     state: Arc<SharedState>,
     client: Arc<dyn Upstream>,
     blackhole: BlackholeProbe,
+    /// The live-DOM cosmetic script, built once from the admin address. `None`
+    /// when no admin server is running for it to talk to.
+    cosmetic_runtime: Option<String>,
 }
 
 impl Proxy {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         max_inspect_bytes: usize,
         adblock: Arc<AdBlocker>,
@@ -127,6 +131,7 @@ impl Proxy {
         state: Arc<SharedState>,
         client: Arc<HttpClient>,
         egress: Arc<crate::proxy::egress::EgressPolicy>,
+        admin_listen: &str,
     ) -> Self {
         let resolver = Arc::new(EgressResolver(egress));
         Self::with_seams(
@@ -138,6 +143,7 @@ impl Proxy {
             state,
             client,
             resolver,
+            admin_listen,
         )
     }
 
@@ -151,6 +157,7 @@ impl Proxy {
         state: Arc<SharedState>,
         client: Arc<dyn Upstream>,
         resolver: Arc<dyn Resolver>,
+        admin_listen: &str,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
@@ -162,6 +169,7 @@ impl Proxy {
                 state,
                 client,
                 blackhole: BlackholeProbe::new(resolver),
+                cosmetic_runtime: crate::proxy::html::cosmetic_runtime(admin_listen),
             }),
         }
     }
@@ -442,6 +450,13 @@ impl Proxy {
         if decision.blocked {
             let by = decision.attribution.display();
             self.record_block(request_facts(&plan), &plan.host, &by, &req_hdrs, &req_bytes, req_enc);
+            // A `$redirect` rule hands us a stand-in body for the blocked
+            // resource. Serving it keeps the page's own code working, which an
+            // empty 403 does not.
+            if let Some(redirect) = decision.redirect {
+                tracing::debug!(url = %plan.url, mime = %redirect.mime, "serving redirect resource");
+                return Ok(redirect_response(redirect));
+            }
             // Only drop the connection when the whole host is blocked. A
             // path-level block gets a synthetic response so the other requests
             // sharing this connection keep working.
@@ -467,6 +482,16 @@ impl Proxy {
         }
 
         state.count(Metric::Requests, &plan.host);
+
+        // `$removeparam`: forward the cleaned URL. The browser is never told, so
+        // the parameter stays in its address bar; only the request the site
+        // receives is stripped.
+        if let Some(clean) = &decision.rewritten_url {
+            if let Some(uri) = pipeline::rewrite_uri(&parts.uri, clean) {
+                tracing::debug!(from = %plan.url, to = %clean, "stripped tracking parameters");
+                parts.uri = uri;
+            }
+        }
 
         let fwd = Request::from_parts(parts, Full::new(req_bytes.clone()));
 
@@ -524,16 +549,28 @@ impl Proxy {
                 .scriptlets
                 .then(|| self.inner.adblock.scriptlet_injection(url))
                 .flatten();
-            let plan = pipeline::plan_inspection(
-                inject.scriptlets && self.inner.adblock.scriptlets_enabled(),
-                self.inner.max_inspect_bytes,
-            );
-            let script = injection.as_ref().map(|i| i.js.as_str()).unwrap_or("");
+            // The live-DOM runtime rides along with cosmetic filtering. The
+            // scan below sees the page only as it was served, so on a page that
+            // builds itself in JavaScript the runtime is the only thing that
+            // can ask about the class and id names that appear later.
+            let runtime = match inject.cosmetic {
+                true => self.inner.cosmetic_runtime.as_deref().unwrap_or(""),
+                false => "",
+            };
+            let script = match injection.as_ref() {
+                Some(i) if !runtime.is_empty() => format!("{}\n{runtime}", i.js),
+                Some(i) => i.js.clone(),
+                None => runtime.to_string(),
+            };
+            // Any inline script of ours needs the page's CSP out of the way,
+            // scriptlet or runtime alike.
+            let plan =
+                pipeline::plan_inspection(!script.is_empty(), self.inner.max_inspect_bytes);
             let (mut parts, body) = resp.into_parts();
             let resp_enc = capture::BodyEncoding::from_headers(&parts.headers);
             let collected = body.collect().await?.to_bytes();
             capture::response_body(&exchange, &collected, resp_enc);
-            let mutated = plan.apply(&mut parts, &collected, script, |classes, ids| {
+            let mutated = plan.apply(&mut parts, &collected, &script, |classes, ids| {
                 if inject.cosmetic {
                     self.inner.adblock.cosmetic_css(url, classes, ids)
                 } else {
@@ -563,6 +600,17 @@ fn empty_body() -> ResBody {
 
 fn full_body(bytes: Bytes) -> ResBody {
     Full::new(bytes).map_err(|e| match e {}).boxed()
+}
+
+/// Serve a `$redirect` stand-in as a normal 200. The mime comes from the
+/// resource file, so a malformed one falls back to the plain block response
+/// rather than failing the request.
+fn redirect_response(redirect: crate::adblock::api::Redirect) -> Response<ResBody> {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(hyper::header::CONTENT_TYPE, redirect.mime)
+        .body(full_body(Bytes::from(redirect.body)))
+        .unwrap_or_else(|_| synthetic_blocked_response())
 }
 
 /// The response returned for a path-level block. A `403 Forbidden` with an empty
@@ -748,14 +796,17 @@ mod tests {
         };
         let (adblock, _curation) =
             crate::adblock::api::with_store(&cfg, Arc::new(MemoryListStore::new())).unwrap();
-        proxy_with_adblock(adblock, client, resolver, InjectionPolicy::all_on())
+        proxy_with_adblock(adblock, client, resolver, InjectionPolicy::all_on(), "")
     }
 
+    // `admin` is the admin server's address, which is what decides whether the
+    // live-DOM cosmetic runtime gets injected. Empty means no admin server.
     fn proxy_with_adblock(
         adblock: Arc<AdBlocker>,
         client: Arc<dyn Upstream>,
         resolver: Arc<dyn Resolver>,
         injection: Arc<InjectionPolicy>,
+        admin: &str,
     ) -> (Proxy, Arc<SharedState>) {
         let state = Arc::new(SharedState::new(
             StaticInfo {
@@ -784,6 +835,7 @@ mod tests {
             state.clone(),
             client,
             resolver,
+            admin,
         );
         (proxy, state)
     }
@@ -993,6 +1045,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_live_dom_runtime_is_injected_and_takes_the_csp_with_it() {
+        let upstream = CannedUpstream::new(
+            StatusCode::OK,
+            vec![
+                ("content-type", "text/html"),
+                ("content-security-policy", "script-src 'self'"),
+            ],
+            b"<html><head></head><body>x</body></html>",
+        );
+        let cfg = AdblockConfig {
+            enabled: true,
+            custom_rules: vec!["example.com##.ad-banner".into()],
+            data_dir: std::path::PathBuf::from("/nonexistent-for-tests"),
+            auto_update_hours: 0,
+            inject_scriptlets: false,
+            scriptlet_resources: std::path::PathBuf::new(),
+        };
+        let (adblock, _curation) =
+            crate::adblock::api::with_store(&cfg, Arc::new(MemoryListStore::new())).unwrap();
+        let (proxy, _state) = proxy_with_adblock(
+            adblock,
+            upstream,
+            FixedResolver::to(&["93.184.216.34:80"]),
+            InjectionPolicy::all_on(),
+            "127.0.0.1:8081",
+        );
+
+        let req = get("http://example.com/", &[("accept", "text/html")]);
+        let resp = proxy.handle_forward(req, false).await.unwrap();
+        assert!(
+            resp.headers().get("content-security-policy").is_none(),
+            "an inline script of ours needs the CSP out of the way, scriptlet or not"
+        );
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let html = std::str::from_utf8(&body).unwrap();
+        assert!(html.contains("http://127.0.0.1:8081/api/cosmetic"), "html: {html}");
+        assert!(html.contains("MutationObserver"), "html: {html}");
+        assert!(html.contains(".ad-banner{display:none !important}"), "html: {html}");
+    }
+
+    #[tokio::test]
+    async fn no_admin_server_means_no_live_dom_runtime() {
+        let upstream = CannedUpstream::new(
+            StatusCode::OK,
+            vec![("content-type", "text/html"), ("content-security-policy", "script-src 'self'")],
+            b"<html><head></head><body>x</body></html>",
+        );
+        let (proxy, _state) = test_proxy(
+            &["example.com##.ad-banner"],
+            upstream,
+            FixedResolver::to(&["93.184.216.34:80"]),
+        );
+
+        let req = get("http://example.com/", &[("accept", "text/html")]);
+        let resp = proxy.handle_forward(req, false).await.unwrap();
+        assert!(
+            resp.headers().get("content-security-policy").is_some(),
+            "CSS-only injection has no script and must leave the CSP alone"
+        );
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let html = std::str::from_utf8(&body).unwrap();
+        assert!(!html.contains("/api/cosmetic"), "nothing to ask, nothing injected: {html}");
+        assert!(html.contains(".ad-banner{display:none !important}"), "html: {html}");
+    }
+
+    #[tokio::test]
     async fn cosmetic_css_is_not_injected_once_the_setting_is_off() {
         let upstream = CannedUpstream::new(
             StatusCode::OK,
@@ -1019,6 +1137,7 @@ mod tests {
             upstream,
             FixedResolver::to(&["93.184.216.34:80"]),
             injection,
+            "127.0.0.1:8081",
         );
 
         let req = get("http://example.com/", &[("accept", "text/html")]);
@@ -1026,6 +1145,10 @@ mod tests {
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let html = std::str::from_utf8(&body).unwrap();
         assert!(!html.contains("display:none"), "html: {html}");
+        assert!(
+            !html.contains("/api/cosmetic"),
+            "the live-DOM runtime is part of cosmetic filtering and goes off with it: {html}"
+        );
     }
 
     #[tokio::test]
@@ -1094,6 +1217,7 @@ mod tests {
             upstream,
             FixedResolver::to(&["93.184.216.34:80"]),
             InjectionPolicy::all_on(),
+            "",
         );
 
         let mut obs = state.observe();

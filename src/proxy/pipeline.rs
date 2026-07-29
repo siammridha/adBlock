@@ -45,6 +45,19 @@ pub(crate) fn plan_request<B>(
     })
 }
 
+/// Rebuild a request URI from the cleaned absolute URL a `$removeparam` rule
+/// produced, keeping the form the client used: absolute-form for a plain proxy
+/// request, origin-form inside a MITM'd connection. Returns `None` when the
+/// cleaned URL cannot be parsed, so the request forwards unchanged.
+pub(crate) fn rewrite_uri(original: &hyper::Uri, clean: &str) -> Option<hyper::Uri> {
+    let clean: hyper::Uri = clean.parse().ok()?;
+    if original.authority().is_some() {
+        Some(clean)
+    } else {
+        clean.path_and_query()?.as_str().parse().ok()
+    }
+}
+
 pub(crate) fn response_wants_inspection(
     injection_target: bool,
     status: StatusCode,
@@ -73,8 +86,10 @@ impl InspectPlan {
         if !self.within_cap(body.len()) {
             return None;
         }
-        let html = std::str::from_utf8(body).ok()?;
-        let (classes, ids) = html_classes_and_ids(html);
+        // Only the class/id scan needs text, and it can be sloppy about bad
+        // bytes: the names it finds are used to look up rules and never written
+        // back into the page, so a mangled character just means one rule misses.
+        let (classes, ids) = html_classes_and_ids(&String::from_utf8_lossy(body));
         let css = cosmetic(&classes, &ids);
         let out = inject_into_html(body, &css, script)?;
         if self.strip_csp {
@@ -422,7 +437,7 @@ mod tests {
     }
 
     #[test]
-    fn csp_stripped_only_for_scriptlet_injection() {
+    fn csp_stripped_only_when_a_script_is_injected() {
         let body = b"<html><head></head></html>";
         let mut parts = parts_with(&[("content-security-policy", "script-src 'self'")]);
         assert!(plan_inspection(false, 0)
@@ -474,6 +489,8 @@ mod tests {
         crate::adblock::api::BlockDecision {
             blocked: false,
             attribution: crate::adblock::api::BlockAttribution { rule: None, list: None },
+            redirect: None,
+            rewritten_url: None,
         }
     }
 
@@ -484,7 +501,28 @@ mod tests {
                 rule: Some(rule.to_string()),
                 list: None,
             },
+            redirect: None,
+            rewritten_url: None,
         }
+    }
+
+    #[test]
+    fn removeparam_rewrite_keeps_the_form_the_client_used() {
+        let absolute: hyper::Uri = "http://e.com/x?a=1&utm_source=ad".parse().unwrap();
+        assert_eq!(
+            rewrite_uri(&absolute, "http://e.com/x?a=1").unwrap(),
+            "http://e.com/x?a=1",
+            "an absolute-form request stays absolute"
+        );
+
+        let origin: hyper::Uri = "/x?a=1&utm_source=ad".parse().unwrap();
+        assert_eq!(
+            rewrite_uri(&origin, "https://e.com/x?a=1").unwrap(),
+            "/x?a=1",
+            "inside a MITM'd connection only the path and query go on the wire"
+        );
+
+        assert!(rewrite_uri(&origin, "not a url").is_none(), "unparseable leaves the URI alone");
     }
 
     #[test]

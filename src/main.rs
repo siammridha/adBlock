@@ -125,6 +125,9 @@ async fn main() -> Result<()> {
         state.clone(),
         client,
         egress.clone(),
+        // Where the live-DOM cosmetic script sends its questions. Wiring, like
+        // the address itself: the proxy only embeds what the root hands it.
+        &admin_listen,
     );
     // Each service owns its lifecycle behind its settings interface. On first
     // run each writes its own settings file from built-in defaults; an existing

@@ -3,6 +3,7 @@
 
 use std::sync::{Arc, Mutex, RwLock};
 
+use adblock::cosmetic_filter_cache::ProceduralOrActionFilter;
 use adblock::lists::{FilterSet, ParseOptions};
 use adblock::request::Request;
 use adblock::resources::Resource;
@@ -98,6 +99,14 @@ impl ListEntry {
 pub struct BlockDecision {
     pub blocked: bool,
     pub attribution: BlockAttribution,
+    /// What to serve instead of the blocked resource, from a `$redirect` or
+    /// `$redirect-rule` option. Only ever set when `blocked` is true: a
+    /// `$redirect-rule` supplies a replacement without blocking on its own, and
+    /// serving one for a request that was going to be allowed would break it.
+    pub redirect: Option<Redirect>,
+    /// The request URL with tracking parameters stripped, from `$removeparam`.
+    /// Only meaningful when the request is not blocked.
+    pub rewritten_url: Option<String>,
 }
 
 impl BlockDecision {
@@ -105,8 +114,18 @@ impl BlockDecision {
         Self {
             blocked: false,
             attribution: BlockAttribution { rule: None, list: None },
+            redirect: None,
+            rewritten_url: None,
         }
     }
+}
+
+/// A stand-in body for a blocked request: a neutered copy of the real resource
+/// (an analytics script that does nothing, an empty image) so the page's own
+/// code keeps running instead of tripping over a missing file.
+pub struct Redirect {
+    pub mime: String,
+    pub body: Vec<u8>,
 }
 
 pub struct BlockAttribution {
@@ -200,6 +219,11 @@ impl AdBlocker {
         BlockDecision {
             blocked: result.matched,
             attribution: self.attribution(result.filter.as_deref()),
+            redirect: result
+                .matched
+                .then(|| result.redirect.as_deref().and_then(decode_redirect))
+                .flatten(),
+            rewritten_url: result.rewritten_url,
         }
     }
 
@@ -228,15 +252,48 @@ impl AdBlocker {
                     .filter(|s| !resources.exceptions.contains(s)),
             );
         }
-        let mut css = String::new();
-        for sel in selectors {
-            if !is_plain_css_selector(&sel) {
-                continue;
-            }
-            css.push_str(&sel);
-            css.push_str("{display:none !important}\n");
+        let mut css = hide_rules(selectors);
+        // Rules the engine could not reduce to a plain hide come back separately.
+        // Keep the ones that are still pure CSS — `:style()`, mostly unbreak
+        // rules like `body:style(overflow: auto !important)` — and drop the rest,
+        // which need a live DOM. They go last on purpose: both halves are
+        // `!important`, so on a shared element the later rule wins, and the
+        // unbreak rule is the one that has to win.
+        let mut actions: Vec<String> = resources
+            .procedural_actions
+            .iter()
+            .filter_map(|json| serde_json::from_str::<ProceduralOrActionFilter>(json).ok())
+            .filter_map(|filter| filter.as_css())
+            .map(|(selector, style)| format!("{selector}{{{style}}}\n"))
+            .collect();
+        actions.sort();
+        for rule in actions {
+            css.push_str(&rule);
         }
         css
+    }
+
+    /// Cosmetic rules for class and id names a page grew after it was served.
+    ///
+    /// Only the rules those names select: everything that does not depend on
+    /// the page's names — the hostname-specific rules, the custom generic ones,
+    /// the `:style()` unbreak rules — already went out with the page itself, so
+    /// repeating it on every question would just re-send the whole stylesheet.
+    pub fn cosmetic_css_for_names(&self, url: &str, classes: &[String], ids: &[String]) -> String {
+        if !self.core.enabled || (classes.is_empty() && ids.is_empty()) {
+            return String::new();
+        }
+        let engine = self.core.engine.read().expect("engine lock").clone();
+        let resources = engine.url_cosmetic_resources(url);
+        if resources.generichide {
+            return String::new();
+        }
+        hide_rules(
+            engine
+                .hidden_class_id_selectors(classes, ids, &resources.exceptions)
+                .into_iter()
+                .collect(),
+        )
     }
 
     pub fn scriptlets_enabled(&self) -> bool {
@@ -300,22 +357,23 @@ fn filter_request_type(req_type: &str) -> &str {
     }
 }
 
-fn is_plain_css_selector(selector: &str) -> bool {
-    const PROCEDURAL: [&str; 12] = [
-        ":has-text(",
-        ":matches-css",
-        ":matches-attr(",
-        ":matches-path(",
-        ":matches-media(",
-        ":min-text-length(",
-        ":upward(",
-        ":xpath(",
-        ":remove(",
-        ":style(",
-        ":watch-attr(",
-        ":others(",
-    ];
-    !PROCEDURAL.iter().any(|op| selector.contains(op))
+/// Emit one hide rule per selector, in a stable order.
+fn hide_rules(selectors: std::collections::BTreeSet<String>) -> String {
+    let mut css = String::new();
+    for sel in selectors {
+        css.push_str(&sel);
+        css.push_str("{display:none !important}\n");
+    }
+    css
+}
+
+/// Decode the engine's `data:<mime>;base64,<payload>` redirect into a body the
+/// proxy can serve. Anything not of that shape is dropped, and the request
+/// falls back to the plain block response.
+fn decode_redirect(data_url: &str) -> Option<Redirect> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let (mime, payload) = data_url.strip_prefix("data:")?.split_once(";base64,")?;
+    Some(Redirect { mime: mime.to_string(), body: STANDARD.decode(payload).ok()? })
 }
 
 fn build_engine(lists: &[ListEntry], resources: &[Resource]) -> Engine {
@@ -638,6 +696,14 @@ mod tests {
         rules: &[&str],
         resources: serde_json::Value,
     ) -> (Arc<AdBlocker>, Arc<ListCuration>) {
+        blocker_with_resources_inject(rules, resources, true)
+    }
+
+    fn blocker_with_resources_inject(
+        rules: &[&str],
+        resources: serde_json::Value,
+        inject: bool,
+    ) -> (Arc<AdBlocker>, Arc<ListCuration>) {
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
             "sp-scriptlet-{}-{}",
@@ -648,7 +714,7 @@ mod tests {
         let res_path = dir.join("resources.json");
         std::fs::write(&res_path, resources.to_string()).unwrap();
         let mut c = cfg(rules);
-        c.inject_scriptlets = true;
+        c.inject_scriptlets = inject;
         c.scriptlet_resources = res_path;
         with_store(&c, Arc::new(MemoryListStore::new())).unwrap()
     }
@@ -689,16 +755,68 @@ mod tests {
     }
 
     #[test]
-    fn cosmetic_css_drops_procedural_selectors_and_emits_one_rule_each() {
+    fn redirect_rules_carry_a_decoded_stand_in_body() {
+        // Redirects are not scriptlets: they must work with injection off too,
+        // which is why the resource file loads regardless of that switch.
+        for inject in [true, false] {
+            let (b, _) = blocker_with_resources_inject(
+                &["||ads.example.com/analytics.js^$script,redirect=noopjs"],
+                serde_json::json!([{
+                    "name": "noop.js",
+                    "aliases": ["noopjs"],
+                    "kind": {"mime": "application/javascript"},
+                    "content": "Ly8gbm9vcA=="
+                }]),
+                inject,
+            );
+            let d = b.check("https://ads.example.com/analytics.js", "https://news.test/", "script");
+            assert!(d.blocked);
+            let r = d.redirect.expect("a $redirect rule must supply a body");
+            assert_eq!(r.mime, "application/javascript");
+            assert_eq!(r.body, b"// noop");
+            assert_eq!(b.scriptlets_enabled(), inject, "the inject switch still gates injection");
+        }
+    }
+
+    #[test]
+    fn a_plain_block_has_no_stand_in_body() {
+        let (b, _) = blocker_with(&["||ads.example.com^"]);
+        let d = b.check("https://ads.example.com/x.js", "", "script");
+        assert!(d.blocked);
+        assert!(d.redirect.is_none(), "nothing to serve for a rule without $redirect");
+        assert!(b.check("https://ok.example.com/x.js", "", "script").redirect.is_none());
+    }
+
+    #[test]
+    fn removeparam_reports_the_cleaned_url_without_blocking() {
+        let (b, _) = blocker_with(&["$removeparam=utm_source"]);
+        let d = b.check("https://shop.example/item?id=7&utm_source=ad", "", "document");
+        assert!(!d.blocked, "$removeparam cleans, it does not block");
+        assert_eq!(d.rewritten_url.as_deref(), Some("https://shop.example/item?id=7"));
+        let clean = b.check("https://shop.example/item?id=7", "", "document");
+        assert!(clean.rewritten_url.is_none(), "nothing to strip, nothing to report");
+    }
+
+    #[test]
+    fn cosmetic_css_keeps_the_pure_css_rules_and_drops_the_ones_needing_a_dom() {
         let (b, _) = blocker_with(&[
             "example.com##.ad-banner",
             "example.com###sponsored",
+            "example.com##body:style(overflow: auto !important)",
             "example.com##.promo:has-text(Ad)",
         ]);
         let css = b.cosmetic_css("https://example.com/", &[], &[]);
-        assert!(css.contains(".ad-banner{display:none !important}\n"), "css was: {css}");
-        assert!(css.contains("#sponsored{display:none !important}\n"), "css was: {css}");
-        assert!(!css.contains(":has-text"), "css was: {css}");
+        assert!(css.contains(".ad-banner{display:none !important}\n"), "hide rule: {css}");
+        assert!(css.contains("#sponsored{display:none !important}\n"), "hide rule: {css}");
+        assert!(
+            css.contains("body{overflow: auto !important}\n"),
+            ":style() is pure CSS and must be emitted: {css}"
+        );
+        assert!(!css.contains(":has-text"), "an operator rule needs a live DOM: {css}");
+        assert!(
+            css.find("body{overflow").unwrap() > css.find(".ad-banner").unwrap(),
+            "unbreak rules must come after the hide rules so they win: {css}"
+        );
     }
 
     fn strings(v: &[&str]) -> Vec<String> {
