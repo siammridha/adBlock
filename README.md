@@ -3,23 +3,26 @@
 An intercepting HTTP/HTTPS proxy in Rust that blocks ads and trackers:
 
 - **Network filtering** using standard EasyList / uBlock-Origin filter lists
-  (`||host^`, `/path`, typed and party-scoped rules). Always on when
-  `adblock.enabled = true`; blocked requests drop the connection (network
-  error, like a real ad blocker).
+  (`||host^`, `/path`, typed and party-scoped rules). Always on; blocked
+  requests drop the connection (network error, like a real ad blocker).
 - **Cosmetic filtering** — injects element-hiding CSS from `##selector` rules
-  into HTML pages to hide leftover ad containers.
-- **Scriptlet injection** (opt-in) — resolves uBlock Origin `##+js(…)` rules
-  against the full uBO scriptlet library and injects the resulting JS into HTML
-  pages. Strips CSP so the injected script runs (a deliberate security
-  tradeoff). See [Scriptlet injection](#scriptlet-injection).
+  into HTML pages to hide leftover ad containers. Toggleable at runtime.
+- **Scriptlet injection** — resolves uBlock Origin `##+js(…)` rules against the
+  full uBO scriptlet library and injects the resulting JS into HTML pages.
+  Strips CSP so the injected script runs (a deliberate security tradeoff).
+  Toggleable at runtime. See [Scriptlet injection](#scriptlet-injection).
 - **CONNECT-stage host blocking** so whole-host rules apply even to
   certificate-pinned domains the proxy can't MITM.
+- **Filtering DNS server** — its own resolver with a cache, UDP/TCP/DoT/DoH
+  upstreams (failover or load-balance), local rewrites, and optional ECH
+  stripping. The proxy resolves through it, so DNS-level blocking and rewrites
+  apply to proxied traffic too.
 - **Streams** everything it doesn't need to touch; only HTML is buffered (and
   only when there are cosmetic rules to apply).
 - **Admin web dashboard** (separate port) with rolling 24 h stats (per-card
-  sparklines, top queried / top blocked domains), a searchable request log,
-  an event log, a rule tester, runtime blocklist editing, and a one-click
-  root-CA download.
+  sparklines, top queried / top blocked domains), searchable request and query
+  logs kept on disk, an event log, a rule tester, runtime blocklist editing,
+  and certificate management.
 
 ---
 
@@ -27,37 +30,37 @@ An intercepting HTTP/HTTPS proxy in Rust that blocks ads and trackers:
 
 ```
                  ┌─────────────────────────────────────────────┐
-   client ─────► │  proxy::server                              │
+   client ─────► │  proxy                                      │
    (browser,     │   ├─ CONNECT ─► host rule? ─► drop / MITM    │
     OS proxy)    │   │                 └─ terminate TLS (ca)    │
-                 │   ├─ adblock::AdBlocker (network decision)   │
+                 │   ├─ adblock (network decision)              │
+                 │   ├─ dns     (resolve the target host)       │
                  │   └─ response:                               │
-                 │        ├─ HTML ─► inject cosmetic CSS        │
+                 │        ├─ HTML ─► inject cosmetic CSS + JS   │
                  │        └─ else ─► stream through             │
                  └─────────────────────────────────────────────┘
                                      │
-                                     ▼  re-originated TLS (webpki + OS roots)
+                                     ▼  re-originated TLS (webpki + extra roots)
                                   upstream
 ```
 
-Module map (`src/`):
+`src/` holds five modules. Each owns its own settings, storage, validation, and
+outbound networking, and is reachable from outside only through its `api`
+submodule. Nothing is shared between them — no `utils/`, no common config, no
+shared error type; duplication is preferred to coupling. The full rules, the
+allowed dependency edges, and how they are enforced are in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-| Module          | Responsibility                                                        |
-|-----------------|-----------------------------------------------------------------------|
-| per-module config | Each of `proxy`/`adblock`/`dns`/`stats` owns its base settings and loads them from its own `data/settings/<module>-base.toml`, validating them itself; every key has a built-in default. |
-| `proxy::server`   | IO shell: accept loop, plain-HTTP forwarding, CONNECT/MITM.           |
-| `proxy::pipeline` | Pure per-request/response/CONNECT decisions (target, type, inject-or-stream, deny/tunnel/MITM). |
-| `proxy::ca`       | Signing CA load (required on disk); per-host leaf minting; TLS config cache.|
-| `http_client`     | The one shared upstream HTTP(S) client (proxy forwarding + list downloads). |
-| `adblock`         | `adblock` engine: block decisions + cosmetic CSS + list mgmt/storage. |
-| `exclusions`      | Runtime-managed domains that bypass MITM (blind tunnel).              |
-| `dns`             | Filtering DNS resolver: cache, DoH/DoT upstreams, rewrites, settings. |
-| `state`           | Shared metrics + the live UI stream (no server-side request log).     |
-| `history`         | Rolling 24 h stats: sparkline buckets + top queried/blocked domains.  |
-| `runtime`         | Live start/stop/rebind of the proxy + DNS listeners, with persisted server overrides. |
-| `persist`         | The persistence models: line-file sets (`PersistedSet`) and JSON override stores (`OverrideStore`). |
-| `web`             | Admin dashboard + JSON API, served on `admin_listen` (one submodule per sub-surface). |
-| `maintenance`     | Blocklist fetch (download→install→report) + the hourly auto-updater.  |
+| Module    | Owns                                                                                |
+|-----------|-------------------------------------------------------------------------------------|
+| `adblock` | Filter engine and block decisions, cosmetic CSS, the uBO scriptlet library, blocklist storage/fetching/auto-update, custom filters, the rule tester. |
+| `proxy`   | The accept loop, plain-HTTP forwarding, CONNECT/MITM, the signing CA and managed cert store, MITM exclusions, its pooled upstream HTTP client, egress policy (resolver-only, IPv6), injection toggles. |
+| `dns`     | The DNS listener, cache, upstream pool (UDP/TCP/DoT/DoH) and health, rewrites, ECH stripping and probing. |
+| `stats`   | Counters, the rolling 24 h window, the event log, the request/query logs and their rotating files on disk, body capture storage and decoding, retention. |
+| `web`     | Nothing of its own. It instantiates the modules, calls their APIs, and renders the dashboard + JSON API on `admin_listen`. |
+
+`main.rs` is wiring only: it builds each module's config, constructs them, hands
+them to each other, and starts the listeners.
 
 ---
 
@@ -68,16 +71,34 @@ cargo build --release
 ./target/release/proxy
 ```
 
-> **Configuration.** Each module (`proxy`, `adblock`, `dns`, `stats`) loads its own
-> base settings from `data/settings/<module>-base.toml` and validates them
-> itself; every key has a built-in default, so a module with no file just uses
-> its defaults. The tables are `[server]`/`[tls]`/`[performance]` for proxy,
-> `[adblock]`, `[dns]`, and `[logging]`. `admin_listen` (in `[server]`) is the one
-> wiring-level knob validated by the root, not a module.
+> **Configuration.** There are no config files to write. Each module builds its
+> base config from built-in defaults, then layers its own persisted settings
+> file over them at startup. Those files are written and validated by the owning
+> module and edited from the dashboard, not by hand:
+>
+> | File (under `data/settings/`) | Owner | Holds |
+> |---|---|---|
+> | `proxy-server.json`       | proxy | proxy listener: `enabled`, `listen` |
+> | `proxy-settings.json`     | proxy | egress (`resolver_only`, `disable_ipv6`) and injection (`cosmetic`, `scriptlets`) |
+> | `excluded-domains.conf`   | proxy | domains tunneled blind, one per line |
+> | `active-ca.json`          | proxy | which managed CA signs leaves |
+> | `dns-server.json`         | dns   | DNS listener: `enabled`, `listen` |
+> | `dns-settings.json`       | dns   | upstreams, mode, bootstrap, cache size, TTL bounds, ECH |
+> | `dns-rewrites.conf`       | dns   | local DNS records |
+> | `stats-settings.json`     | stats | `retention_hours`, `log_rotate_hours` |
+> | `stats-excluded-domains.conf` | stats | domains kept out of the logs and counters |
+>
+> Each file is created on first run from that module's defaults. Deleting one
+> resets that module to its defaults. `admin_listen` is the one wiring-level knob
+> the root owns, not a module: it defaults to `127.0.0.1:8081` and is overridden
+> with the `PROXY_ADMIN_LISTEN` environment variable (set it empty to turn the
+> dashboard off).
 
 No native dependencies. **You must supply a signing CA**: the proxy reads
-`data/certs/ca-cert.pem` / `data/certs/ca-key.pem` (paths in `[tls]`) and
-refuses to start if they're missing — it never generates its own. Use a
+`data/certs/ca-cert.pem` / `data/certs/ca-key.pem` and refuses to start if
+they're missing — it never generates its own. (Once running, the dashboard's
+**Certificates** tab manages further CAs under `data/certs/` and picks which one
+is active; the switch takes effect on the next start.) Use a
 private-PKI intermediate (e.g. step-ca) so leaves chain to a root your devices
 already trust:
 
@@ -105,10 +126,11 @@ Build the image (multi-stage; `.dockerignore` keeps `target/` and CA material ou
 docker build -t proxy:latest .
 ```
 
-The image bakes the scriptlet library and two module base files
-(`proxy-base.toml`, `dns-base.toml`) that bind the listeners to `0.0.0.0` so
-published ports work. It does **not** contain a CA — bind-mount one at run time
-(the container exits immediately without it):
+The image bakes the scriptlet library and two listener settings files
+(`proxy-server.json`, `dns-server.json`) that bind on `0.0.0.0`, and sets
+`PROXY_ADMIN_LISTEN=0.0.0.0:8081`, so published ports work. It does **not**
+contain a CA — bind-mount one at run time (the container exits immediately
+without it):
 
 ```bash
 docker run -d --name proxy \
@@ -137,68 +159,95 @@ curl -x http://localhost:8080 --cacert data/certs/ca-cert.pem -I https://example
 If the container exits at once, `docker logs proxy` shows
 `CA cert/key not found … provide a signing CA` — the mounts didn't land.
 
-To change the baked settings, mount your own base files over
-`/app/data/settings/proxy-base.toml` (or `dns-base.toml`), or mount a whole data
-dir at `/app/data` that already contains them — a bind-mounted empty dir hides
-the baked files, so it must supply its own. Behind a reverse proxy (Traefik +
+To change the baked settings, mount your own files over
+`/app/data/settings/proxy-server.json` (or `dns-server.json`), or mount a whole
+data dir at `/app/data` that already contains them — a bind-mounted empty dir
+hides the baked files, and the modules would then write loopback defaults. Move
+the dashboard with `-e PROXY_ADMIN_LISTEN=…`. Behind a reverse proxy (Traefik +
 step-ca), don't publish ports — attach to its network and route a
-TCP-passthrough entrypoint to `proxy:8080`; see `docker-compose-template-dev.yml`.
+TCP-passthrough entrypoint to `proxy:8080`.
 
 ---
 
 ## Admin web dashboard
 
-With `server.admin_listen` set (default `127.0.0.1:8081`), open
-`http://127.0.0.1:8081/`. It auto-refreshes every 2s and shows:
+With `admin_listen` set (default `127.0.0.1:8081`), open
+`http://127.0.0.1:8081/`. Stats refresh every 2 s over SSE. Tabs:
 
 - **Traffic cards** — requests, blocked, errors, DNS queries/blocked/cached,
-  each covering the **last 24 hours** with a sparkline (10-minute buckets;
-  history is in-memory and restarts with the proxy). Blocked requests count
-  as requests, so the block percentage is a real share. A **reset stats**
-  button zeroes every counter, the 24 h window, and the DNS upstream health
-  table.
+  each covering the **last 24 hours** with a sparkline (10-minute buckets; the
+  window is in-memory and restarts with the proxy). Blocked requests count as
+  requests, so the block percentage is a real share. A **reset stats** button
+  zeroes every counter, the 24 h window, and the DNS upstream health table.
 - **Top domains** — the most queried (allowed traffic only) and most blocked
   domains of the last 24 h, HTTP and DNS combined, with one-click
   block/unblock.
-- **Blocklists** — view/add/edit/delete lists; all custom rules live in one
-  persisted `custom` list.
-- **Rule tester** — check any URL against the current rules without sending
-  traffic; reports the outcome and matching rule.
+- **Requests** — searchable log of every forwarded request (method, status,
+  type, URL). New rows stream in live; older ones page back through the log
+  files on disk. Blocked requests show status `BLK`; opened tunnels show `OPEN`
+  and flip to closed when the tunnel ends. Clicking a row opens a drawer with
+  the captured headers and bodies (compressed bodies decode on demand), each
+  copyable.
+- **Queries** — the same, for DNS: name, type, answer, upstream, cache hit,
+  block decision.
+- **Rewrites** — local DNS records the resolver answers itself.
+- **Settings** (DNS) — upstream servers and mode (failover / load-balance),
+  bootstrap resolvers, cache size, TTL bounds, and the ECH switches, with live
+  per-upstream health.
+- **Errors / Activity** — colour-coded event streams.
+- **Custom filters** — the hand-maintained rule list.
+- **Blocklists** — view/add/edit/delete lists, and refresh them from source.
+- **Excluded** — domains tunneled blind, no MITM.
+- **Settings** (proxy) — resolver-only egress, IPv6 off, and the cosmetic-CSS
+  and scriptlet injection switches.
 - **Scriptlets** — the loaded uBO scriptlet library (searchable), plus a live
   feed of which scriptlets fired into which pages.
-- **Requests** — searchable live log of every forwarded request (method,
-  status, type, URL), streamed over SSE while the page is open. Blocked
-  requests show status `BLK`; opened tunnels show `OPEN`. The server keeps no
-  history: records exist only in the open page, and with no dashboard
-  connected nothing is recorded at all.
-- **Activity / Errors** — colour-coded event streams.
-- **Setup panel** — proxy address and a **Download root CA** link.
+- **Rule tester** — check any URL against the current rules without sending
+  traffic; reports the outcome and matching rule.
+- **Statistics** — log retention, rotation, and the domains kept out of the
+  logs entirely.
+- **Certificates** — the managed CAs, which one is active, and a **Download**
+  link so a client can trust it.
+- **Setup** — the proxy address and the root-CA download.
 
 JSON API (all on `admin_listen`):
 
-| Endpoint               | Method   | Purpose                                        |
-|------------------------|----------|------------------------------------------------|
-| `/api/stream`          | GET      | SSE live feed: `stats` (2 s), `request`, `attach` (captured headers/bodies), `event`, `dns` |
-| `/api/stats`           | GET      | info + metrics + uptime + the 24 h `window` (totals, series, top domains) |
-| `/api/stats/reset`     | POST     | zero all counters, the 24 h window, and DNS upstream health |
-| `/api/scriptlets`      | GET      | loaded scriptlet library + recent injections   |
-| `/api/blocklists`      | GET/POST | list / add-append-replace-delete               |
-| `/api/blocklist?name=` | GET      | one list's raw rule text (for editing)         |
-| `/api/scriptlet?name=` | GET      | one scriptlet's decoded JS source              |
-| `/api/scriptlets/update` | POST   | refresh the scriptlet library from uBO master  |
-| `/api/exclusions`      | GET/POST | domains that bypass MITM (add / delete)        |
-| `/api/check`           | POST     | test a URL against rules (`{url,type?,source?}`)|
-| `/api/server`          | GET      | proxy + DNS listener status (enabled / listen / running) |
-| `/api/server/config`   | POST     | start/stop or rebind the proxy & DNS listeners live (persisted) |
-| `/api/dns`             | GET      | resolver status: upstreams + health, cache, settings |
-| `/api/dns/flush`       | POST     | clear the DNS response cache                   |
-| `/api/dns/test`        | POST     | test a domain against the DNS filter (`{domain}`) |
-| `/api/dns/rewrites`    | GET/POST | operator-defined local records (add / delete)  |
-| `/api/dns/config`      | POST     | live upstream/cache settings; `{"reset": true}` returns to base config |
-| `/ca-cert.pem`         | GET      | download the root CA                           |
+| Endpoint                 | Method   | Purpose                                        |
+|--------------------------|----------|------------------------------------------------|
+| `/api/stream`            | GET      | SSE live feed: `stats` (2 s), `request`, `attach` (captured headers/bodies), `event`, `dns` |
+| `/api/stats`             | GET      | info + metrics + uptime + the 24 h `window` (totals, series, top domains) |
+| `/api/stats/reset`       | POST     | zero all counters, the 24 h window, and DNS upstream health |
+| `/api/stats/config`      | POST     | log retention and rotation hours               |
+| `/api/stats/exclusions`  | GET/POST | domains kept out of the logs and counters      |
+| `/api/requests`          | GET      | page back through the request log (`before=`, `limit=`) |
+| `/api/request?seq=`      | GET      | one request's captured headers, bodies, and scriptlets |
+| `/api/request/body`      | GET      | decode one captured body on demand (`seq=`, `slot=req\|resp`) |
+| `/api/queries`           | GET      | page back through the DNS query log (`before=`, `limit=`) |
+| `/api/errors`            | GET      | the error log; `/api/errors/clear` (POST) empties it |
+| `/api/scriptlets`        | GET      | loaded scriptlet library + recent injections   |
+| `/api/scriptlet?name=`   | GET      | one scriptlet's decoded JS source              |
+| `/api/scriptlets/update` | POST     | refresh the scriptlet library from uBO master  |
+| `/api/blocklists`        | GET/POST | list / add-append-replace-delete               |
+| `/api/blocklist?name=`   | GET      | one list's raw rule text (for editing)         |
+| `/api/check`             | POST     | test a URL against rules (`{url,type?,source?}`)|
+| `/api/exclusions`        | GET/POST | domains that bypass MITM (add / delete)        |
+| `/api/server`            | GET      | proxy + DNS listener status (enabled / listen / running) |
+| `/api/server/config`     | POST     | start/stop or rebind the proxy & DNS listeners live (persisted) |
+| `/api/proxy`             | GET      | proxy settings: egress + injection             |
+| `/api/proxy/config`      | POST     | set `resolver_only`, `disable_ipv6`, `cosmetic`, `scriptlets` |
+| `/api/dns`               | GET      | resolver status: upstreams + health, cache, settings |
+| `/api/dns/flush`         | POST     | clear the DNS response cache                   |
+| `/api/dns/test`          | POST     | test a domain against the DNS filter (`{domain}`) |
+| `/api/dns/rewrites`      | GET/POST | operator-defined local records (add / delete)  |
+| `/api/dns/upstreams`     | POST     | add / delete / enable / disable an upstream server |
+| `/api/dns/config`        | POST     | live upstream/cache/ECH settings; `{"reset": true}` returns to defaults |
+| `/api/dns/ech-probe`     | POST     | probe now whether ECH is reachable             |
+| `/api/certs`             | GET/POST | managed CAs: list / import, generate, activate, delete |
+| `/api/cert?name=`        | GET      | download one managed CA                        |
+| `/ca-cert.pem`           | GET      | download the active CA                         |
 
 Bind it to `127.0.0.1` only (the default) — it exposes controls. Set
-`admin_listen = ""` to disable it entirely.
+`PROXY_ADMIN_LISTEN=""` to disable it entirely.
 
 ---
 
@@ -225,18 +274,15 @@ snippets invoked by `##+js(name, args…)` filter rules (e.g.
 `##+js(set-constant, adConfig, {})`). Network + cosmetic filtering can't do this;
 it needs code running in the page.
 
-It's **on by default** (`inject_scriptlets = true`, `scriptlet_resources =
-"data/scriptlets/scriptlets.json"`). Because it strips Content-Security-Policy site-wide,
-you can opt out in the adblock base file (`data/settings/adblock-base.toml`):
+It's **on by default**. Because it strips Content-Security-Policy site-wide, it
+has its own switch in the dashboard's proxy **Settings** tab, next to the
+cosmetic-CSS switch; both persist to `data/settings/proxy-settings.json`. What
+gets injected is a proxy decision; the rules themselves come from adblock.
 
-```toml
-[adblock]
-inject_scriptlets = false
-```
-
-`scriptlet_resources` is a JSON array of `adblock::resources::Resource`
-objects (the adblock-rust format). A pre-generated `data/scriptlets/scriptlets.json` ships
-in the repo (and the Docker image), so scriptlets work out of the box.
+Adblock loads the library from `data/scriptlets/scriptlets.json` — a JSON array
+of `adblock::resources::Resource` objects (the adblock-rust format). A
+pre-generated copy ships in the repo and in the Docker image, so scriptlets work
+out of the box.
 
 ### Refreshing the library
 
@@ -284,7 +330,8 @@ How injection works:
 ## Testing
 
 ```bash
-cargo test               # unit + integration
+cargo test                    # unit + integration + the boundary lint
+./scripts/check-boundaries.sh # just the boundary lint
 ```
 
 Covers ad-block match/allow/disabled, runtime list add/rebuild, list-store
@@ -292,9 +339,13 @@ reconciliation (in-memory store), the blocklist fetch flow (canned downloader,
 no network), the request/response/CONNECT pipeline decisions (target, type,
 cosmetic injectability, deny/tunnel/MITM), the IO shell driven in-process through its seams (canned
 upstream/DNS/clock), request-log recording + capture (buffered and streaming),
-the admin API end-to-end in-process, the upstream HTTP client (loopback +
-redirects), cosmetic CSS generation, scriptlet resolution + naming, and config
-validation/exclusions.
+DNS upstream parsing/health and listener control, the admin API end-to-end
+in-process, the upstream HTTP client (loopback + redirects), cosmetic CSS
+generation, scriptlet resolution + naming, and config validation/exclusions.
+
+`tests/boundaries.rs` is the module-boundary lint: it fails on any cross-module
+`use` that skips a module's `api` facade or takes an edge the architecture
+doesn't allow. CI runs it on every push and PR alongside the build and tests.
 
 ## License
 

@@ -17,6 +17,9 @@ pub struct DnsConfig {
     pub override_max_ttl_secs: u32,
     pub blocking_mode: BlockingMode,
     pub blocked_ttl_secs: u32,
+    /// Drop `ech` SvcParams from HTTPS/SVCB answers — a kill switch for ECH.
+    /// It applies to in-process lookups too, so the proxy stops finding configs
+    /// and its own outbound connections stop using ECH.
     pub strip_ech: bool,
     pub ech_probe_domain: String,
     pub ech_probe_mins: u32,

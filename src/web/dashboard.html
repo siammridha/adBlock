@@ -576,10 +576,11 @@
         <span class="hint" id="sech-status"></span>
       </div>
       <p class="hint">Drops the <code>ech</code> parameter from HTTPS records before the answer goes
-        out, so clients cannot use Encrypted Client Hello and their TLS handshakes stay readable.
-        Applies to this app's own proxy too: with stripping on, the proxy gets no ECH config and its
-        outbound connections stop using ECH, so requests lose the
-        <span class="ech-tag">[ECH]</span> tag. Applied live and persisted.</p>
+        out, so nothing resolving through this server uses Encrypted Client Hello — a kill switch for
+        testing, and for networks where ECH misbehaves. Applies to this app's own proxy too: with
+        stripping on, the proxy gets no ECH config and its outbound connections stop using ECH, so
+        requests lose the <span class="ech-tag">[ECH]</span> tag. Clients using the proxy are
+        unaffected — they send CONNECT and never resolve. Applied live and persisted.</p>
     </div>
 
     <div class="panel">
@@ -790,7 +791,7 @@
               recursively over encrypted upstreams (DoH / DoT). Configure in
               the DNS <code>[dns]</code> base config.</td></tr>
       <tr><td>Encrypted Client Hello (ECH)</td>
-          <td>Toggle in the <b>DNS</b> tab under the proxy egress policy. To test it,
+          <td>Toggle in the <b>DNS</b> tab under <b>ECH stripping</b>. To test it,
               browse to <a href="https://tls-ech.dev" target="_blank" rel="noopener">tls-ech.dev</a>
               through the proxy — it reports whether the connection used ECH.</td></tr>
     </table>

@@ -32,7 +32,7 @@ _Avoid_: local record, custom DNS, override (that means something else here)
 A real DNS server the built-in resolver forwards to, over UDP, TCP, DoT, or DoH.
 
 **ECH stripping**:
-Removing Encrypted Client Hello configs from DNS answers so HTTPS connections stay inspectable by the proxy.
+Removing Encrypted Client Hello configs from DNS answers, so nothing resolving through this server uses ECH — a kill switch for testing, and for networks where ECH misbehaves. It also turns off the proxy's own outbound ECH, which reads its configs from the same answers. Clients using the proxy are unaffected: they send CONNECT and never resolve.
 
 ## Ad blocking
 
@@ -49,11 +49,14 @@ A small JavaScript snippet (from uBlock Origin) injected into a page to neutrali
 **Maintenance**:
 The background jobs that keep blocklists and scriptlets fresh.
 
+**Injection**:
+What the proxy puts into an HTML page it forwards: cosmetic CSS and scriptlets. The rules come from Adblock; whether they go in is a proxy setting.
+
 ## Control
 
 **Runtime**:
-The control plane that starts, stops, and reconfigures the proxy and DNS listeners while the process runs. Owned by the admin web app.
+The control plane that starts, stops, and reconfigures a listener while the process runs. Each module owns its own: proxy has one for the proxy listener, DNS has one for the DNS listener. Updating the settings is what starts, stops, or rebinds.
 
 **Override**:
-A setting changed at runtime and persisted separately, layered on top of the module's base config values at startup.
+A setting changed at runtime and persisted to the owning module's settings file, layered on top of that module's built-in defaults at startup.
 _Avoid_: using "override" for DNS rewrites

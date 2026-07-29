@@ -53,18 +53,20 @@ COPY tools /app/tools
 # runtime under /app/data. Blocklists download on first start.
 COPY data/scriptlets/scriptlets.json /app/data/scriptlets/scriptlets.json
 
-# Each module reads its own base-config file under
-# /app/data/settings/<module>-base.toml (or its built-in defaults).
-# The container needs one non-default value: bind on all interfaces instead of
-# loopback, so a published port / reverse proxy can reach the proxy, admin UI,
-# and DNS. Bake the two modules that have a listener; adblock and stats use
-# their defaults. A named data volume inherits these on first run, like the
-# scriptlet library above.
+# Each module builds its config from built-in defaults, then layers its own
+# settings file from /app/data/settings over them. The container needs one
+# non-default value: bind on all interfaces instead of loopback, so a published
+# port / reverse proxy can reach the proxy, admin UI, and DNS. Bake the listener
+# settings of the two modules that have one; adblock and stats use their
+# defaults. A named data volume inherits these on first run, like the scriptlet
+# library above. The admin UI has no settings file (the root owns that knob), so
+# it moves off loopback via PROXY_ADMIN_LISTEN below.
 RUN mkdir -p /app/data/settings \
- && printf '[server]\nlisten = "0.0.0.0:8080"\nadmin_listen = "0.0.0.0:8081"\n\n[tls]\nca_cert = "data/certs/ca-cert.pem"\nca_key = "data/certs/ca-key.pem"\n' \
-      > /app/data/settings/proxy-base.toml \
- && printf '[dns]\nlisten = "0.0.0.0:53"\n' \
-      > /app/data/settings/dns-base.toml
+ && printf '{"enabled": true, "listen": "0.0.0.0:8080"}\n' \
+      > /app/data/settings/proxy-server.json \
+ && printf '{"enabled": true, "listen": "0.0.0.0:53"}\n' \
+      > /app/data/settings/dns-server.json
+ENV PROXY_ADMIN_LISTEN=0.0.0.0:8081
 
 # proxy + admin dashboard.
 EXPOSE 8080 8081
@@ -95,6 +97,6 @@ VOLUME ["/app/data"]
 # Note: /app/data is a VOLUME. A single-file bind mount at
 # /app/data/certs/ca-cert.pem still lands correctly on top of that volume.
 
-# proxy reads each module's base-config file under /app/data/settings, or its
-# built-in defaults.
+# proxy layers each module's settings file under /app/data/settings over that
+# module's built-in defaults.
 ENTRYPOINT ["proxy"]

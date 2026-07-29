@@ -43,8 +43,11 @@ async fn main() -> Result<()> {
     // Stats is loaded before init_logging, which uses its level.
     let logging_cfg = LoggingConfig::load(&data_dir)?;
 
-    // `admin_listen` is wiring, not a Proxy concern: the root validates it.
-    let admin_listen = proxy_base.server.admin_listen.clone();
+    // `admin_listen` is wiring, not a Proxy concern: the root validates it, and
+    // owns its one override. No module settings file holds it, so PROXY_ADMIN_LISTEN
+    // is how a container binds the dashboard somewhere other than loopback.
+    let admin_listen = std::env::var("PROXY_ADMIN_LISTEN")
+        .unwrap_or_else(|_| proxy_base.server.admin_listen.clone());
     if !admin_listen.is_empty() {
         admin_listen.parse::<std::net::SocketAddr>().map_err(|e| {
             adBlock::Error::Config(format!("invalid admin_listen '{admin_listen}': {e}"))
