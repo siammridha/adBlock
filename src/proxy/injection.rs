@@ -1,7 +1,8 @@
-//! What the proxy injects into the HTML pages it forwards: cosmetic CSS and
-//! uBO scriptlets. The rules come from Adblock; whether they are injected is a
-//! proxy setting, kept here and persisted to the proxy's settings file (which it
-//! shares with the egress policy, each writing only its own keys).
+//! What the proxy injects into the HTML pages it forwards: cosmetic CSS, uBO
+//! scriptlets, and the live-DOM runtime. The rules come from Adblock; whether
+//! they are injected is a proxy setting, kept here and persisted to the proxy's
+//! settings file (which it shares with the egress policy, each writing only its
+//! own keys).
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,6 +18,7 @@ use super::persist::OverrideStore;
 pub struct InjectionOverrides {
     pub cosmetic: Option<bool>,
     pub scriptlets: Option<bool>,
+    pub runtime: Option<bool>,
 }
 
 impl InjectionOverrides {
@@ -26,7 +28,11 @@ impl InjectionOverrides {
             return Err("expected a JSON object".into());
         }
         let flag = |key: &str| -> Option<bool> { v.get(key).and_then(serde_json::Value::as_bool) };
-        Ok(Self { cosmetic: flag("cosmetic"), scriptlets: flag("scriptlets") })
+        Ok(Self {
+            cosmetic: flag("cosmetic"),
+            scriptlets: flag("scriptlets"),
+            runtime: flag("runtime"),
+        })
     }
 }
 
@@ -34,28 +40,35 @@ impl InjectionOverrides {
 pub struct InjectionSettings {
     pub cosmetic: bool,
     pub scriptlets: bool,
+    pub runtime: bool,
 }
 
 pub struct InjectionPolicy {
     cosmetic: AtomicBool,
     scriptlets: AtomicBool,
+    runtime: AtomicBool,
     store: OverrideStore<InjectionOverrides>,
 }
 
 impl InjectionPolicy {
     pub fn load(store_path: PathBuf) -> Arc<Self> {
         let store: OverrideStore<InjectionOverrides> = OverrideStore::new(store_path);
-        // Fill in both switches, on, for a file that does not have them yet.
-        store.ensure(&InjectionOverrides { cosmetic: Some(true), scriptlets: Some(true) });
+        // Fill in every switch, on, for a file that does not have them yet.
+        store.ensure(&InjectionOverrides {
+            cosmetic: Some(true),
+            scriptlets: Some(true),
+            runtime: Some(true),
+        });
         let o = store.load();
         Arc::new(Self {
             cosmetic: AtomicBool::new(o.cosmetic.unwrap_or(true)),
             scriptlets: AtomicBool::new(o.scriptlets.unwrap_or(true)),
+            runtime: AtomicBool::new(o.runtime.unwrap_or(true)),
             store,
         })
     }
 
-    /// Both switches on, for callers that build a proxy without a settings file.
+    /// Every switch on, for callers that build a proxy without a settings file.
     pub fn all_on() -> Arc<Self> {
         Self::load(PathBuf::new())
     }
@@ -68,11 +81,19 @@ impl InjectionPolicy {
         self.scriptlets.load(Ordering::Relaxed)
     }
 
-    pub fn settings(&self) -> InjectionSettings {
-        InjectionSettings { cosmetic: self.cosmetic(), scriptlets: self.scriptlets() }
+    pub fn runtime(&self) -> bool {
+        self.runtime.load(Ordering::Relaxed)
     }
 
-    /// Apply an update and persist it. Takes effect on the next page — both
+    pub fn settings(&self) -> InjectionSettings {
+        InjectionSettings {
+            cosmetic: self.cosmetic(),
+            scriptlets: self.scriptlets(),
+            runtime: self.runtime(),
+        }
+    }
+
+    /// Apply an update and persist it. Takes effect on the next page — the
     /// switches are read per response, nothing is rebuilt.
     pub fn apply(&self, upd: &InjectionOverrides) -> InjectionSettings {
         if let Some(v) = upd.cosmetic {
@@ -81,9 +102,15 @@ impl InjectionPolicy {
         if let Some(v) = upd.scriptlets {
             self.scriptlets.store(v, Ordering::Relaxed);
         }
+        if let Some(v) = upd.runtime {
+            self.runtime.store(v, Ordering::Relaxed);
+        }
         let snap = self.settings();
-        let persisted =
-            InjectionOverrides { cosmetic: Some(snap.cosmetic), scriptlets: Some(snap.scriptlets) };
+        let persisted = InjectionOverrides {
+            cosmetic: Some(snap.cosmetic),
+            scriptlets: Some(snap.scriptlets),
+            runtime: Some(snap.runtime),
+        };
         if let Err(e) = self.store.save(&persisted) {
             tracing::warn!(error = %e, "persisting proxy injection settings");
         }
@@ -100,6 +127,7 @@ mod tests {
         let o = InjectionOverrides::parse(br#"{"cosmetic":false}"#).unwrap();
         assert_eq!(o.cosmetic, Some(false));
         assert_eq!(o.scriptlets, None, "an absent key leaves that switch alone");
+        assert_eq!(o.runtime, None);
         assert!(InjectionOverrides::parse(b"[]").is_err(), "not an object");
         assert!(InjectionOverrides::parse(b"nonsense").is_err());
     }
@@ -111,13 +139,28 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         let policy = InjectionPolicy::load(path.clone());
-        assert_eq!((policy.cosmetic(), policy.scriptlets()), (true, true), "defaults are on");
+        assert_eq!(
+            (policy.cosmetic(), policy.scriptlets(), policy.runtime()),
+            (true, true, true),
+            "defaults are on"
+        );
 
-        let snap = policy.apply(&InjectionOverrides { cosmetic: Some(false), scriptlets: None });
-        assert_eq!((snap.cosmetic, snap.scriptlets), (false, true), "untouched switch stays");
+        let snap = policy.apply(&InjectionOverrides {
+            cosmetic: Some(false),
+            scriptlets: None,
+            runtime: Some(false),
+        });
+        assert_eq!(
+            (snap.cosmetic, snap.scriptlets, snap.runtime),
+            (false, true, false),
+            "untouched switch stays"
+        );
 
         let reloaded = InjectionPolicy::load(path.clone());
-        assert_eq!((reloaded.cosmetic(), reloaded.scriptlets()), (false, true));
+        assert_eq!(
+            (reloaded.cosmetic(), reloaded.scriptlets(), reloaded.runtime()),
+            (false, true, false)
+        );
         let _ = std::fs::remove_file(&path);
     }
 }

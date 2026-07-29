@@ -9,14 +9,16 @@ An intercepting HTTP/HTTPS proxy in Rust that blocks ads and trackers:
 - **Redirect rules** (`$redirect`, `$redirect-rule`) serve uBO's neutered
   stand-in for a blocked resource — a do-nothing analytics script, an empty
   pixel — so the page's own code keeps running instead of tripping over a
-  missing file. This is most of what "breaks fewer pages" means.
+  missing file. This is most of what "breaks fewer pages" means. Toggleable at
+  runtime.
 - **Parameter stripping** (`$removeparam`) removes tracking parameters from the
-  request before it is forwarded.
+  request before it is forwarded. Toggleable at runtime.
 - **Cosmetic filtering** — injects element-hiding CSS from `##selector` rules
   into HTML pages to hide leftover ad containers, plus the `:style()` unbreak
   rules that put a page's scroll back after a modal is hidden. A small injected
-  script keeps asking about elements the page builds later. Toggleable at
-  runtime. See [Cosmetic filtering](#cosmetic-filtering).
+  script keeps asking about elements the page builds later. The CSS and that
+  script are toggleable at runtime, separately. See
+  [Cosmetic filtering](#cosmetic-filtering).
 - **Scriptlet injection** — resolves uBlock Origin `##+js(…)` rules against the
   full uBO scriptlet library and injects the resulting JS into HTML pages.
   Strips CSP so the injected script runs (a deliberate security tradeoff).
@@ -89,10 +91,11 @@ cargo build --release
 > | File (under `data/settings/`) | Owner | Holds |
 > |---|---|---|
 > | `proxy-server.json`       | proxy | proxy listener: `enabled`, `listen` |
-> | `proxy-settings.json`     | proxy | egress (`resolver_only`, `disable_ipv6`) and injection (`cosmetic`, `scriptlets`) |
+> | `proxy-settings.json`     | proxy | egress (`resolver_only`, `disable_ipv6`) and injection (`cosmetic`, `scriptlets`, `runtime`) |
 > | `excluded-domains.conf`   | proxy | domains tunneled blind, one per line |
 > | `active-ca.json`          | proxy | which managed CA signs leaves |
-> | `dns-server.json`         | dns   | DNS listener: `enabled`, `listen` |
+> | `adblock.json`            | adblock | what a decision may carry: `redirect`, `removeparam` |
+| `dns-server.json`         | dns   | DNS listener: `enabled`, `listen` |
 > | `dns-settings.json`       | dns   | upstreams, mode, bootstrap, cache size, TTL bounds, ECH |
 > | `dns-rewrites.conf`       | dns   | local DNS records |
 > | `stats-settings.json`     | stats | `retention_hours`, `log_rotate_hours` |
@@ -208,8 +211,10 @@ With `admin_listen` set (default `127.0.0.1:8081`), open
 - **Custom filters** — the hand-maintained rule list.
 - **Blocklists** — view/add/edit/delete lists, and refresh them from source.
 - **Excluded** — domains tunneled blind, no MITM.
-- **Settings** (proxy) — resolver-only egress, IPv6 off, and the cosmetic-CSS
-  and scriptlet injection switches.
+- **Settings** (proxy) — resolver-only egress, IPv6 off, and the cosmetic-CSS,
+  scriptlet, and live-DOM runtime injection switches.
+- **Settings** (adblocker) — whether a block decision may serve a `$redirect`
+  stand-in body, and whether `$removeparam` strips tracking parameters.
 - **Scriptlets** — the loaded uBO scriptlet library (searchable), plus a live
   feed of which scriptlets fired into which pages.
 - **Rule tester** — check any URL against the current rules without sending
@@ -239,13 +244,15 @@ JSON API (all on `admin_listen`):
 | `/api/scriptlets/update` | POST     | refresh the scriptlet library from uBO master  |
 | `/api/blocklists`        | GET/POST | list / add-append-replace-delete               |
 | `/api/blocklist?name=`   | GET      | one list's raw rule text (for editing)         |
+| `/api/adblock`           | GET      | adblock settings: `redirect`, `removeparam`    |
+| `/api/adblock/config`    | POST     | set `redirect`, `removeparam`                  |
 | `/api/check`             | POST     | test a URL against rules (`{url,type?,source?}`)|
 | `/api/cosmetic`          | POST     | generic cosmetic CSS for class/id names a live page grew (`{url,classes,ids}`); CORS-open, called by the injected runtime, not the dashboard |
 | `/api/exclusions`        | GET/POST | domains that bypass MITM (add / delete)        |
 | `/api/server`            | GET      | proxy + DNS listener status (enabled / listen / running) |
 | `/api/server/config`     | POST     | start/stop or rebind the proxy & DNS listeners live (persisted) |
 | `/api/proxy`             | GET      | proxy settings: egress + injection             |
-| `/api/proxy/config`      | POST     | set `resolver_only`, `disable_ipv6`, `cosmetic`, `scriptlets` |
+| `/api/proxy/config`      | POST     | set `resolver_only`, `disable_ipv6`, `cosmetic`, `scriptlets`, `runtime` |
 | `/api/dns`               | GET      | resolver status: upstreams + health, cache, settings |
 | `/api/dns/flush`         | POST     | clear the DNS response cache                   |
 | `/api/dns/test`          | POST     | test a domain against the DNS filter (`{domain}`) |
@@ -284,6 +291,11 @@ changes nothing and exposes no controls. Every other endpoint stays same-origin.
   cleaned URL; the browser is never told, so the parameter stays in its address
   bar. (uBO redirects the browser instead, which also fixes the address bar but
   turns a misfiring rule into a redirect loop.)
+- Both have a switch in the adblocker **Settings** tab, on by default. They are
+  adblock's own, not the proxy's: the proxy asks one thing — "blocked?" — and
+  adblock volunteers the stand-in body and the cleaned URL inside the answer, so
+  adblock is what decides whether to offer them. Off, a `$redirect` rule blocks
+  plainly and a `$removeparam` rule leaves the URL alone.
 - **Cosmetic (`##`) rules** apply only to uncompressed HTML. The proxy requests
   `Accept-Encoding: identity` for document loads so it can inject the hide-CSS;
   compressed HTML streams through unmodified. Text *encoding* is not a
@@ -336,11 +348,13 @@ page that rewrites itself forever can't ask forever.
 
 Two things to know about it:
 
-- It is injected only when **Cosmetic filtering** is on *and* the admin server
-  is running (`PROXY_ADMIN_LISTEN` non-empty). The endpoint URL is built from
-  the configured admin address, with a wildcard bind treated as loopback — so a
-  browser on a *different machine* than the proxy can't reach it, and only the
-  one-shot scan applies there.
+- It has its own switch, **Live-DOM runtime**, next to the cosmetic-CSS one and
+  on by default — it costs a script tag and a request per page, so it is worth
+  turning off separately from the CSS. It is injected only when that switch is
+  on *and* the admin server is running (`PROXY_ADMIN_LISTEN` non-empty). The
+  endpoint URL is built from the configured admin address, with a wildcard bind
+  treated as loopback — so a browser on a *different machine* than the proxy
+  can't reach it, and only the one-shot scan applies there.
 - Because it is an inline script, it strips CSP on the pages it goes into, the
   same way scriptlet injection does. That means CSP can now be stripped with
   scriptlet injection switched off.
@@ -356,8 +370,9 @@ it needs code running in the page.
 
 It's **on by default**. Because it strips Content-Security-Policy site-wide, it
 has its own switch in the dashboard's proxy **Settings** tab, next to the
-cosmetic-CSS switch; both persist to `data/settings/proxy-settings.json`. What
-gets injected is a proxy decision; the rules themselves come from adblock.
+cosmetic-CSS and live-DOM runtime switches; all three persist to
+`data/settings/proxy-settings.json`. What gets injected is a proxy decision; the
+rules themselves come from adblock.
 
 Adblock loads the library from `data/scriptlets/scriptlets.json` — a JSON array
 of `adblock::resources::Resource` objects (the adblock-rust format). A

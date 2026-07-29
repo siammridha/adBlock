@@ -12,6 +12,7 @@ pub use super::maintenance::{
     event_list_change, event_scriptlets, spawn_blocklist_updater, BlocklistFetcher, Downloader,
     RefreshError,
 };
+pub use super::settings::DecisionSettings;
 pub use super::updater::{ScriptletUpdater, UBO_TARBALL_PAGE};
 pub use super::{
     from_config, with_store, AdBlocker, AdblockConfig, BlockAttribution, BlockDecision,

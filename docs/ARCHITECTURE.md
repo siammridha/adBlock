@@ -74,7 +74,12 @@ pre-validate.
 blocked, and to retrieve cosmetic filtering rules. A block decision carries what
 to do about it as well as the verdict: a stand-in body to serve instead
 (`$redirect`), or a cleaned URL to forward (`$removeparam`). Adblock decodes
-both; the caller only picks the response.
+both; the caller only picks the response. The switches for those two also belong
+to Adblock, not to the caller: the caller asks one thing — is this blocked? — and
+gets them back inside the answer without asking, so Adblock is what decides
+whether to offer them. Compare cosmetic rules and scriptlets, which the Proxy
+asks for deliberately and only when its own injection switches are on — those
+switches are the Proxy's.
 
 **Exposes to the Web App:** APIs for custom filter management, the rule tester,
 blocklist management, and its own settings.

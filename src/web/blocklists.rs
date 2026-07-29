@@ -113,6 +113,29 @@ pub(super) fn check_rule(adblock: &AdBlocker, body: &[u8]) -> AdminResponse {
     }))
 }
 
+/// Adblock's own switches, as it reports them.
+pub(super) fn adblock_settings_json(adblock: &AdBlocker) -> Value {
+    serde_json::to_value(adblock.decisions()).unwrap_or_default()
+}
+
+/// Hand the raw update to Adblock; it validates its own keys and answers with
+/// the new settings or why it said no.
+pub(super) fn edit_adblock_config(
+    state: &SharedState,
+    adblock: &AdBlocker,
+    body: &[u8],
+) -> AdminResponse {
+    let s = match command(adblock.set_decisions(body)) {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    state.log_event(
+        EventKind::Info,
+        format!("adblock: redirect={} removeparam={}", s.redirect, s.removeparam),
+    );
+    json_ok(adblock_settings_json(adblock))
+}
+
 /// Answer a filtered page asking about class and id names it grew after it was
 /// served. The page sends raw bytes; Adblock decides what is valid and what the
 /// answer is, and this only renders it.

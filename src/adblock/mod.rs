@@ -19,6 +19,7 @@ pub mod error;
 pub mod fetch;
 pub mod maintenance;
 mod scriptlets;
+pub mod settings;
 mod store;
 pub mod updater;
 pub use config::AdblockConfig;
@@ -76,6 +77,9 @@ impl EngineCore {
 
 pub struct AdBlocker {
     core: Arc<EngineCore>,
+    /// Whether a decision may carry a `$redirect` body or a `$removeparam`
+    /// URL. Adblock's own switches: the caller never asks for either.
+    decisions: settings::DecisionPolicy,
 }
 
 #[derive(Clone, Debug)]
@@ -195,7 +199,10 @@ pub fn with_store(
         scriptlets,
     });
     Ok((
-        Arc::new(AdBlocker { core: core.clone() }),
+        Arc::new(AdBlocker {
+            core: core.clone(),
+            decisions: settings::DecisionPolicy::load(cfg.settings_path()),
+        }),
         Arc::new(ListCuration::new(core, store)),
     ))
 }
@@ -216,15 +223,30 @@ impl AdBlocker {
         };
         let engine = self.core.engine.read().expect("engine lock").clone();
         let result = engine.check_network_request(&request);
+        let allow = self.decisions.settings();
         BlockDecision {
             blocked: result.matched,
             attribution: self.attribution(result.filter.as_deref()),
-            redirect: result
-                .matched
+            redirect: (result.matched && allow.redirect)
                 .then(|| result.redirect.as_deref().and_then(decode_redirect))
                 .flatten(),
-            rewritten_url: result.rewritten_url,
+            rewritten_url: allow.removeparam.then_some(result.rewritten_url).flatten(),
         }
+    }
+
+    /// Adblock's own switches, for the settings UI.
+    pub fn decisions(&self) -> settings::DecisionSettings {
+        self.decisions.settings()
+    }
+
+    /// Change those switches. The caller hands over the raw request body;
+    /// Adblock parses it and answers with the new settings or why it was
+    /// rejected.
+    pub fn set_decisions(
+        &self,
+        body: &[u8],
+    ) -> std::result::Result<settings::DecisionSettings, String> {
+        Ok(self.decisions.apply(&settings::DecisionOverrides::parse(body)?))
     }
 
     pub fn check_dns(&self, domain: &str) -> BlockDecision {
@@ -795,6 +817,39 @@ mod tests {
         assert_eq!(d.rewritten_url.as_deref(), Some("https://shop.example/item?id=7"));
         let clean = b.check("https://shop.example/item?id=7", "", "document");
         assert!(clean.rewritten_url.is_none(), "nothing to strip, nothing to report");
+    }
+
+    #[test]
+    fn the_switches_decide_what_a_decision_carries() {
+        let (b, _) = blocker_with_resources_inject(
+            &[
+                "||ads.example.com/analytics.js^$script,redirect=noopjs",
+                "$removeparam=utm_source",
+            ],
+            serde_json::json!([{
+                "name": "noop.js",
+                "aliases": ["noopjs"],
+                "kind": {"mime": "application/javascript"},
+                "content": "Ly8gbm9vcA=="
+            }]),
+            false,
+        );
+        let redirect = |b: &AdBlocker| {
+            b.check("https://ads.example.com/analytics.js", "https://news.test/", "script")
+        };
+        let cleaned =
+            |b: &AdBlocker| b.check("https://shop.example/i?id=7&utm_source=ad", "", "document");
+
+        b.set_decisions(br#"{"redirect":false}"#).unwrap();
+        assert!(redirect(&b).blocked, "the block itself is not a switch");
+        assert!(redirect(&b).redirect.is_none(), "no stand-in body once it is off");
+        assert!(cleaned(&b).rewritten_url.is_some(), "the other switch is untouched");
+
+        b.set_decisions(br#"{"redirect":true,"removeparam":false}"#).unwrap();
+        assert!(redirect(&b).redirect.is_some(), "back on");
+        assert!(cleaned(&b).rewritten_url.is_none(), "no cleaned url once it is off");
+
+        assert!(b.set_decisions(b"[]").is_err(), "adblock rejects what is not an object");
     }
 
     #[test]

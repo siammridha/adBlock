@@ -549,11 +549,12 @@ impl Proxy {
                 .scriptlets
                 .then(|| self.inner.adblock.scriptlet_injection(url))
                 .flatten();
-            // The live-DOM runtime rides along with cosmetic filtering. The
-            // scan below sees the page only as it was served, so on a page that
-            // builds itself in JavaScript the runtime is the only thing that
-            // can ask about the class and id names that appear later.
-            let runtime = match inject.cosmetic {
+            // The scan below sees the page only as it was served, so on a page
+            // that builds itself in JavaScript the runtime is the only thing
+            // that can ask about the class and id names appearing later. Its
+            // own switch: it costs a script tag and a request per page, which
+            // is worth turning off separately from the CSS.
+            let runtime = match inject.runtime {
                 true => self.inner.cosmetic_runtime.as_deref().unwrap_or(""),
                 false => "",
             };
@@ -1121,6 +1122,7 @@ mod tests {
         injection.apply(&crate::proxy::injection::InjectionOverrides {
             cosmetic: Some(false),
             scriptlets: None,
+            runtime: None,
         });
         let cfg = AdblockConfig {
             enabled: true,
@@ -1146,8 +1148,50 @@ mod tests {
         let html = std::str::from_utf8(&body).unwrap();
         assert!(!html.contains("display:none"), "html: {html}");
         assert!(
-            !html.contains("/api/cosmetic"),
-            "the live-DOM runtime is part of cosmetic filtering and goes off with it: {html}"
+            html.contains("/api/cosmetic"),
+            "the runtime has its own switch and stays on: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_runtime_switch_turns_off_the_live_dom_script() {
+        let upstream = CannedUpstream::new(
+            StatusCode::OK,
+            vec![("content-type", "text/html")],
+            b"<html><head></head><body><div class=\"ad-banner\">ad</div></body></html>",
+        );
+        let injection = InjectionPolicy::all_on();
+        injection.apply(&crate::proxy::injection::InjectionOverrides {
+            cosmetic: None,
+            scriptlets: None,
+            runtime: Some(false),
+        });
+        let cfg = AdblockConfig {
+            enabled: true,
+            custom_rules: vec!["example.com##.ad-banner".into()],
+            data_dir: std::path::PathBuf::from("/nonexistent-for-tests"),
+            auto_update_hours: 0,
+            inject_scriptlets: false,
+            scriptlet_resources: std::path::PathBuf::new(),
+        };
+        let (adblock, _curation) =
+            crate::adblock::api::with_store(&cfg, Arc::new(MemoryListStore::new())).unwrap();
+        let (proxy, _state) = proxy_with_adblock(
+            adblock,
+            upstream,
+            FixedResolver::to(&["93.184.216.34:80"]),
+            injection,
+            "127.0.0.1:8081",
+        );
+
+        let req = get("http://example.com/", &[("accept", "text/html")]);
+        let resp = proxy.handle_forward(req, false).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let html = std::str::from_utf8(&body).unwrap();
+        assert!(!html.contains("/api/cosmetic"), "html: {html}");
+        assert!(
+            html.contains("display:none"),
+            "the CSS has its own switch and stays on: {html}"
         );
     }
 

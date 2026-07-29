@@ -82,11 +82,12 @@ pub(super) fn edit_proxy_config(
         crate::stats::api::EventKind::Info,
         format!(
             "proxy egress: resolver-only={} disable-ipv6={}; \
-             page injection: cosmetic={} scriptlets={}",
+             page injection: cosmetic={} scriptlets={} runtime={}",
             settings.resolver_only,
             settings.disable_ipv6,
             inj.cosmetic,
-            inj.scriptlets
+            inj.scriptlets,
+            inj.runtime
         ),
     );
     json_ok(proxy_settings_json(egress, injection))

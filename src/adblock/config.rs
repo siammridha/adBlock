@@ -26,6 +26,11 @@ impl AdblockConfig {
     pub fn scriptlets_dir(&self) -> PathBuf {
         self.data_dir.join("scriptlets")
     }
+    /// Adblock's own settings file — the switches that can be changed while the
+    /// process runs. No other module reads or writes it.
+    pub fn settings_path(&self) -> PathBuf {
+        self.data_dir.join("settings").join("adblock.json")
+    }
 
     /// Validate Adblock's own settings. Adblock has no invalid states today:
     /// every field has a usable default and none can be set to a value that

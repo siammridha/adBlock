@@ -50,10 +50,10 @@ A small JavaScript snippet (from uBlock Origin) injected into a page to neutrali
 The background jobs that keep blocklists and scriptlets fresh.
 
 **Injection**:
-What the proxy puts into an HTML page it forwards: cosmetic CSS, scriptlets, and the live-DOM runtime. The rules come from Adblock; whether they go in is a proxy setting.
+What the proxy puts into an HTML page it forwards: cosmetic CSS, scriptlets, and the live-DOM runtime. The rules come from Adblock; whether they go in is a proxy setting, one switch each.
 
 **Redirect**:
-A harmless stand-in body served in place of a blocked resource, so the page's own code does not break on the missing file. Comes from a `$redirect` or `$redirect-rule` option, and the bodies live in the scriptlet resource file.
+A harmless stand-in body served in place of a blocked resource, so the page's own code does not break on the missing file. Comes from a `$redirect` or `$redirect-rule` option, and the bodies live in the scriptlet resource file. Whether one is offered is an Adblock setting, not a proxy one — the proxy only asks whether the request is blocked.
 _Avoid_: using "redirect" for an HTTP 3xx, or for a DNS rewrite
 
 **Live-DOM runtime**:
