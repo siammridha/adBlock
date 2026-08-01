@@ -9,7 +9,8 @@ use crate::dns::error::{Error, Result};
 use crate::dns::persist::{Entry, PersistedSet};
 
 const FILE_HEADER: &str = "# DNS rewrites (local records). Managed by the admin UI; one\n\
-                           # \"domain answer\" per line. *.domain covers the domain and subdomains.";
+                           # \"domain answer\" per line. *.domain covers the domain and subdomains.\n\
+                           # A leading ! parks the record: kept and listed, never answered.";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RewriteAnswer {
@@ -53,19 +54,28 @@ impl fmt::Display for RewriteAnswer {
 pub struct Rewrite {
     pub domain: String,
     pub answer: RewriteAnswer,
+    /// A `!` prefix on the line parks the record: it stays configured and
+    /// listed, but queries are answered as if it were not there.
+    pub enabled: bool,
 }
 
 impl Entry for Rewrite {
     fn parse(line: &str) -> Option<Self> {
+        let (line, enabled) = match line.strip_prefix('!') {
+            Some(rest) => (rest.trim_start(), false),
+            None => (line, true),
+        };
         let (domain, answer) = line.split_once(char::is_whitespace)?;
         Some(Rewrite {
             domain: normalize_pattern(domain).ok()?,
             answer: RewriteAnswer::parse(answer).ok()?,
+            enabled,
         })
     }
 
     fn format(&self) -> String {
-        format!("{} {}", self.domain, self.answer)
+        let mark = if self.enabled { "" } else { "!" };
+        format!("{mark}{} {}", self.domain, self.answer)
     }
 }
 
@@ -80,14 +90,13 @@ impl RewriteStore {
 
     pub fn matching(&self, domain: &str) -> Vec<RewriteAnswer> {
         self.rewrites.read(|rewrites| {
-            let best = rewrites
-                .iter()
+            let live = || rewrites.iter().filter(|r| r.enabled);
+            let best = live()
                 .filter(|r| pattern_matches(&r.domain, domain))
                 .map(|r| r.domain.as_str())
                 .max_by_key(|p| pattern_specificity(p));
             let Some(best) = best else { return Vec::new() };
-            rewrites
-                .iter()
+            live()
                 .filter(|r| r.domain == best)
                 .map(|r| r.answer.clone())
                 .collect()
@@ -104,9 +113,9 @@ impl RewriteStore {
         if matches!(&answer, RewriteAnswer::Cname(t) if *t == domain.trim_start_matches("*.")) {
             return Err(Error::Config(format!("CNAME '{answer}' points at itself")));
         }
-        let entry = Rewrite { domain, answer };
+        let entry = Rewrite { domain, answer, enabled: true };
         self.rewrites.mutate(|rewrites| {
-            if rewrites.contains(&entry) {
+            if rewrites.iter().any(|r| same_record(r, &entry.domain, &entry.answer)) {
                 return (Ok(()), false);
             }
             let same_pattern = || rewrites.iter().filter(|r| r.domain == entry.domain);
@@ -140,11 +149,33 @@ impl RewriteStore {
         let answer = RewriteAnswer::parse(answer).map_err(Error::Config)?;
         self.rewrites.mutate(|rewrites| {
             let before = rewrites.len();
-            rewrites.retain(|r| !(r.domain == domain && r.answer == answer));
+            rewrites.retain(|r| !same_record(r, &domain, &answer));
             let removed = rewrites.len() != before;
             (removed, removed)
         })
     }
+
+    /// Park or un-park one record. `false` when there is no such record.
+    pub fn set_enabled(&self, domain: &str, answer: &str, enabled: bool) -> Result<bool> {
+        let domain = normalize_pattern(domain)?;
+        let answer = RewriteAnswer::parse(answer).map_err(Error::Config)?;
+        self.rewrites.mutate(|rewrites| {
+            match rewrites.iter_mut().find(|r| same_record(r, &domain, &answer)) {
+                Some(r) if r.enabled != enabled => {
+                    r.enabled = enabled;
+                    (true, true)
+                }
+                Some(_) => (true, false),
+                None => (false, false),
+            }
+        })
+    }
+}
+
+/// One record is identified by its domain and answer; whether it is parked is
+/// state, not identity.
+fn same_record(r: &Rewrite, domain: &str, answer: &RewriteAnswer) -> bool {
+    r.domain == domain && r.answer == *answer
 }
 
 fn pattern_matches(pattern: &str, domain: &str) -> bool {
@@ -264,6 +295,32 @@ mod tests {
         assert!(s.add("", "1.2.3.4").is_err());
         assert!(s.add("a*b.example", "1.2.3.4").is_err());
         assert!(s.add("x.example", "not an ip or host").is_err());
+    }
+
+    #[test]
+    fn a_parked_record_stays_listed_but_never_answers() {
+        let path = std::env::temp_dir().join("proxy-rewrites-parked.conf");
+        let _ = std::fs::remove_file(&path);
+        let s = RewriteStore::load(path.clone());
+        s.add("*.lab.example", "10.0.0.1").unwrap();
+        s.add("host.lab.example", "10.0.0.7").unwrap();
+
+        assert!(s.set_enabled("host.lab.example", "10.0.0.7", false).unwrap());
+        assert_eq!(
+            s.matching("host.lab.example"),
+            vec![RewriteAnswer::V4([10, 0, 0, 1].into())],
+            "a parked record does not win on specificity either"
+        );
+        assert_eq!(s.list().len(), 2, "but it stays listed");
+        assert!(!s.set_enabled("nope.example", "1.2.3.4", true).unwrap());
+
+        let reloaded = RewriteStore::load(path);
+        assert!(!reloaded.list().iter().find(|r| r.domain == "host.lab.example").unwrap().enabled);
+        assert!(reloaded.set_enabled("host.lab.example", "10.0.0.7", true).unwrap());
+        assert_eq!(
+            reloaded.matching("host.lab.example"),
+            vec![RewriteAnswer::V4([10, 0, 0, 7].into())]
+        );
     }
 
     #[test]

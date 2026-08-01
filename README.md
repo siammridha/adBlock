@@ -96,12 +96,12 @@ cargo build --release
 > |---|---|---|
 > | `proxy-server.json`       | proxy | proxy listener: `enabled`, `listen` |
 > | `proxy-settings.json`     | proxy | egress (`resolver_only`, `disable_ipv6`) and injection (`cosmetic`, `scriptlets`, `runtime`) |
-> | `excluded-domains.conf`   | proxy | domains tunneled blind, one per line |
+> | `excluded-domains.conf`   | proxy | domains tunneled blind, one per line (`!` prefix = switched off) |
 > | `active-ca.json`          | proxy | which managed CA signs leaves |
 > | `adblock.json`            | adblock | what a decision may carry: `redirect`, `removeparam`, `csp` |
 > | `dns-server.json`         | dns   | DNS listener: `enabled`, `listen` |
 > | `dns-settings.json`       | dns   | upstreams, mode, bootstrap, cache size, TTL bounds, ECH |
-> | `dns-rewrites.conf`       | dns   | local DNS records |
+> | `dns-rewrites.conf`       | dns   | local DNS records (`!` prefix = switched off) |
 > | `stats-settings.json`     | stats | `retention_hours`, `log_rotate_hours` |
 > | `stats-excluded-domains.conf` | stats | domains kept out of the logs and counters |
 >
@@ -131,7 +131,9 @@ client's HTTP+HTTPS proxy at `127.0.0.1:8080`.
 Excluded domains are tunneled blind — no TLS termination — which is what you
 want for cert-pinned apps (banking, etc.). Manage them live in the dashboard's
 **Excluded domains** tab; the set persists to
-`data/settings/excluded-domains.conf` and survives restarts.
+`data/settings/excluded-domains.conf` and survives restarts. An entry can be
+switched off instead of deleted — it stays in the list, but the host is
+inspected like any other.
 
 ---
 
@@ -247,13 +249,13 @@ JSON API (all on `admin_listen`):
 | `/api/scriptlets`        | GET      | loaded scriptlet library + recent injections   |
 | `/api/scriptlet?name=`   | GET      | one scriptlet's decoded JS source              |
 | `/api/scriptlets/update` | POST     | refresh the scriptlet library from uBO master  |
-| `/api/blocklists`        | GET/POST | list / add-append-replace-delete               |
+| `/api/blocklists`        | GET/POST | list / add-append-replace-delete / enable-disable |
 | `/api/blocklist?name=`   | GET      | one list's raw rule text (for editing)         |
 | `/api/adblock`           | GET      | adblock settings: `redirect`, `removeparam`, `csp` |
 | `/api/adblock/config`    | POST     | set `redirect`, `removeparam`, `csp`           |
 | `/api/check`             | POST     | test a URL against rules (`{url,type?,source?}`)|
 | `/api/cosmetic`          | POST     | generic cosmetic CSS for class/id names a live page grew (`{url,classes,ids}`); CORS-open, called by the injected runtime, not the dashboard |
-| `/api/exclusions`        | GET/POST | domains that bypass MITM (add / delete)        |
+| `/api/exclusions`        | GET/POST | domains that bypass MITM (add / delete / enable / disable) |
 | `/api/server`            | GET      | proxy + DNS listener status (enabled / listen / running) |
 | `/api/server/config`     | POST     | start/stop or rebind the proxy & DNS listeners live (persisted) |
 | `/api/proxy`             | GET      | proxy settings: egress + injection             |
@@ -261,7 +263,7 @@ JSON API (all on `admin_listen`):
 | `/api/dns`               | GET      | resolver status: upstreams + health, cache, settings |
 | `/api/dns/flush`         | POST     | clear the DNS response cache                   |
 | `/api/dns/test`          | POST     | test a domain against the DNS filter (`{domain}`) |
-| `/api/dns/rewrites`      | GET/POST | operator-defined local records (add / delete)  |
+| `/api/dns/rewrites`      | GET/POST | operator-defined local records (add / delete / enable / disable) |
 | `/api/dns/upstreams`     | POST     | add / delete / enable / disable an upstream server |
 | `/api/dns/config`        | POST     | live upstream/cache/ECH settings; `{"reset": true}` returns to defaults |
 | `/api/dns/ech-probe`     | POST     | probe now whether ECH is reachable             |

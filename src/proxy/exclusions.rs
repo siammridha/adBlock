@@ -9,29 +9,43 @@ use crate::proxy::persist::{Entry, PersistedSet};
 const FILE_HEADER: &str = "# Domains that bypass MITM inspection (blind tunnel). Managed by the\n\
                            # admin UI; one host per line. A bare domain (example.com) matches the\n\
                            # domain and every subdomain; a leading *. (*.example.com) matches only\n\
-                           # subdomains, not the domain itself.";
+                           # subdomains, not the domain itself. A leading ! parks the entry: kept\n\
+                           # and listed, but inspected like any other host.";
 
-impl Entry for String {
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct Exclusion {
+    pub domain: String,
+    /// A `!` prefix on the line parks the entry: it stays listed, but traffic
+    /// to it is inspected as if the entry were not there.
+    pub enabled: bool,
+}
+
+impl Entry for Exclusion {
     fn parse(line: &str) -> Option<Self> {
+        let (line, enabled) = match line.strip_prefix('!') {
+            Some(rest) => (rest, false),
+            None => (line, true),
+        };
         let d = normalize(line);
-        (!d.is_empty()).then_some(d)
+        (!d.is_empty()).then_some(Exclusion { domain: d, enabled })
     }
 
     fn format(&self) -> String {
-        self.clone()
+        let mark = if self.enabled { "" } else { "!" };
+        format!("{mark}{}", self.domain)
     }
 }
 
 pub struct ExclusionStore {
-    domains: PersistedSet<String>,
+    domains: PersistedSet<Exclusion>,
 }
 
 impl ExclusionStore {
     pub fn load(path: PathBuf) -> Self {
         Self {
-            domains: PersistedSet::load(path, FILE_HEADER, |domains| {
-                domains.sort();
-                domains.dedup();
+            domains: PersistedSet::load(path, FILE_HEADER, |domains: &mut Vec<Exclusion>| {
+                domains.sort_by(|a, b| a.domain.cmp(&b.domain));
+                domains.dedup_by(|a, b| a.domain == b.domain);
             }),
         }
     }
@@ -40,31 +54,33 @@ impl ExclusionStore {
         self.domains.read(|domains| {
             domains
                 .iter()
-                .find(|d| match d.strip_prefix("*.") {
+                .filter(|e| e.enabled)
+                .find(|e| match e.domain.strip_prefix("*.") {
                     // "*.example.com" — subdomains only, never the apex itself.
                     Some(base) => host.ends_with(&format!(".{base}")),
                     // "example.com" — the domain itself and any subdomain.
-                    None => host == d.as_str() || host.ends_with(&format!(".{d}")),
+                    None => host == e.domain || host.ends_with(&format!(".{}", e.domain)),
                 })
-                .cloned()
+                .map(|e| e.domain.clone())
         })
     }
 
-    pub fn list(&self) -> Vec<String> {
+    pub fn list(&self) -> Vec<Exclusion> {
         self.domains.snapshot()
     }
 
-    pub fn add(&self, domain: &str) -> Result<Vec<String>> {
+    pub fn add(&self, domain: &str) -> Result<()> {
         let domain = normalize(domain);
         if domain.is_empty() {
             return Err(Error::Config("excluded domain is empty".into()));
         }
         self.domains.mutate(|domains| {
-            if !domains.iter().any(|d| d == &domain) {
-                domains.push(domain);
-                domains.sort();
+            if domains.iter().any(|e| e.domain == domain) {
+                return ((), false);
             }
-            (domains.clone(), true)
+            domains.push(Exclusion { domain, enabled: true });
+            domains.sort_by(|a, b| a.domain.cmp(&b.domain));
+            ((), true)
         })
     }
 
@@ -72,9 +88,24 @@ impl ExclusionStore {
         let domain = normalize(domain);
         self.domains.mutate(|domains| {
             let before = domains.len();
-            domains.retain(|d| d != &domain);
+            domains.retain(|e| e.domain != domain);
             let removed = domains.len() != before;
             (removed, removed)
+        })
+    }
+
+    /// Park or un-park one entry. `false` when there is no such entry.
+    pub fn set_enabled(&self, domain: &str, enabled: bool) -> Result<bool> {
+        let domain = normalize(domain);
+        self.domains.mutate(|domains| {
+            match domains.iter_mut().find(|e| e.domain == domain) {
+                Some(e) if e.enabled != enabled => {
+                    e.enabled = enabled;
+                    (true, true)
+                }
+                Some(_) => (true, false),
+                None => (false, false),
+            }
         })
     }
 }
@@ -103,6 +134,7 @@ fn normalize(domain: &str) -> String {
 pub enum ExclusionCommand {
     Add { domain: String },
     Delete { domain: String },
+    SetEnabled { domain: String, enabled: bool },
 }
 
 impl ExclusionCommand {
@@ -113,10 +145,12 @@ impl ExclusionCommand {
             return Err("expected 'domain'".into());
         };
         let domain = domain.to_string();
-        Ok(if v.get("delete").and_then(serde_json::Value::as_bool) == Some(true) {
-            Self::Delete { domain }
-        } else {
-            Self::Add { domain }
+        if v.get("delete").and_then(serde_json::Value::as_bool) == Some(true) {
+            return Ok(Self::Delete { domain });
+        }
+        Ok(match v.get("enabled").and_then(serde_json::Value::as_bool) {
+            Some(enabled) => Self::SetEnabled { domain, enabled },
+            None => Self::Add { domain },
         })
     }
 }
@@ -162,10 +196,14 @@ mod tests {
         assert_eq!(s.matching("bank.com.evil.com"), None);
     }
 
+    fn domains(s: &ExclusionStore) -> Vec<String> {
+        s.list().into_iter().map(|e| e.domain).collect()
+    }
+
     #[test]
     fn wildcard_matches_subdomains_only() {
         let s = store("wild", &["*.sentryvault.com"]);
-        assert_eq!(s.list(), vec!["*.sentryvault.com".to_string()]);
+        assert_eq!(domains(&s), vec!["*.sentryvault.com".to_string()]);
         assert_eq!(
             s.matching("xyz.sentryvault.com").as_deref(),
             Some("*.sentryvault.com")
@@ -195,7 +233,22 @@ mod tests {
     #[test]
     fn add_is_idempotent_and_sorted() {
         let s = store("idem", &["b.com", "a.com", "b.com"]);
-        assert_eq!(s.list(), vec!["a.com".to_string(), "b.com".to_string()]);
+        assert_eq!(domains(&s), vec!["a.com".to_string(), "b.com".to_string()]);
+    }
+
+    #[test]
+    fn a_parked_entry_stays_listed_but_stops_matching() {
+        let path = std::env::temp_dir().join("proxy-excl-parked.conf");
+        let _ = std::fs::remove_file(&path);
+        let s = ExclusionStore::load(path.clone());
+        s.add("bank.com").unwrap();
+        assert!(s.set_enabled("BANK.com", false).unwrap());
+        assert_eq!(s.matching("secure.bank.com"), None, "parked entries never match");
+        assert_eq!(domains(&s), vec!["bank.com".to_string()], "but they stay listed");
+        assert!(!ExclusionStore::load(path.clone()).list()[0].enabled, "parked survives reload");
+        assert!(!s.set_enabled("nope.com", true).unwrap(), "unknown domain reports missing");
+        assert!(s.set_enabled("bank.com", true).unwrap());
+        assert!(s.matching("bank.com").is_some());
     }
 
     #[test]

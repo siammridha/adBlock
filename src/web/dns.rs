@@ -49,7 +49,7 @@ pub(super) fn rewrites_json(dns: &DnsService) -> Value {
         .rewrites()
         .list()
         .into_iter()
-        .map(|r| json!({ "domain": r.domain, "answer": r.answer.to_string() }))
+        .map(|r| json!({ "domain": r.domain, "answer": r.answer.to_string(), "enabled": r.enabled }))
         .collect();
     json!({ "rewrites": rewrites })
 }
@@ -81,6 +81,17 @@ pub(super) fn edit_rewrites(
                     crate::stats::api::EventKind::Info,
                     format!("dns rewrite added: {domain} → {answer}"),
                 );
+            })
+        }
+        RewriteCommand::SetEnabled { domain, answer, enabled } => {
+            dns.rewrites().set_enabled(domain, answer, *enabled).map(|found| {
+                if found {
+                    let what = if *enabled { "enabled" } else { "disabled" };
+                    state.log_event(
+                        crate::stats::api::EventKind::Info,
+                        format!("dns rewrite {what}: {domain} → {answer}"),
+                    );
+                }
             })
         }
     };

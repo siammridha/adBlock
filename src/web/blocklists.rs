@@ -75,6 +75,7 @@ pub(super) fn blocklists_json(curation: &ListCuration) -> Value {
         .map(|l| {
             let (network, cosmetic, exception) = l.categories();
             json!({ "name": l.name, "source": l.source, "rules": l.rules,
+                    "enabled": l.enabled,
                     "network": network, "cosmetic": cosmetic, "exception": exception })
         })
         .collect();
@@ -168,6 +169,36 @@ impl Admin {
                         self.state.log_event(
                             crate::stats::api::EventKind::Info,
                             format!("blocklist removed: {name}"),
+                        );
+                        json_ok(blocklists_json(&self.curation))
+                    }
+                    Ok(Ok(false)) => json_status(
+                        StatusCode::NOT_FOUND,
+                        json!({"error": format!("no list named '{name}'")}),
+                    ),
+                    Ok(Err(e)) => {
+                        json_status(StatusCode::BAD_REQUEST, json!({"error": e.to_string()}))
+                    }
+                    Err(e) => json_status(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        json!({"error": e.to_string()}),
+                    ),
+                }
+            }
+
+            BlocklistCommand::SetEnabled { name, enabled } => {
+                let curation2 = self.curation.clone();
+                let n2 = name.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    curation2.set_list_enabled(&n2, enabled)
+                })
+                .await;
+                match result {
+                    Ok(Ok(true)) => {
+                        let what = if enabled { "enabled" } else { "disabled" };
+                        self.state.log_event(
+                            EventKind::Info,
+                            format!("blocklist {what}: {name} (engine rebuilt)"),
                         );
                         json_ok(blocklists_json(&self.curation))
                     }

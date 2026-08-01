@@ -50,16 +50,20 @@ impl ListCuration {
             return Err(Error::Config("blocklist name is empty".into()));
         }
         let rules = count_rules(&text);
+        // Re-adding a list (a refresh, an auto-update) must not silently switch
+        // a disabled list back on.
+        let enabled = self
+            .core
+            .read(|lists| lists.iter().find(|l| l.name == name).is_none_or(|l| l.enabled));
 
-        self.store.persist(
-            &ListId::of(&name),
-            &format!("! source: {source}\n{text}"),
-        )?;
+        self.store
+            .persist(&ListId::of(&name), &format!("{}{text}", header(source, enabled)))?;
 
         let entry = ListEntry {
             name: name.clone(),
             source: source.to_string(),
             rules,
+            enabled,
             text,
         };
         self.core.mutate(|lists| {
@@ -92,6 +96,28 @@ impl ListCuration {
             None => rules.to_string(),
         };
         self.add_list(name, source, text)
+    }
+
+    /// Switch one list off (its rules leave the engine) or back on. `false`
+    /// when there is no such list.
+    pub fn set_list_enabled(&self, name: &str, enabled: bool) -> Result<bool> {
+        let Some((source, text)) = self.core.read(|lists| {
+            lists
+                .iter()
+                .find(|l| l.name == name)
+                .map(|l| (l.source.clone(), l.text.clone()))
+        }) else {
+            return Ok(false);
+        };
+        self.store
+            .persist(&ListId::of(&sanitize_name(name)), &format!("{}{text}", header(&source, enabled)))?;
+        self.core.mutate(|lists| {
+            if let Some(l) = lists.iter_mut().find(|l| l.name == name) {
+                l.enabled = enabled;
+            }
+        });
+        tracing::info!(%name, enabled, "blocklist switched, engine rebuilt");
+        Ok(true)
     }
 
     pub fn remove_list(&self, name: &str) -> Result<bool> {
@@ -199,6 +225,17 @@ pub(super) fn reconcile(lists: &mut Vec<ListEntry>, stored: Vec<StoredList>) -> 
     }
 }
 
+/// The `! disabled` line right under the source header marks a list that is
+/// stored but kept out of the engine.
+const DISABLED_MARK: &str = "! disabled\n";
+
+/// The header written above a stored list: where it came from, and whether it
+/// is switched off.
+fn header(source: &str, enabled: bool) -> String {
+    let off = if enabled { "" } else { DISABLED_MARK };
+    format!("! source: {source}\n{off}")
+}
+
 fn strip_source_header(text: &str) -> &str {
     match text.strip_prefix("! source: ") {
         Some(rest) => rest.split_once('\n').map(|(_, body)| body).unwrap_or(""),
@@ -214,6 +251,10 @@ fn entry_from_text(fallback_name: &str, fallback_source: &str, text: String) -> 
         }
         None => (fallback_source.to_string(), text),
     };
+    let (enabled, text) = match text.strip_prefix(DISABLED_MARK) {
+        Some(body) => (false, body.to_string()),
+        None => (true, text),
+    };
     let name = list_title(&text)
         .map(|t| sanitize_name(&t))
         .filter(|n| !n.is_empty())
@@ -222,6 +263,7 @@ fn entry_from_text(fallback_name: &str, fallback_source: &str, text: String) -> 
         name,
         rules: count_rules(&text),
         source,
+        enabled,
         text,
     }
 }

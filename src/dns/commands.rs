@@ -9,6 +9,7 @@ use super::DnsOverrides;
 pub enum RewriteCommand {
     Add { domain: String, answer: String },
     Delete { domain: String, answer: String },
+    SetEnabled { domain: String, answer: String, enabled: bool },
 }
 
 impl RewriteCommand {
@@ -21,10 +22,12 @@ impl RewriteCommand {
             return Err("expected 'domain' and 'answer'".into());
         };
         let (domain, answer) = (domain.to_string(), answer.to_string());
-        Ok(if v.get("delete").and_then(Value::as_bool) == Some(true) {
-            Self::Delete { domain, answer }
-        } else {
-            Self::Add { domain, answer }
+        if v.get("delete").and_then(Value::as_bool) == Some(true) {
+            return Ok(Self::Delete { domain, answer });
+        }
+        Ok(match v.get("enabled").and_then(Value::as_bool) {
+            Some(enabled) => Self::SetEnabled { domain, answer, enabled },
+            None => Self::Add { domain, answer },
         })
     }
 }

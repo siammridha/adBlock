@@ -94,6 +94,9 @@ pub struct ListEntry {
     pub name: String,
     pub source: String,
     pub rules: usize,
+    /// A disabled list stays stored and listed, but none of its rules reach the
+    /// engine.
+    pub enabled: bool,
     text: String,
 }
 
@@ -201,6 +204,7 @@ pub fn with_store(
         name: CUSTOM_LIST.into(),
         source: CUSTOM_SOURCE.into(),
         rules: count_rules(&text),
+        enabled: true,
         text,
     });
 
@@ -429,6 +433,7 @@ impl AdBlocker {
         self.core.read(|lists| {
             lists
                 .iter()
+                .filter(|l| l.enabled)
                 .find(|l| l.text.lines().any(|line| line.trim() == needle))
                 .map(|l| l.name.clone())
         })
@@ -464,7 +469,7 @@ fn decode_redirect(data_url: &str) -> Option<Redirect> {
 
 fn build_engine(lists: &[ListEntry], resources: &[Resource]) -> Engine {
     let mut filter_set = FilterSet::new(true);
-    for l in lists {
+    for l in lists.iter().filter(|l| l.enabled) {
         filter_set.add_filter_list(&l.text, ParseOptions::default());
     }
     let mut engine = Engine::from_filter_set(filter_set, false);
@@ -757,6 +762,30 @@ mod tests {
         assert!(!names.contains(&"l".to_string()), "stale entry must go");
         assert!(store.get("l").is_none());
         assert!(b.check("https://new.com/x", "", "image").blocked);
+    }
+
+    #[test]
+    fn a_disabled_list_keeps_its_rules_out_of_the_engine() {
+        let store = Arc::new(MemoryListStore::new());
+        let (b, c) = with_store(&cfg(&[]), store.clone()).unwrap();
+        c.add_list("ads", "https://x.example/l.txt", "||ads.example^".into()).unwrap();
+        assert!(b.check("https://ads.example/x", "", "image").blocked);
+
+        assert!(c.set_list_enabled("ads", false).unwrap());
+        assert!(!b.check("https://ads.example/x", "", "image").blocked);
+        assert!(c.lists().iter().any(|l| l.name == "ads"), "still listed");
+        assert!(!c.set_list_enabled("nope", false).unwrap(), "unknown list reports missing");
+
+        // Off survives a reload, and a refresh of the same list does not
+        // switch it back on.
+        let (b2, c2) = with_store(&cfg(&[]), store.clone()).unwrap();
+        assert!(!b2.check("https://ads.example/x", "", "image").blocked);
+        c2.add_list("ads", "https://x.example/l.txt", "||ads.example^\n||more.example^".into())
+            .unwrap();
+        assert!(!b2.check("https://more.example/x", "", "image").blocked);
+
+        assert!(c2.set_list_enabled("ads", true).unwrap());
+        assert!(b2.check("https://more.example/x", "", "image").blocked);
     }
 
     #[test]

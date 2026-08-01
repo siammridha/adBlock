@@ -34,12 +34,23 @@ pub(super) fn edit_exclusions(
                 );
             }
         }),
-        ExclusionCommand::Add { domain } => exclusions.add(domain).map(|_| {
+        ExclusionCommand::Add { domain } => exclusions.add(domain).map(|()| {
             state.log_event(
                 crate::stats::api::EventKind::Info,
                 format!("excluded domain added: {domain} (bypasses MITM)"),
             );
         }),
+        ExclusionCommand::SetEnabled { domain, enabled } => {
+            exclusions.set_enabled(domain, *enabled).map(|found| {
+                if found {
+                    let what = if *enabled { "enabled" } else { "disabled" };
+                    state.log_event(
+                        crate::stats::api::EventKind::Info,
+                        format!("excluded domain {what}: {domain}"),
+                    );
+                }
+            })
+        }
     };
 
     match outcome {

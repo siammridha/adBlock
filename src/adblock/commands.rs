@@ -8,6 +8,7 @@ use super::RulesUpdate;
 #[derive(Debug, PartialEq)]
 pub enum BlocklistCommand {
     Delete { name: String },
+    SetEnabled { name: String, enabled: bool },
     AddUrl { url: String },
     ApplyRules {
         name: Option<String>,
@@ -27,6 +28,15 @@ impl BlocklistCommand {
                 .ok_or("delete needs 'name'")?
                 .to_string();
             return Ok(BlocklistCommand::Delete { name });
+        }
+        if let Some(enabled) = v.get("enabled").and_then(Value::as_bool) {
+            let name = v
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|n| !n.trim().is_empty())
+                .ok_or("enabling needs 'name'")?
+                .to_string();
+            return Ok(BlocklistCommand::SetEnabled { name, enabled });
         }
         if let Some(url) = v.get("url").and_then(Value::as_str) {
             return Ok(BlocklistCommand::AddUrl {
