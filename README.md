@@ -15,10 +15,14 @@ An intercepting HTTP/HTTPS proxy in Rust that blocks ads and trackers:
   request before it is forwarded. Toggleable at runtime.
 - **Cosmetic filtering** — injects element-hiding CSS from `##selector` rules
   into HTML pages to hide leftover ad containers, plus the `:style()` unbreak
-  rules that put a page's scroll back after a modal is hidden. A small injected
-  script keeps asking about elements the page builds later. The CSS and that
-  script are toggleable at runtime, separately. See
+  rules that put a page's scroll back after a modal is hidden. Rules a
+  stylesheet cannot carry (`:has-text()`, `:upward()`, `:remove()`, `:xpath()`)
+  ride along as a small evaluator that applies them to the live page. A second
+  injected script keeps asking about elements the page builds later. The CSS and
+  that script are toggleable at runtime, separately. See
   [Cosmetic filtering](#cosmetic-filtering).
+- **`$csp` rules** add Content-Security-Policy directives to a page, letting the
+  browser's own policy engine block what a URL pattern cannot name.
 - **Scriptlet injection** — resolves uBlock Origin `##+js(…)` rules against the
   full uBO scriptlet library and injects the resulting JS into HTML pages.
   Strips CSP so the injected script runs (a deliberate security tradeoff).
@@ -65,7 +69,7 @@ allowed dependency edges, and how they are enforced are in
 
 | Module    | Owns                                                                                |
 |-----------|-------------------------------------------------------------------------------------|
-| `adblock` | Filter engine and block decisions (including `$redirect` bodies and `$removeparam` URLs), cosmetic CSS, the uBO scriptlet library, blocklist storage/fetching/auto-update, custom filters, the rule tester. |
+| `adblock` | Filter engine and block decisions (including `$redirect` bodies, `$removeparam` URLs and `$csp` directives), cosmetic CSS and procedural rules, the uBO scriptlet library, blocklist storage/fetching/auto-update, custom filters, the rule tester. |
 | `proxy`   | The accept loop, plain-HTTP forwarding, CONNECT/MITM, the signing CA and managed cert store, MITM exclusions, its pooled upstream HTTP client, egress policy (resolver-only, IPv6), injection toggles. |
 | `dns`     | The DNS listener, cache, upstream pool (UDP/TCP/DoT/DoH) and health, rewrites, ECH stripping and probing. |
 | `stats`   | Counters, the rolling 24 h window, the event log, the request/query logs and their rotating files on disk, body capture storage and decoding, retention. |
@@ -94,8 +98,8 @@ cargo build --release
 > | `proxy-settings.json`     | proxy | egress (`resolver_only`, `disable_ipv6`) and injection (`cosmetic`, `scriptlets`, `runtime`) |
 > | `excluded-domains.conf`   | proxy | domains tunneled blind, one per line |
 > | `active-ca.json`          | proxy | which managed CA signs leaves |
-> | `adblock.json`            | adblock | what a decision may carry: `redirect`, `removeparam` |
-| `dns-server.json`         | dns   | DNS listener: `enabled`, `listen` |
+> | `adblock.json`            | adblock | what a decision may carry: `redirect`, `removeparam`, `csp` |
+> | `dns-server.json`         | dns   | DNS listener: `enabled`, `listen` |
 > | `dns-settings.json`       | dns   | upstreams, mode, bootstrap, cache size, TTL bounds, ECH |
 > | `dns-rewrites.conf`       | dns   | local DNS records |
 > | `stats-settings.json`     | stats | `retention_hours`, `log_rotate_hours` |
@@ -214,7 +218,8 @@ With `admin_listen` set (default `127.0.0.1:8081`), open
 - **Settings** (proxy) — resolver-only egress, IPv6 off, and the cosmetic-CSS,
   scriptlet, and live-DOM runtime injection switches.
 - **Settings** (adblocker) — whether a block decision may serve a `$redirect`
-  stand-in body, and whether `$removeparam` strips tracking parameters.
+  stand-in body, whether `$removeparam` strips tracking parameters, and whether
+  `$csp` directives are added to the page.
 - **Scriptlets** — the loaded uBO scriptlet library (searchable), plus a live
   feed of which scriptlets fired into which pages.
 - **Rule tester** — check any URL against the current rules without sending
@@ -244,8 +249,8 @@ JSON API (all on `admin_listen`):
 | `/api/scriptlets/update` | POST     | refresh the scriptlet library from uBO master  |
 | `/api/blocklists`        | GET/POST | list / add-append-replace-delete               |
 | `/api/blocklist?name=`   | GET      | one list's raw rule text (for editing)         |
-| `/api/adblock`           | GET      | adblock settings: `redirect`, `removeparam`    |
-| `/api/adblock/config`    | POST     | set `redirect`, `removeparam`                  |
+| `/api/adblock`           | GET      | adblock settings: `redirect`, `removeparam`, `csp` |
+| `/api/adblock/config`    | POST     | set `redirect`, `removeparam`, `csp`           |
 | `/api/check`             | POST     | test a URL against rules (`{url,type?,source?}`)|
 | `/api/cosmetic`          | POST     | generic cosmetic CSS for class/id names a live page grew (`{url,classes,ids}`); CORS-open, called by the injected runtime, not the dashboard |
 | `/api/exclusions`        | GET/POST | domains that bypass MITM (add / delete)        |
@@ -286,16 +291,31 @@ changes nothing and exposes no controls. Every other endpoint stays same-origin.
   `data/scriptlets/scriptlets.json`, so nothing extra is downloaded, and they
   load whether or not scriptlet injection is switched on. A `$redirect-rule`
   only supplies a body — it never blocks on its own, so the stand-in is used
-  only once something else has decided to block.
+  only once something else has decided to block. Every type uBO ships is
+  served, not only the JavaScript ones: the transparent pixel, the silent mp4
+  and mp3, the empty frame, stylesheet and text file.
+- **`$csp` rules add a Content-Security-Policy header** to the page. It is
+  appended rather than substituted, so the site's own policy keeps applying
+  alongside it — two CSP headers are enforced together. A page that gets an
+  inline script from us has its own CSP stripped first, so a `$csp` rule that
+  bans inline scripts will also stop our scriptlets on that page.
 - **`$removeparam` rewrites the forwarded URL only.** The site receives the
   cleaned URL; the browser is never told, so the parameter stays in its address
   bar. (uBO redirects the browser instead, which also fixes the address bar but
   turns a misfiring rule into a redirect loop.)
-- Both have a switch in the adblocker **Settings** tab, on by default. They are
-  adblock's own, not the proxy's: the proxy asks one thing — "blocked?" — and
-  adblock volunteers the stand-in body and the cleaned URL inside the answer, so
-  adblock is what decides whether to offer them. Off, a `$redirect` rule blocks
-  plainly and a `$removeparam` rule leaves the URL alone.
+- All three have a switch in the adblocker **Settings** tab, on by default.
+  They are adblock's own, not the proxy's: the proxy asks one thing —
+  "blocked?" — and adblock volunteers the stand-in body, the cleaned URL and the
+  CSP directives inside the answer, so adblock is what decides whether to offer
+  them. Off, a `$redirect` rule blocks plainly, a `$removeparam` rule leaves the
+  URL alone, and a `$csp` rule adds no header.
+- **Beacons are matched twice.** A `navigator.sendBeacon()` call is a POST with
+  `Sec-Fetch-Mode: no-cors` and `Sec-Fetch-Dest: empty` — byte-for-byte what a
+  no-cors `fetch()` sends, with no header separating them (uBO is simply told
+  which is which by the browser). A request of exactly that shape is matched as
+  the fetch it appears to be, and if nothing matched, asked about once more as a
+  `ping`, so `$ping` rules apply without `$xhr` rules losing anything. The
+  tradeoff: a genuine no-cors `fetch` POST can also be caught by a `$ping` rule.
 - **Cosmetic (`##`) rules** apply only to uncompressed HTML. The proxy requests
   `Accept-Encoding: identity` for document loads so it can inject the hide-CSS;
   compressed HTML streams through unmodified. Text *encoding* is not a
@@ -325,10 +345,31 @@ element. These matter more than their small count suggests: hiding a modal
 without restoring the page's scroll leaves it frozen, which is worse than not
 filtering at all.
 
-**Operator rules** (`:has-text()`, `:upward()`, `:xpath()`) need a live DOM to
-evaluate and are dropped. The engine is built with its `css-validation` feature
-on so it classifies these correctly — without it the engine treats them as
-plain CSS and they end up emitted into pages as invalid rules.
+**Operator rules** (`:has-text()`, `:upward()`, `:xpath()`, `:matches-css()`,
+`:matches-attr()`, `:matches-path()`, `:min-text-length()`) select by something
+a stylesheet cannot express, and **action rules** (`:remove()`,
+`:remove-attr()`, `:remove-class()`) do something CSS cannot do — CSS can make
+an element invisible, it cannot take it out of the document, and some
+anti-adblock code checks for presence rather than visibility.
+
+Both need a live page, so adblock hands back a small evaluator
+(`src/adblock/procedural_runtime.js`) with the page's own rules already in it
+and the proxy injects it — like the cosmetic CSS and the scriptlets, the proxy
+never reads what it is injecting. What a rule means is adblock's to decide.
+The evaluator walks each rule's operator chain against the real DOM, applies
+the action, and re-runs on
+a debounced `MutationObserver` for content that arrives later. Every action
+checks the page's current state before changing anything, so a pass with
+nothing to do makes no edit — which is both what stops its own edits from
+waking it in a loop, and what lets it re-apply a rule the page has undone.
+Unlike the class/id lookup below it asks the proxy nothing, so it works in
+every browser.
+
+The engine is built with its `css-validation` feature on so it classifies these
+correctly — without it the engine treats them as plain CSS and they end up
+emitted into pages as invalid rules. Rules the evaluator is injected for count
+as an inline script, so those pages have their CSP stripped like any other
+injection.
 
 ### Generic rules and pages that build themselves
 
@@ -390,7 +431,9 @@ uBlock Origin checkout by `tools/convert-ubo-scriptlets.mjs`, which *evaluates*
 uBO's ESM modules (importing them fires each `registerScriptlet(...)`), reads
 every scriptlet's canonical source via `fn.toString()`, and emits the full
 library — scriptlets, their `.fn` dependencies, trusted scriptlets, and
-web-accessible stubs. Two ways to run it:
+web-accessible stubs. The stubs include the non-JavaScript stand-ins
+`$redirect` serves (`1x1.gif`, `noop-1s.mp4`, `noop.txt`, …), read as bytes so
+the binary ones survive. Two ways to run it:
 
 - **From the CLI** (any machine with Node):
 
@@ -443,9 +486,10 @@ cosmetic injectability, deny/tunnel/MITM), the IO shell driven in-process throug
 upstream/DNS/clock), request-log recording + capture (buffered and streaming),
 DNS upstream parsing/health and listener control, the admin API end-to-end
 in-process, the upstream HTTP client (loopback + redirects), cosmetic CSS
-generation (hide, `:style()`, and dropping operator rules), injection into
-non-UTF-8 pages, the live-DOM runtime and its endpoint, scriptlet resolution +
-naming, and config validation/exclusions.
+generation (hide, `:style()`, and splitting operator rules out to the
+procedural evaluator), `$csp` header application, beacon re-matching, injection
+into non-UTF-8 pages, the live-DOM runtime and its endpoint, scriptlet
+resolution + naming, and config validation/exclusions.
 
 `tests/boundaries.rs` is the module-boundary lint: it fails on any cross-module
 `use` that skips a module's `api` facade or takes an edge the architecture

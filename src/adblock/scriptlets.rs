@@ -103,7 +103,10 @@ impl ScriptletLibrary {
             .map(|r| ScriptletInfo {
                 name: r.name.clone(),
                 aliases: r.aliases.clone(),
-                injectable: !r.name.ends_with(".fn"),
+                // The pack also holds the `$redirect` stand-ins — images, an
+                // mp4, an mp3 — which are served, never injected, and the `.fn`
+                // helpers, which only other scriptlets use.
+                injectable: r.kind.supports_scriptlet_injection(),
                 bytes: r.content.len(),
             })
             .collect();

@@ -1,10 +1,11 @@
 //! What a block decision is allowed to carry, and where that choice is kept.
 //!
-//! Two switches: serving a `$redirect` stand-in body in place of a blocked
-//! resource, and reporting the `$removeparam` cleaned URL. Both belong to
-//! Adblock rather than the caller — the caller asks one thing ("blocked?") and
-//! gets these back inside the answer without asking for them, so Adblock is the
-//! module that decides whether to offer them.
+//! Three switches: serving a `$redirect` stand-in body in place of a blocked
+//! resource, reporting the `$removeparam` cleaned URL, and handing over the
+//! `$csp` directives for a page. All three belong to Adblock rather than the
+//! caller — the caller asks one thing ("blocked?") and gets these back inside
+//! the answer without asking for them, so Adblock is the module that decides
+//! whether to offer them.
 //!
 //! Persisted to Adblock's own settings file. Nothing else writes that file, so
 //! saving rewrites it whole.
@@ -20,6 +21,7 @@ use serde::{Deserialize, Serialize};
 pub struct DecisionOverrides {
     pub redirect: Option<bool>,
     pub removeparam: Option<bool>,
+    pub csp: Option<bool>,
 }
 
 impl DecisionOverrides {
@@ -29,7 +31,11 @@ impl DecisionOverrides {
             return Err("expected a JSON object".into());
         }
         let flag = |key: &str| -> Option<bool> { v.get(key).and_then(serde_json::Value::as_bool) };
-        Ok(Self { redirect: flag("redirect"), removeparam: flag("removeparam") })
+        Ok(Self {
+            redirect: flag("redirect"),
+            removeparam: flag("removeparam"),
+            csp: flag("csp"),
+        })
     }
 }
 
@@ -37,16 +43,18 @@ impl DecisionOverrides {
 pub struct DecisionSettings {
     pub redirect: bool,
     pub removeparam: bool,
+    pub csp: bool,
 }
 
 pub struct DecisionPolicy {
     redirect: AtomicBool,
     removeparam: AtomicBool,
+    csp: AtomicBool,
     path: PathBuf,
 }
 
 impl DecisionPolicy {
-    /// Load the switches, both on by default. An empty path means an in-memory
+    /// Load the switches, all on by default. An empty path means an in-memory
     /// policy that is never written.
     pub fn load(path: PathBuf) -> Self {
         let saved: DecisionOverrides = std::fs::read_to_string(&path)
@@ -56,9 +64,10 @@ impl DecisionPolicy {
         let policy = Self {
             redirect: AtomicBool::new(saved.redirect.unwrap_or(true)),
             removeparam: AtomicBool::new(saved.removeparam.unwrap_or(true)),
+            csp: AtomicBool::new(saved.csp.unwrap_or(true)),
             path,
         };
-        // Seed the file a fresh install does not have yet, so both switches are
+        // Seed the file a fresh install does not have yet, so every switch is
         // there to edit by hand. Failing to seed it is not worth a warning: the
         // defaults still apply and saving from the UI will report the problem.
         if !policy.path.as_os_str().is_empty() && !policy.path.exists() {
@@ -69,7 +78,7 @@ impl DecisionPolicy {
         policy
     }
 
-    /// Both switches on, with no settings file behind them.
+    /// Every switch on, with no settings file behind them.
     pub fn all_on() -> Self {
         Self::load(PathBuf::new())
     }
@@ -78,10 +87,11 @@ impl DecisionPolicy {
         DecisionSettings {
             redirect: self.redirect.load(Ordering::Relaxed),
             removeparam: self.removeparam.load(Ordering::Relaxed),
+            csp: self.csp.load(Ordering::Relaxed),
         }
     }
 
-    /// Apply an update and persist it. Takes effect on the next request — both
+    /// Apply an update and persist it. Takes effect on the next request — the
     /// switches are read per decision, nothing is rebuilt.
     pub fn apply(&self, upd: &DecisionOverrides) -> DecisionSettings {
         if let Some(v) = upd.redirect {
@@ -89,6 +99,9 @@ impl DecisionPolicy {
         }
         if let Some(v) = upd.removeparam {
             self.removeparam.store(v, Ordering::Relaxed);
+        }
+        if let Some(v) = upd.csp {
+            self.csp.store(v, Ordering::Relaxed);
         }
         if let Err(e) = self.persist() {
             tracing::warn!(error = %e, "persisting adblock settings");
@@ -106,6 +119,7 @@ impl DecisionPolicy {
             &DecisionOverrides {
                 redirect: Some(snap.redirect),
                 removeparam: Some(snap.removeparam),
+                csp: Some(snap.csp),
             },
         )
     }
@@ -128,6 +142,7 @@ mod tests {
         let o = DecisionOverrides::parse(br#"{"redirect":false}"#).unwrap();
         assert_eq!(o.redirect, Some(false));
         assert_eq!(o.removeparam, None, "an absent key leaves that switch alone");
+        assert_eq!(o.csp, None);
         assert!(DecisionOverrides::parse(b"[]").is_err(), "not an object");
         assert!(DecisionOverrides::parse(b"nonsense").is_err());
     }
@@ -141,14 +156,22 @@ mod tests {
 
         let policy = DecisionPolicy::load(path.clone());
         let s = policy.settings();
-        assert_eq!((s.redirect, s.removeparam), (true, true), "defaults are on");
+        assert_eq!((s.redirect, s.removeparam, s.csp), (true, true, true), "defaults are on");
         assert!(path.exists(), "a fresh install gets a settings file to edit");
 
-        let snap = policy.apply(&DecisionOverrides { redirect: Some(false), removeparam: None });
-        assert_eq!((snap.redirect, snap.removeparam), (false, true), "untouched switch stays");
+        let snap = policy.apply(&DecisionOverrides {
+            redirect: Some(false),
+            removeparam: None,
+            csp: Some(false),
+        });
+        assert_eq!(
+            (snap.redirect, snap.removeparam, snap.csp),
+            (false, true, false),
+            "untouched switch stays"
+        );
 
         let reloaded = DecisionPolicy::load(path.clone()).settings();
-        assert_eq!((reloaded.redirect, reloaded.removeparam), (false, true));
+        assert_eq!((reloaded.redirect, reloaded.removeparam, reloaded.csp), (false, true, false));
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }

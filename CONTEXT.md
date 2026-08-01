@@ -50,7 +50,7 @@ A small JavaScript snippet (from uBlock Origin) injected into a page to neutrali
 The background jobs that keep blocklists and scriptlets fresh.
 
 **Injection**:
-What the proxy puts into an HTML page it forwards: cosmetic CSS, scriptlets, and the live-DOM runtime. The rules come from Adblock; whether they go in is a proxy setting, one switch each.
+What the proxy puts into an HTML page it forwards: cosmetic CSS, scriptlets, the procedural evaluator, and the live-DOM runtime. The rules come from Adblock; whether they go in is a proxy setting. Three switches: the CSS and the evaluator share the cosmetic one, scriptlets and the runtime have their own.
 
 **Redirect**:
 A harmless stand-in body served in place of a blocked resource, so the page's own code does not break on the missing file. Comes from a `$redirect` or `$redirect-rule` option, and the bodies live in the scriptlet resource file. Whether one is offered is an Adblock setting, not a proxy one — the proxy only asks whether the request is blocked.
@@ -61,7 +61,11 @@ The script the proxy injects so a page can keep asking about elements it builds 
 _Avoid_: content script, agent
 
 **Procedural rule**:
-A cosmetic rule the engine cannot reduce to a plain hide, because it carries an action (`:style()`, `:remove()`) or an operator (`:has-text()`, `:upward()`). The pure-CSS ones are emitted; the rest need a live DOM and are dropped.
+A cosmetic rule the engine cannot reduce to a plain hide, because it carries an action (`:style()`, `:remove()`) or an operator (`:has-text()`, `:upward()`). The pure-CSS ones are emitted as CSS; the rest go into the page as JSON for the procedural evaluator.
+
+**Procedural evaluator**:
+The script that applies procedural rules to the live page. Adblock builds it — rules and all — and the proxy only injects it, the same as the cosmetic CSS. It carries that page's rules with it, so it asks the proxy nothing, unlike the live-DOM runtime, which exists to ask.
+_Avoid_: procedural engine, DOM filter
 
 ## Control
 

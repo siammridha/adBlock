@@ -57,9 +57,14 @@ if (addedPkg) fs.writeFileSync(pkgPath, '{"type":"module"}');
 const cleanup = () => { if (addedPkg) removeFile(pkgPath); };
 if (typeof process.on === 'function') process.on('exit', cleanup);
 
+// Every type adblock-rust can serve for a `$redirect=` rule. The image, audio
+// and video ones are stand-ins a rule swaps in for the real file, never
+// scriptlets, so they are read as bytes rather than text — reading a PNG as
+// utf8 would corrupt it.
 const EXT_MIME = {
   js: 'application/javascript', json: 'application/json', html: 'text/html',
   css: 'text/css', txt: 'text/plain', xml: 'text/xml',
+  gif: 'image/gif', png: 'image/png', mp3: 'audio/mp3', mp4: 'video/mp4',
 };
 
 // Import every module in the resources dir so all registerScriptlet() calls
@@ -93,22 +98,26 @@ for (const d of registeredScriptlets) {
 }
 const scriptletCount = resources.length - skippedAnon;
 
-// Web-accessible resources: the neutered stubs (`nobab`, `popads-dummy`, …)
-// that `##+js(...)` rules also invoke. Only text/JS kinds are injectable;
-// images (`data: 'blob'`) are $redirect-only, so skip them.
+// Web-accessible resources: the neutered stubs the `##+js(...)` rules invoke
+// (`nobab`, `popads-dummy`, …) and the stand-in files `$redirect=` serves in
+// place of a blocked one (`1x1.gif`, `noop-1s.mp4`, `noop.txt`, …). Everything
+// with a MIME type adblock-rust knows goes in; a subdirectory or an unknown
+// extension has no type and is skipped.
 let warCount = 0;
 const aliasMap = (await import(fileUrl(redirectMap))).default;
 for (const file of fs.readdirSync(warDir)) {
-  const ext = file.split('.').pop();
-  const mime = EXT_MIME[ext];
-  if (mime !== 'application/javascript') continue; // scriptlet-injectable only
+  // `empty` is uBO's zero-byte stand-in and the one resource with no extension.
+  const mime = file === 'empty' ? 'text/plain' : EXT_MIME[file.split('.').pop()];
+  if (!mime) continue;
   const meta = aliasMap.get(file) || {};
   const aliases = Array.isArray(meta.alias) ? meta.alias : meta.alias ? [meta.alias] : [];
   resources.push({
     name: file,
     aliases,
     kind: { mime },
-    content: b64(fs.readFileSync(path.join(warDir, file), 'utf8')),
+    // Bytes, not text: base64 of the raw file is right for every type, and the
+    // binary stand-ins do not survive being read as utf8.
+    content: fs.readFileSync(path.join(warDir, file)).toString('base64'),
     dependencies: [],
   });
   warCount++;

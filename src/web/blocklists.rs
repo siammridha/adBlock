@@ -131,7 +131,10 @@ pub(super) fn edit_adblock_config(
     };
     state.log_event(
         EventKind::Info,
-        format!("adblock: redirect={} removeparam={}", s.redirect, s.removeparam),
+        format!(
+            "adblock: redirect={} removeparam={} csp={}",
+            s.redirect, s.removeparam, s.csp
+        ),
     );
     json_ok(adblock_settings_json(adblock))
 }

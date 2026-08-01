@@ -641,8 +641,10 @@
         <div>
           <label class="sw"><input type="checkbox" id="inj-cosmetic"> Cosmetic filtering</label>
           <p class="hint">Hide leftover ad slots, banners and placeholders by injecting the lists'
-            cosmetic rules as CSS into HTML pages. Turn it off if a site's layout breaks — blocking
-            of the requests themselves is unaffected.</p>
+            cosmetic rules as CSS into HTML pages. Rules CSS cannot carry — pick by the text
+            inside an element, delete a node outright — go in as a small evaluator instead. Turn
+            it off if a site's layout breaks; blocking of the requests themselves is
+            unaffected.</p>
         </div>
         <div>
           <label class="sw"><input type="checkbox" id="inj-scriptlets"> Scriptlet injection</label>
@@ -789,6 +791,13 @@
         <p class="hint">When a rule has a <code>$removeparam</code> option, forward the request
           with those query parameters removed instead of leaving them on. The request still
           goes through either way.</p>
+      </div>
+      <div>
+        <label class="sw"><input type="checkbox" id="ab-csp"> Apply content-security-policy rules</label>
+        <p class="hint">When a rule has a <code>$csp</code> option, add its directives to the
+          page as a second <code>Content-Security-Policy</code> header, letting the browser
+          block what a URL pattern cannot name. The site's own policy still applies. A rule that
+          bans inline scripts also stops scriptlet injection on that page.</p>
       </div>
     </div>
     <div class="actions">
@@ -1192,11 +1201,13 @@ async function refreshAdblockCfg(){
     const r = await fetch("/api/adblock"); const d = await r.json();
     $("ab-redirect").checked = !!d.redirect;
     $("ab-removeparam").checked = !!d.removeparam;
+    $("ab-csp").checked = !!d.csp;
   } catch(e){}
 }
 $("ab-save").addEventListener("click", async ()=>{
   const el = $("ab-status"); say(el, "saving…");
-  const body = {redirect: $("ab-redirect").checked, removeparam: $("ab-removeparam").checked};
+  const body = {redirect: $("ab-redirect").checked, removeparam: $("ab-removeparam").checked,
+                csp: $("ab-csp").checked};
   try {
     const r = await fetch("/api/adblock/config", {method:"POST",
       headers:{"content-type":"application/json"}, body: JSON.stringify(body)});

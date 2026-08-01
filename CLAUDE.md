@@ -2,6 +2,7 @@
 
 - Ensure all changes are clean—don't leave behind dangling code, unused variables, or stale configuration.
 - Before making any commit, make sure to update all relevant documentation so it accurately reflects the current changes.
+- When a question is asked just answer the question so that I can make an informative decission. Do not start planing and exicuting
 
 ## Architecture boundaries (non-negotiable)
 

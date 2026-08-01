@@ -16,6 +16,10 @@ pub(crate) struct RequestPlan {
     pub source: String,
     pub req_type: String,
     pub injection_target: bool,
+    /// This request has the exact shape of a `navigator.sendBeacon()` call,
+    /// which on the wire is indistinguishable from a no-cors `fetch()`. The
+    /// caller should ask a second time as a `ping` before letting it through.
+    pub maybe_beacon: bool,
 }
 
 pub(crate) fn plan_request<B>(
@@ -25,14 +29,25 @@ pub(crate) fn plan_request<B>(
 ) -> std::result::Result<RequestPlan, BoxError> {
     let t = target_of(req, secure)?;
     let url = t.url();
-    let source = req
+    let req_type = guess_request_type(req);
+    let mut source = req
         .headers()
         .get(hyper::header::REFERER)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
-    let req_type = guess_request_type(req);
+    // Typing a URL in and following a link off-site both arrive without a
+    // referer, and a page loaded that way is its own source — that is what
+    // `$domain=`, `$1p`/`$3p` and `$csp` are asked about. Left empty the engine
+    // reads the page as third-party to nothing, so none of those rules apply to
+    // the one request that matters most. Only for a top-level page: an iframe
+    // without a referer really does have a parent we cannot see, and guessing
+    // itself there would call a third-party frame first-party.
+    if source.is_empty() && req_type == "document" {
+        source = url.clone();
+    }
     let injection_target = adblock_enabled && is_injectable_type(&req_type);
+    let maybe_beacon = req_type != "ping" && is_beacon_shaped(req);
     Ok(RequestPlan {
         scheme: t.scheme,
         host: t.host,
@@ -42,7 +57,19 @@ pub(crate) fn plan_request<B>(
         source,
         req_type,
         injection_target,
+        maybe_beacon,
     })
+}
+
+/// A fire-and-forget cross-origin POST: what `navigator.sendBeacon()` produces.
+/// `fetch(url, {mode: "no-cors", method: "POST"})` produces the same bytes, and
+/// nothing in the request tells them apart — uBO only knows because the browser
+/// hands it a resource type. Requiring `sec-fetch-mode` to actually say
+/// `no-cors` keeps ordinary same-origin and CORS traffic out of this.
+fn is_beacon_shaped<B>(req: &Request<B>) -> bool {
+    req.method() == hyper::Method::POST
+        && header_is(req, hyper::header::HeaderName::from_static("sec-fetch-mode"), "no-cors")
+        && header_is(req, hyper::header::HeaderName::from_static("sec-fetch-dest"), "empty")
 }
 
 /// Rebuild a request URI from the cleaned absolute URL a `$removeparam` rule
@@ -153,6 +180,16 @@ fn target_of<B>(
 }
 
 fn guess_request_type<B>(req: &Request<B>) -> String {
+    // Two types name themselves in a header and are gone by the time
+    // `sec-fetch-dest` is read: a WebSocket upgrade carries no `sec-fetch-dest`
+    // at all, and hyperlink auditing (`<a ping>`) carries `empty`, which would
+    // otherwise pass for a `fetch`.
+    if header_is(req, hyper::header::UPGRADE, "websocket") {
+        return "websocket".to_string();
+    }
+    if header_is(req, hyper::header::CONTENT_TYPE, "text/ping") {
+        return "ping".to_string();
+    }
     if let Some(dest) = req
         .headers()
         .get("sec-fetch-dest")
@@ -194,6 +231,16 @@ fn guess_request_type<B>(req: &Request<B>) -> String {
     } else {
         "other".to_string()
     }
+}
+
+/// Whether a header is present and names `want`, ignoring case and any
+/// parameters after a `;`.
+fn header_is<B>(req: &Request<B>, name: hyper::header::HeaderName, want: &str) -> bool {
+    req.headers()
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(';').next())
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case(want))
 }
 
 pub(crate) fn is_injectable_type(req_type: &str) -> bool {
@@ -336,6 +383,100 @@ mod tests {
         assert!(!is_injectable_type("fetch"));
         assert!(!is_injectable_type("other"));
         assert!(!is_injectable_type("script"));
+    }
+
+    #[test]
+    fn a_top_level_page_without_a_referer_is_its_own_source() {
+        let nav = req("http://e.com/page", &[("sec-fetch-dest", "document")]);
+        assert_eq!(plan_request(&nav, false, true).unwrap().source, "http://e.com/page");
+
+        let referred = req(
+            "http://e.com/page",
+            &[("sec-fetch-dest", "document"), ("referer", "http://other.test/")],
+        );
+        assert_eq!(
+            plan_request(&referred, false, true).unwrap().source,
+            "http://other.test/",
+            "a referer we were given always wins"
+        );
+
+        let frame = req("http://e.com/f", &[("sec-fetch-dest", "iframe")]);
+        assert_eq!(
+            plan_request(&frame, false, true).unwrap().source,
+            "",
+            "a frame has a parent we cannot see; calling it its own would make it first-party"
+        );
+    }
+
+    #[test]
+    fn websockets_and_pings_are_named_by_their_own_headers() {
+        let ws = req(
+            "http://e.com/socket",
+            &[("connection", "Upgrade"), ("upgrade", "websocket")],
+        );
+        assert_eq!(plan_request(&ws, false, true).unwrap().req_type, "websocket");
+
+        // Hyperlink auditing is a POST that would otherwise pass for a fetch.
+        let ping = Request::builder()
+            .method(hyper::Method::POST)
+            .uri("http://e.com/track")
+            .header("sec-fetch-dest", "empty")
+            .header("content-type", "text/ping")
+            .body(())
+            .unwrap();
+        assert_eq!(plan_request(&ping, false, true).unwrap().req_type, "ping");
+
+        let plain = req("http://e.com/api", &[("content-type", "application/json")]);
+        assert_eq!(plan_request(&plain, false, true).unwrap().req_type, "other");
+    }
+
+    #[test]
+    fn a_beacon_shaped_post_is_flagged_for_a_second_look() {
+        let beacon = |extra: &[(&str, &str)]| {
+            let mut b = Request::builder()
+                .method(hyper::Method::POST)
+                .uri("http://e.com/collect")
+                .header("sec-fetch-mode", "no-cors")
+                .header("sec-fetch-dest", "empty");
+            for (k, v) in extra {
+                b = b.header(*k, *v);
+            }
+            b.body(()).unwrap()
+        };
+        let p = plan_request(&beacon(&[]), false, true).unwrap();
+        assert_eq!(p.req_type, "fetch", "it really is a fetch on the wire");
+        assert!(p.maybe_beacon, "and it may equally be a sendBeacon call");
+
+        // Everything that is not that exact shape must not get the second look.
+        let cors = Request::builder()
+            .method(hyper::Method::POST)
+            .uri("http://e.com/api")
+            .header("sec-fetch-mode", "cors")
+            .header("sec-fetch-dest", "empty")
+            .body(())
+            .unwrap();
+        assert!(!plan_request(&cors, false, true).unwrap().maybe_beacon, "cors is not a beacon");
+
+        let get = req("http://e.com/x", &[("sec-fetch-mode", "no-cors"), ("sec-fetch-dest", "empty")]);
+        assert!(!plan_request(&get, false, true).unwrap().maybe_beacon, "a GET is not a beacon");
+
+        let img = Request::builder()
+            .method(hyper::Method::POST)
+            .uri("http://e.com/x.png")
+            .header("sec-fetch-mode", "no-cors")
+            .header("sec-fetch-dest", "image")
+            .body(())
+            .unwrap();
+        assert!(!plan_request(&img, false, true).unwrap().maybe_beacon, "typed, so not ambiguous");
+
+        let bare = req("http://e.com/x", &[]);
+        assert!(!plan_request(&bare, false, true).unwrap().maybe_beacon, "no headers, no guessing");
+
+        // A real `<a ping>` is already named; it must not be asked about twice.
+        let ping = beacon(&[("content-type", "text/ping")]);
+        let p = plan_request(&ping, false, true).unwrap();
+        assert_eq!(p.req_type, "ping");
+        assert!(!p.maybe_beacon);
     }
 
     #[test]
@@ -491,6 +632,7 @@ mod tests {
             attribution: crate::adblock::api::BlockAttribution { rule: None, list: None },
             redirect: None,
             rewritten_url: None,
+            csp: None,
         }
     }
 
@@ -503,6 +645,7 @@ mod tests {
             },
             redirect: None,
             rewritten_url: None,
+            csp: None,
         }
     }
 

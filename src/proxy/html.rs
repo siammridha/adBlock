@@ -217,6 +217,26 @@ mod tests {
         assert!(cosmetic_runtime("[::1]:8081").unwrap().contains("http://[::1]:8081/"));
     }
 
+    /// The runtime ships as text and only ever runs in a browser, so a syntax
+    /// error in it would reach every page before anyone noticed. Node parses it
+    /// here as a stand-in; skipped where node is not installed.
+    #[test]
+    fn the_injected_javascript_parses() {
+        if std::process::Command::new("node").arg("-v").output().is_err() {
+            eprintln!("node not installed; skipping the runtime syntax check");
+            return;
+        }
+        let path = std::env::temp_dir().join(format!("proxy-js-check-{}.js", std::process::id()));
+        std::fs::write(&path, cosmetic_runtime("127.0.0.1:8081").unwrap()).unwrap();
+        let out = std::process::Command::new("node").arg("--check").arg(&path).output().unwrap();
+        assert!(
+            out.status.success(),
+            "the cosmetic runtime does not parse: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
     #[test]
     fn the_injected_script_tag_removes_itself() {
         let out = inject_into_html(b"<html><head></head></html>", "", "hook()").unwrap();

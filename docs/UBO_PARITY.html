@@ -1,0 +1,937 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Full uBlock Origin parity: every rule type, and what each one needs</title>
+<style>
+:root { color-scheme: light dark; --fg: #1a1a1a; --bg: #fff; --muted: #5a5a5a; --line: #d8d8d8; --code-bg: #f4f4f4; --accent: #0a5ea8;
+  --ok-bg: #dcf0dc; --ok-fg: #14591f; --part-bg: #fbeccd; --part-fg: #7a5200; --no-bg: #f8dada; --no-fg: #8a1f1f; --na-bg: #e6e6e6; --na-fg: #4a4a4a;
+  --dom-bg: #e2e0f7; --dom-fg: #3d2f8a; --px-bg: #d9edf7; --px-fg: #14556b; }
+@media (prefers-color-scheme: dark) { :root { --fg: #e6e6e6; --bg: #16181a; --muted: #a0a0a0; --line: #33383d; --code-bg: #22262a; --accent: #6fb3f2;
+  --ok-bg: #1d3a21; --ok-fg: #8fdc9b; --part-bg: #40331a; --part-fg: #f0c268; --no-bg: #401f1f; --no-fg: #f09b9b; --na-bg: #2c3034; --na-fg: #9aa0a6;
+  --dom-bg: #2b2650; --dom-fg: #b8b0f5; --px-bg: #16323d; --px-fg: #8fd0e8; } }
+* { box-sizing: border-box; }
+body { margin: 0 auto; padding: 2rem 1.25rem 5rem; max-width: 66rem; background: var(--bg); color: var(--fg);
+  font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+h1 { font-size: 1.75rem; line-height: 1.25; margin: 0 0 .5rem; }
+h2 { font-size: 1.3rem; margin: 2.75rem 0 .75rem; padding-top: .75rem; border-top: 1px solid var(--line); }
+h3 { font-size: 1.05rem; margin: 1.75rem 0 .5rem; }
+p, ul, ol { margin: 0 0 1rem; }
+li { margin-bottom: .35rem; }
+a { color: var(--accent); }
+code { background: var(--code-bg); padding: .1em .35em; border-radius: 3px; font-size: .875em;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+pre { background: var(--code-bg); padding: .85rem 1rem; border-radius: 5px; overflow-x: auto; }
+pre code { background: none; padding: 0; font-size: .85em; }
+.meta { color: var(--muted); font-size: .9rem; margin-bottom: 2rem; }
+.tablewrap { overflow-x: auto; margin: 0 0 1.25rem; }
+table { border-collapse: collapse; width: 100%; font-size: .9rem; }
+th, td { border: 1px solid var(--line); padding: .4rem .55rem; text-align: left; vertical-align: top; }
+th { background: var(--code-bg); font-weight: 600; }
+td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.note { border-left: 3px solid var(--accent); padding: .1rem 0 .1rem 1rem; margin: 0 0 1.5rem; }
+.tag { display: inline-block; padding: .08em .5em; border-radius: 3px; font-size: .76rem; font-weight: 600; white-space: nowrap; }
+.full { background: var(--ok-bg); color: var(--ok-fg); }
+.part { background: var(--part-bg); color: var(--part-fg); }
+.none { background: var(--no-bg); color: var(--no-fg); }
+.na   { background: var(--na-bg); color: var(--na-fg); }
+.dom  { background: var(--dom-bg); color: var(--dom-fg); }
+.px   { background: var(--px-bg); color: var(--px-fg); }
+.score { display: grid; grid-template-columns: repeat(auto-fit, minmax(10.5rem, 1fr)); gap: .75rem; margin: 0 0 1.5rem; }
+.card { border: 1px solid var(--line); border-radius: 6px; padding: .8rem .9rem; }
+.card .big { font-size: 1.6rem; font-weight: 700; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.card .lbl { color: var(--muted); font-size: .85rem; }
+.legend { font-size: .88rem; color: var(--muted); margin: -.5rem 0 1.25rem; }
+.legend .tag { margin-right: .25rem; }
+.pct { font-size: .78em; font-weight: 600; color: var(--muted); margin-left: .5rem; white-space: nowrap; }
+</style>
+</head>
+<body>
+
+<h1>Full uBlock Origin parity</h1>
+<p class="meta">Written 2026-07-31, revised 2026-08-01 after closing every gap where
+<code>adblock-rust</code> supported the rule and we did not, then re-checked line by line against the
+code, uBO and the crate on 2026-08-01. Covers <strong>everything uBO supports</strong>,
+not only what your current lists happen to use. The uBO side was read from
+<code>src/js/static-filtering-parser.js</code> in uBO itself, which is uBO's own parser. Our side was
+read from <code>adblock-rust</code> 0.9.8 and this repository. Rule counts were taken from the
+15 lists in <code>data/blocklists/</code> as they stood on 2026-08-01 — 1,470,512 rules.</p>
+
+<div class="note">
+<p><strong>What changed on 2026-08-01.</strong> Everything <code>adblock-rust</code> parsed and we
+were throwing away is now used. That was the cheap half of the gap and it is closed:</p>
+<ul>
+  <li><strong>All 24 network options the crate accepts</strong> now do something —
+    <code>$csp</code>, <code>$ping</code> and <code>$websocket</code> were the last three.
+    <code>$ping</code> then went further than the crate strictly offers: a
+    <code>sendBeacon()</code> call is matched by asking a second time, which the 58
+    <code>$ping</code>-only rules in your lists needed. See 2.1.</li>
+  <li><strong>All 13 cosmetic operators the crate accepts</strong> now run, in an evaluator the
+    proxy injects into the page along with that page's own rules. The <code>#?#</code> family
+    with them.</li>
+  <li><strong>Every stand-in file type</strong> a <code>$redirect</code> rule can name, not only
+    the JavaScript ones.</li>
+</ul>
+<p>The one correction to the earlier version of this page: procedural cosmetic rules do
+<em>not</em> need the page-to-proxy channel, so they did not need <code>extension/</code> first.
+The rules for a page are known when the page is served, so they are embedded in it. Only the
+question "what matches a class name that appeared later?" needs a channel back, and that is the
+one thing still Chromium-only.</p>
+<p>Two labels on this page were also corrected, because both overstated a gap.
+<code>$all</code> does block popup navigations — the crate's mask includes the document type — so
+only the empty window survives, not the ad. And generic hiding is limited by a browser
+mixed-content rule, not by anything <code>adblock-rust</code> withholds.</p>
+
+<p>What is left is the half that needs machinery we do not have: an HTML filter, a response-body
+rewriter, a side table for the options the crate refuses, and popups.</p>
+</div>
+
+<div class="note">
+<p><strong>What the re-check changed.</strong> No verdict moved. Every capability claim below was
+tested against the code, and all 288 tests pass. Three things did change:</p>
+<ul>
+  <li><strong>The counts are now measured, not estimated.</strong> Every line of
+    <code>data/blocklists/</code> was run through <code>adblock::lists::parse_filter</code> itself,
+    so "what the crate refuses" is the crate's own answer rather than a guess: <strong>4,157 rules
+    of 1,470,512 are dropped, 0.28%</strong>. The per-option figures were recounted with uBO's own
+    option table, scanning right-to-left for the option separator the way uBO does — the old
+    numbers undercounted every option that appears after the first one, which is why
+    <code>$1p</code> read 39 and is really 723.</li>
+  <li><strong>Your lists now hold 777 <code>#?#</code> rules</strong>, where this page previously
+    said zero. They work — that family has been supported since the procedural evaluator landed —
+    but it is no longer a hypothetical row.</li>
+  <li><strong>The unsupported-cosmetic pile is 10 rules, not 13.</strong> All three
+    <code>:-abp-has</code> rules sit inside <code>#?#</code>/<code>#@?#</code> rules, where the
+    crate translates them to <code>:has()</code> and they work.</li>
+</ul>
+<p>The pack was checked too, because a converter that emits stand-in files is worth nothing until
+the pack on disk has them. It does: <code>data/scriptlets/scriptlets.json</code> holds 198
+resources, 20 of them non-JavaScript — the gif, three pngs, two mp3s, the mp4, four xml stubs, the
+html, css, json and plain-text ones. 673 of the 674 <code>$redirect=</code> rules in your lists
+resolve to a real file, and 186 of those ask for one of the 20. The single miss is
+<code>$redirect=none</code>, which is uBO's keyword for cancelling a redirect rather than the name
+of a file.</p>
+</div>
+
+<div class="note">
+<p><strong>Where <code>adblock-rust</code> stands.</strong> Every table below has two columns for
+this: whether the crate supports the rule, and what this repository has built on top of it. They do
+not always agree, and the difference is the cheapest work available.</p>
+
+<div class="tablewrap">
+<table>
+<thead><tr><th>adblock-rust</th><th>What that covers</th><th class="num">Rules in your lists</th><th>What is still needed</th></tr></thead>
+<tbody>
+<tr><td><span class="tag full">supported, and we use it</span></td>
+    <td>Network matching, request types, <code>$redirect</code> in every file type,
+    <code>$removeparam</code>, <code>$csp</code>, <code>$important</code>,
+    <code>$badfilter</code>, <code>$ghide</code>, cosmetic hiding, exceptions, scriptlets,
+    <code>:style()</code>, all 9 procedural operators and all 4 cosmetic actions</td>
+    <td class="num">1,466,355</td><td>Nothing.</td></tr>
+<tr><td><span class="tag full">supported, not used yet</span></td>
+    <td>Nothing left.</td>
+    <td class="num">0</td>
+    <td>Closed on 2026-08-01.</td></tr>
+<tr><td><span class="tag part">supported under a different name</span></td>
+    <td><code>$rewrite=</code> is <code>$redirect=</code>, <code>$queryprune=</code> is
+    <code>$removeparam=</code>; <code>$reason=</code> and <code>$_</code> affect nothing</td>
+    <td class="num">24</td>
+    <td>Text substitution before the list is handed over. ~3 lines.</td></tr>
+<tr><td><span class="tag none">not supported</span></td>
+    <td>25 network options and 6 cosmetic operators the crate has no case for</td>
+    <td class="num">3,881 network<br>213 cosmetic<br>63 other</td>
+    <td>Still no parser. <code>parse_filter</code> reports the rejection per rule and
+    <code>BlockerResult.filter</code> names the rule that matched, so the option can be stripped
+    and the condition checked separately. See section 2.6.</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Those three numbers are the crate's own, from running <code>parse_filter</code> over all 1,470,512
+lines: 3,881 rules lost to <code>UnrecognisedOption</code>, 213 cosmetic rules lost to six different
+reasons, and 63 more to smaller network complaints — 31 <code>$redirect=</code> with an empty value,
+9 empty <code>$removeparam=</code>, 5 <code>$removeparam=</code> regexes, 4 <code>$csp</code> rules
+that also name a content type, 12 unclassified, 2 stragglers. 4,157 dropped in total, 0.28%.</p>
+
+<p>Real parsing work of our own is needed for exactly two things: <code>##^</code> HTML filtering
+(122 rules, 123 including the <code>responseheader</code> one) and <code>:-abp-properties</code>
+and friends (10 rules). Neither is worth a parser.</p>
+</div>
+
+<div class="score">
+  <div class="card"><div class="big">100%</div><div class="lbl">of the rule types <code>adblock-rust</code> parses</div></div>
+  <div class="card"><div class="big">48%</div><div class="lbl">of uBO's 50 network options<br>50 → 24 → 24</div></div>
+  <div class="card"><div class="big">68%</div><div class="lbl">of uBO's 19 cosmetic operators<br>19 → 13 → 13</div></div>
+  <div class="card"><div class="big">64%</div><div class="lbl">of uBO's 11 rule families<br>11 → 7 → 7</div></div>
+</div>
+
+<h3>Coverage by rule type</h3>
+
+<p>Every table in this document, counted. <em>Covered</em> is full plus partial — a type where
+something happens. The last column is the one to read: it is 100% wherever
+<code>adblock-rust</code> is not the limit.</p>
+
+<div class="tablewrap">
+<table>
+<thead><tr><th>Rule types</th><th class="num">Types</th><th class="num">Full</th><th class="num">Partial</th><th class="num">Missing</th><th class="num">Covered</th><th class="num">Of the crate</th></tr></thead>
+<tbody>
+<tr><td>Rule families (§1)</td><td class="num">11</td><td class="num">7</td><td class="num">0</td><td class="num">4</td><td class="num">64%</td><td class="num">100%</td></tr>
+<tr><td>Network: request type (§2.1)</td><td class="num">14</td><td class="num">12</td><td class="num">2</td><td class="num">0</td><td class="num">100%</td><td class="num">100%</td></tr>
+<tr><td>Network: scope and party (§2.2)</td><td class="num">9</td><td class="num">4</td><td class="num">0</td><td class="num">5</td><td class="num">44%</td><td class="num">100%</td></tr>
+<tr><td>Network: advanced matching (§2.3)</td><td class="num">5</td><td class="num">0</td><td class="num">0</td><td class="num">5</td><td class="num">0%</td><td class="num">n/a</td></tr>
+<tr><td>Network: actions (§2.4)</td><td class="num">16</td><td class="num">4</td><td class="num">0</td><td class="num">12</td><td class="num">25%</td><td class="num">100%</td></tr>
+<tr><td>Network: control and exceptions (§2.5)</td><td class="num">8</td><td class="num">3</td><td class="num">0</td><td class="num">5</td><td class="num">38%</td><td class="num">100%</td></tr>
+<tr><td>Cosmetic operators (§3)</td><td class="num">19</td><td class="num">13</td><td class="num">0</td><td class="num">6</td><td class="num">68%</td><td class="num">100%</td></tr>
+<tr><td>Ways to stop something (§5.1)</td><td class="num">19</td><td class="num">9</td><td class="num">1</td><td class="num">9</td><td class="num">53%</td><td class="num">100%</td></tr>
+<tr><td>Ways to keep sites working (§5.2)</td><td class="num">7</td><td class="num">6</td><td class="num">1</td><td class="num">0</td><td class="num">100%</td><td class="num">100%</td></tr>
+</tbody>
+</table>
+</div>
+
+<p class="legend">Two columns, two different questions. <em>Covered</em> measures us against uBO, so
+it is low wherever uBO can do something the crate never parses. <em>Of the crate</em> measures us
+against what <code>adblock-rust</code> actually hands over, and it is 100% everywhere — there is no
+row left where the crate gives us a rule and we ignore it. §2.3 is n/a because the crate parses
+none of those five, so there is nothing to have used.</p>
+
+<p class="legend">Read each row left to right: what uBO supports, how much of that
+<code>adblock-rust</code> parses, and how much of <em>that</em> this repository does something with.
+The middle number is the ceiling we get for free, and the third number now meets it: the whole
+remaining gap is the first arrow, options the crate itself refuses. The one network option still
+marked partial is <code>$all</code>, and only for the window a popup leaves behind — the request
+itself is blocked.</p>
+
+<p class="legend">
+<span class="tag px">proxy</span> can be done entirely in the proxy &nbsp;·&nbsp;
+<span class="tag dom">live DOM</span> must run in the page, after JavaScript has built it &nbsp;·&nbsp;
+<span class="tag na">browser</span> needs something only a browser extension can see &nbsp;·&nbsp;
+<span class="tag na">DNS</span> needs the resolver
+</p>
+
+<p class="legend">
+The <em>adblock-rust</em> column is the crate alone: <span class="tag full">yes</span> it parses the
+rule and returns something usable, <span class="tag none">no</span> the rule is discarded during
+parsing. The <em>What we have built</em> column is this repository:
+<span class="tag full">full</span> works today,
+<span class="tag part">part</span> works for some cases — every one of these names what it is
+missing, and in each case the missing half is something <code>adblock-rust</code> never offered —
+<span class="tag none">not supported</span> nothing happens.
+</p>
+
+<p class="legend">A row with <span class="tag full">yes</span> and
+<span class="tag none">not supported</span> was the interesting kind — the crate hands us the rule
+and we do not act on it. There are none left; every remaining gap is a
+<span class="tag none">no</span> from the crate.</p>
+
+<h2>1. The 11 rule families<span class="pct">7 of 11 covered · 64%</span></h2>
+
+<p>uBO's parser accepts eleven distinct shapes. The separator in the middle of the rule decides
+which machinery handles it. Your lists are counted here, but the table covers all of them whether
+your lists use them or not.</p>
+
+<div class="tablewrap">
+<table>
+<thead><tr><th>Family</th><th>Syntax</th><th class="num">In your lists</th><th>Needs</th><th>adblock-rust</th><th>What we have built</th></tr></thead>
+<tbody>
+<tr><td>Network block</td><td><code>||ads.example.com^$script</code></td><td class="num">1,344,683</td>
+    <td><span class="tag px">proxy</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td>Network exception</td><td><code>@@||example.com/api^</code></td><td class="num">4,845</td>
+    <td><span class="tag px">proxy</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td>Cosmetic hide</td><td><code>example.com##.ad</code></td><td class="num">108,391</td>
+    <td><span class="tag px">proxy</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td>Cosmetic exception</td><td><code>example.com#@#.ad</code></td><td class="num">1,429</td>
+    <td><span class="tag px">proxy</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td>Scriptlet</td><td><code>example.com##+js(set, x, 1)</code></td><td class="num">10,242</td>
+    <td><span class="tag px">proxy</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td>Scriptlet exception</td><td><code>example.com#@#+js(set, x, 1)</code></td><td class="num">18</td>
+    <td><span class="tag px">proxy</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td>Procedural (ABP form)</td><td><code>example.com#?#.ad:has-text(Ad)</code></td><td class="num">777<br><span class="pct">+3 exceptions</span></td>
+    <td><span class="tag dom">live DOM</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td>CSS declaration</td><td><code>example.com#$#body { overflow: auto }</code></td><td class="num">1</td>
+    <td><span class="tag px">proxy</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+<tr><td>Procedural + style</td><td><code>example.com#$?#.x:has-text(Ad) { ... }</code></td><td class="num">0</td>
+    <td><span class="tag dom">live DOM</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+<tr><td>HTML filter</td><td><code>example.com##^script:has-text(ads)</code></td><td class="num">119<br><span class="pct">+3 exceptions</span></td>
+    <td><span class="tag px">proxy</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+<tr><td>Response header removal</td><td><code>example.com##^responseheader(refresh)</code></td><td class="num">1</td>
+    <td><span class="tag px">proxy</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Where the seven working families live: block decisions in <code>AdBlocker::check</code>, served
+by <code>server.rs</code>. Cosmetic CSS in <code>cosmetic_css()</code>, injected by
+<code>html.rs</code>. Scriptlets in <code>scriptlet_injection()</code>, 77 of the 78 names your
+lists use being present — the 78th is <code>sptest</code>, this repository's own test rule in
+<code>custom.txt</code>, so uBO coverage is complete. Both procedural families come out of
+<code>procedural_injection()</code> as a finished evaluator
+(<code>src/adblock/procedural_runtime.js</code>) that runs them in the page. Both exception
+families are resolved inside the engine before we see anything.</p>
+
+<p>Three proxy switches decide what actually goes into a page, in
+<code>src/proxy/injection.rs</code>: <em>cosmetic</em> (the stylesheet, and with it the procedural
+evaluator, which shares the switch), <em>scriptlets</em>, and <em>runtime</em> (the live-DOM class
+and id lookup of section 4.3). Adblock's own three — <code>redirect</code>,
+<code>removeparam</code>, <code>csp</code> — live in <code>src/adblock/settings.rs</code> and ride
+the block decision instead.</p>
+
+<p>The three <code>#$#</code> forms and <code>##^</code> are not "unsupported by accident". They
+raise named errors in <code>adblock-rust</code> — <code>UnsupportedSyntax</code> and
+<code>HtmlFilteringUnsupported</code> — and the rule is discarded. There is also
+<code>#%#</code>, AdGuard's scriptlet syntax, which uBO parses only in order to reject it. That one
+is not a gap.</p>
+
+<h2>2. All 50 network options<span class="pct">25 of 52 rows covered · 48%</span></h2>
+
+<p>These are every option uBO's parser knows, taken from its token table. The
+<em>Uses</em> column is your lists; a zero means uBO supports it and your lists never use it, which
+is still a parity gap if you ever add a list that does. 52 rows for 50 options: <code>$rewrite=</code>
+and <code>$queryprune=</code> get rows of their own in §2.4, because the crate treats a uBO synonym
+as a different word rather than the same option.</p>
+
+<p>The network side is the opposite of the cosmetic side. Here a <span class="tag none">no</span>
+really does mean the crate cannot help. <code>adblock-rust</code> matches option names in one
+hard-coded table
+(<code>src/filters/network.rs:391–466</code>) whose last arm is
+<code>return Err(UnrecognisedOption)</code>. There are 25 accepted spellings and no extension point.
+When one option is unknown, <code>add_filter_list</code> discards the entire rule, silently — the
+block goes with it.</p>
+
+<h3>2.1 Request type — 14 options<span class="pct">14 of 14 covered · 100% (12 full, 2 partial)</span></h3>
+
+<div class="tablewrap">
+<table>
+<thead><tr><th>Option</th><th>Matches</th><th class="num">Uses</th><th>Needs</th><th>adblock-rust</th><th>What we have built</th></tr></thead>
+<tbody>
+<tr><td><code>$script</code></td><td>JavaScript</td><td class="num">3,556</td><td><span class="tag px">proxy</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td><code>$doc</code> · <code>$document</code></td><td>Top-level page loads</td><td class="num">3,437</td><td><span class="tag px">proxy</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td><code>$image</code></td><td>Images</td><td class="num">1,485</td><td><span class="tag px">proxy</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td><code>$xhr</code> · <code>$xmlhttprequest</code></td><td>Background data requests</td><td class="num">971</td><td><span class="tag px">proxy</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td><code>$frame</code> · <code>$subdocument</code></td><td>Iframes</td><td class="num">419</td><td><span class="tag px">proxy</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td><code>$css</code> · <code>$stylesheet</code></td><td>Stylesheets</td><td class="num">181</td><td><span class="tag px">proxy</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td><code>$media</code></td><td>Audio and video</td><td class="num">134</td><td><span class="tag px">proxy</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td><code>$object</code> · <code>$object-subrequest</code></td><td>Plugin content</td><td class="num">8</td><td><span class="tag px">proxy</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td><code>$other</code></td><td>Anything not otherwise typed</td><td class="num">9</td><td><span class="tag px">proxy</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td><code>$font</code></td><td>Web fonts</td><td class="num">5</td><td><span class="tag px">proxy</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td><code>$ping</code> · <code>$beacon</code></td><td>Fire-and-forget beacons</td><td class="num">70</td><td><span class="tag px">proxy</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td><code>$websocket</code></td><td>WebSocket connections</td><td class="num">9</td><td><span class="tag px">proxy</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td><code>$all</code></td><td>Every type, plus popups</td><td class="num">1,379</td><td><span class="tag px">proxy</span></td><td><span class="tag full">yes</span></td><td><span class="tag part">window still opens</span></td></tr>
+<tr><td><code>$webrtc</code></td><td>WebRTC connections</td><td class="num">0</td><td><span class="tag na">browser</span></td><td><span class="tag none">no</span></td><td><span class="tag part">via scriptlet</span></td></tr>
+</tbody>
+</table>
+</div>
+
+<p>These all come from one place: <code>guess_request_type</code> in <code>pipeline.rs</code> reads
+<code>sec-fetch-dest</code>, falling back to <code>x-requested-with</code>, then to
+<code>accept</code>.</p>
+
+<p><code>$websocket</code> and <code>$ping</code> arrive with no usable
+<code>sec-fetch-dest</code>, so each is read from the header that does name it:
+<code>Upgrade: websocket</code> for the first, <code>Content-Type: text/ping</code> for the
+second.</p>
+
+<p>That second header only covers hyperlink auditing (<code>&lt;a ping&gt;</code>). The other half
+of <code>$ping</code> is <code>navigator.sendBeacon()</code>, and it is worth being exact about why
+it is hard: a beacon is a POST with <code>Sec-Fetch-Mode: no-cors</code> and
+<code>Sec-Fetch-Dest: empty</code>, which is <em>byte-for-byte</em> what
+<code>fetch(url, {mode: "no-cors", method: "POST"})</code> sends. There is no header that separates
+them. uBO is not cleverer here; it is simply handed a resource type by the browser.</p>
+
+<p>Labelling every such POST a <code>ping</code> would be a bad trade — the lists hold 971
+<code>$xhr</code> rules against 70 <code>$ping</code> ones, so it would lose far more than it
+gained. Instead the proxy matches the request as the fetch it appears to be, and <em>if nothing
+matched</em>, asks once more as a <code>ping</code>. Both sets of rules apply, the extra lookup
+only happens on requests already shaped like a beacon, and a second look can only ever add a
+block.</p>
+
+<p>Why this was worth doing rather than documenting: of the 70 <code>$ping</code> rules in your
+lists, 12 also name <code>$xhr</code> or another type and would have caught a mislabelled beacon
+anyway — but 58 name <code>$ping</code> and nothing else. Those 58 are the rules that exist
+precisely <em>because</em> the endpoint is a beacon, and they were the ones missing it. The one
+behavioural difference from uBO: a genuine no-cors <code>fetch</code> POST can now also be matched
+by a <code>$ping</code> rule. Since those rules name beacon endpoints by URL, that is the
+intent.</p>
+
+<p><code>$all</code> is the row most likely to be misread, so: <strong>the blocking works.</strong>
+<code>adblock-rust</code> compiles <code>$all</code> to
+<code>FROM_ALL_TYPES = FROM_NETWORK_TYPES | FROM_DOCUMENT</code>
+(<code>filters/network.rs:139–142</code>) — and that includes the document type. A popup is a
+window navigating to a URL, and that navigation reaches us as a document request, so an
+<code>$all</code> rule blocks it like any other page load. Nothing gets through.</p>
+
+<p>What is missing is only the window. uBO sees the tab being created and stops it from opening;
+we let it open and then serve it nothing, so the user gets a blank window instead of no window.
+That is a worse experience, not a filtering gap, which is why the tag reads
+<span class="tag part">window still opens</span> rather than "no popups". The crate has no popup
+concept to borrow either: <code>RequestType</code> has no such variant, <code>$popup</code> is
+rejected outright, and the crate's own source carries the note
+<code>// TODO Could also include popup</code>.</p>
+
+<p><code>$webrtc</code> never touches HTTP — a WebRTC connection is negotiated by the page and goes
+out over UDP. A proxy cannot see it. uBO blocks it by neutering
+<code>RTCPeerConnection</code> in the page, which is what the <code>nowebrtc</code> scriptlet does,
+and that scriptlet <em>does</em> work here. So the option is unsupported but the effect is covered.</p>
+
+<h3>2.2 Scope and party — 9 options<span class="pct">4 of 9 covered · 44%</span></h3>
+
+<div class="tablewrap">
+<table>
+<thead><tr><th>Option</th><th>Meaning</th><th class="num">Uses</th><th>Needs</th><th>adblock-rust</th><th>What we have built</th></tr></thead>
+<tbody>
+<tr><td><code>$3p</code> · <code>$third-party</code></td><td>Request goes to a different site than the page</td><td class="num">8,618</td><td><span class="tag px">proxy</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td><code>$from=</code> · <code>$domain=</code></td><td>Only on these sites</td><td class="num">3,818</td><td><span class="tag px">proxy</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td><code>$1p</code> · <code>$first-party</code></td><td>Same-site requests</td><td class="num">723</td><td><span class="tag px">proxy</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td><code>$match-case</code></td><td>Case-sensitive pattern match</td><td class="num">100</td><td><span class="tag px">proxy</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td><code>$to=</code></td><td>Only when the request goes <em>to</em> these hosts</td><td class="num">308</td><td><span class="tag px">proxy</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+<tr><td><code>$denyallow=</code></td><td>Block everything except these hosts</td><td class="num">82</td><td><span class="tag px">proxy</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+<tr><td><code>$strict1p</code></td><td>Same-party without the public-suffix allowance</td><td class="num">11</td><td><span class="tag px">proxy</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+<tr><td><code>$strict3p</code></td><td>Third-party, strictly</td><td class="num">9</td><td><span class="tag px">proxy</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+<tr><td><code>$top</code></td><td>Only the top-level frame</td><td class="num">0</td><td><span class="tag px">proxy</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+</tbody>
+</table>
+</div>
+
+<h3>2.3 Advanced matching — 5 options<span class="pct">0 of 5 covered · 0%</span></h3>
+
+<div class="tablewrap">
+<table>
+<thead><tr><th>Option</th><th>Meaning</th><th class="num">Uses</th><th>Needs</th><th>adblock-rust</th><th>What we have built</th></tr></thead>
+<tbody>
+<tr><td><code>$method=</code></td><td>Only GET, or only POST, etc.</td><td class="num">21</td><td><span class="tag px">proxy</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+<tr><td><code>$ipaddress=</code></td><td>Match the resolved IP, not the name</td><td class="num">37</td><td><span class="tag na">DNS</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+<tr><td><code>$cname</code></td><td>Match what a CNAME really points at</td><td class="num">27</td><td><span class="tag na">DNS</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+<tr><td><code>$header=</code> · <code>$responseheader=</code></td><td>Match on a response header</td><td class="num">9</td><td><span class="tag px">proxy</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+<tr><td><code>$requestheader=</code></td><td>Match on a request header</td><td class="num">0</td><td><span class="tag px">proxy</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+</tbody>
+</table>
+</div>
+
+<p><code>$cname</code> and <code>$ipaddress</code> are the two places where we are structurally
+<em>better</em> placed than uBO. uBO can only do <code>$cname</code> on Firefox, because only
+Firefox exposes DNS results to an extension. We own the DNS module and see the resolved answer
+before we open the connection.</p>
+
+<h3>2.4 Actions — 14 options<span class="pct">4 of 16 rows covered · 25%</span></h3>
+
+<p>The two uBO synonyms get their own rows here, because the crate treats them as different words
+rather than the same option.</p>
+
+<div class="tablewrap">
+<table>
+<thead><tr><th>Option</th><th>What it does</th><th class="num">Uses</th><th>Needs</th><th>adblock-rust</th><th>What we have built</th></tr></thead>
+<tbody>
+<tr><td><code>$redirect=</code></td><td>Serve a harmless stand-in file</td><td class="num">498</td><td><span class="tag px">proxy</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td><code>$redirect-rule=</code></td><td>Supply a stand-in without blocking</td><td class="num">207</td><td><span class="tag px">proxy</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td><code>$rewrite=</code></td><td>uBO synonym for <code>$redirect=</code></td><td class="num">10</td><td><span class="tag px">proxy</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+<tr><td><code>$removeparam=</code></td><td>Strip tracking parameters</td><td class="num">232</td><td><span class="tag px">proxy</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td><code>$queryprune=</code></td><td>uBO synonym for <code>$removeparam=</code></td><td class="num">0</td><td><span class="tag px">proxy</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+<tr><td><code>$csp=</code></td><td>Add a Content-Security-Policy header</td><td class="num">40</td><td><span class="tag px">proxy</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td><code>$popup</code></td><td>Block only when opening a new window</td><td class="num">3,113</td><td><span class="tag na">browser</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+<tr><td><code>$popunder</code></td><td>Same, for the window opening behind</td><td class="num">15</td><td><span class="tag na">browser</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+<tr><td><code>$urlskip=</code></td><td>Unwrap a redirector and go straight to the target</td><td class="num">205</td><td><span class="tag px">proxy</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+<tr><td><code>$replace=</code></td><td>Regex edit of the response body</td><td class="num">48</td><td><span class="tag px">proxy</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+<tr><td><code>$uritransform=</code></td><td>Rewrite the request path</td><td class="num">17</td><td><span class="tag px">proxy</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+<tr><td><code>$permissions=</code></td><td>Add a Permissions-Policy header</td><td class="num">11</td><td><span class="tag px">proxy</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+<tr><td><code>$inline-script</code></td><td>Shorthand CSP banning inline scripts</td><td class="num">1</td><td><span class="tag px">proxy</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+<tr><td><code>$inline-font</code></td><td>Shorthand CSP banning inline fonts</td><td class="num">0</td><td><span class="tag px">proxy</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+<tr><td><code>$empty</code></td><td>Serve an empty body instead of blocking</td><td class="num">0</td><td><span class="tag px">proxy</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+<tr><td><code>$mp4</code></td><td>Serve a silent video instead of blocking</td><td class="num">0</td><td><span class="tag px">proxy</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+</tbody>
+</table>
+</div>
+
+<p><code>$csp</code> now rides on the block decision like the other two: the engine computes the
+directives, <code>check()</code> returns them, and the proxy appends a
+<code>Content-Security-Policy</code> header to the page — appended, not substituted, so the site's
+own policy keeps applying. It is added after injection, because injecting an inline script of ours
+strips the page's CSP and would strip this with it. The consequence is worth knowing: five of the
+40 <code>$csp</code> rules in your lists set a <code>script-src</code> without
+<code>'unsafe-inline'</code>, and on those pages our own scriptlets stop running too. That is the
+rule doing what it says. It has its own switch in the adblocker Settings tab, alongside
+<code>redirect</code> and <code>removeparam</code>. Four further <code>$csp</code> rules are thrown
+away before any of this: the crate rejects <code>$csp</code> combined with a content type
+(<code>CspWithContentType</code>).</p>
+
+<p>The two <code>$redirect</code> rows were <span class="tag part">part</span> for a reason that had
+nothing to do with the crate. Serving always worked — <code>decode_redirect</code> turns the
+engine's <code>data:</code> URL into bytes and <code>redirect_response</code> sends it as a 200,
+behind Adblock's <code>redirect</code> switch. The stand-in files were what was missing.
+<code>tools/convert-ubo-scriptlets.mjs</code> skipped every file whose type was not
+<code>application/javascript</code>, and read with <code>'utf8'</code>, which would have corrupted
+a binary file even if it had not. It now emits all 50 of uBO's web-accessible resources, read as
+bytes: the transparent gif and pngs, the silent mp4 and mp3s, the VAST and VMAP stubs, the empty
+frame, stylesheet, text and json. All 50 files in uBO's
+<code>src/web_accessible_resources/</code> are kept — none is skipped for an unknown type — and the
+aliases (<code>noopframe</code>, <code>nooptext</code>, <code>noopmp4-1s</code>, …) come from
+uBO's own <code>redirect-resources.js</code>.</p>
+
+<p><strong>The pack on disk has them.</strong> <code>data/scriptlets/scriptlets.json</code> holds
+198 resources, 20 of them non-JavaScript. Of the 40 distinct <code>$redirect=</code> tokens your
+lists name, 39 resolve to a real file, covering 673 of the 674 rules; 186 of those rules ask for
+one of the 20 stand-ins. The one miss is <code>$redirect=none</code> — uBO's way of cancelling a
+redirect, not a filename, and the crate has no case for it. If you ever see stand-ins stop
+working, the fix is to regenerate: <strong>Scriptlets → "Update from uBO"</strong>, or the CLI
+command in the README.</p>
+
+<p>One thing the crate does handle that is easy to assume it does not: uBO's priority suffix.
+55 of your <code>$redirect=</code> values are written <code>noopjs:10</code>,
+<code>google-ima.js:5</code> and so on. <code>blocker.rs</code> splits the number off and picks the
+highest-priority resource, so those names look up correctly.</p>
+
+<p><code>$empty</code> and <code>$mp4</code> are old shorthands for
+<code>$redirect=nooptext</code> and <code>$redirect=noopmp4-1s</code>. The crate has no case for
+either spelling, so they stay unsupported, but the files they name are in the pack now and the
+spelled-out <code>$redirect=</code> form of each works.</p>
+
+<p><code>$rewrite=</code> and <code>$queryprune=</code> are uBO synonyms that
+<code>adblock-rust</code> does not accept. Ten rules use <code>$rewrite=</code> and are thrown away
+for no reason other than the spelling. A text substitution when lists are loaded recovers them.</p>
+
+<h3>2.5 Control and exceptions — 8 options<span class="pct">3 of 8 covered · 38%</span></h3>
+
+<div class="tablewrap">
+<table>
+<thead><tr><th>Option</th><th>What it does</th><th class="num">Uses</th><th>Needs</th><th>adblock-rust</th><th>What we have built</th></tr></thead>
+<tbody>
+<tr><td><code>$ghide</code> · <code>$generichide</code></td><td>Turn off generic cosmetic filtering on a site</td><td class="num">701</td><td><span class="tag px">proxy</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td><code>$important</code></td><td>Beat any exception rule</td><td class="num">241</td><td><span class="tag px">proxy</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td><code>$badfilter</code></td><td>Cancel another rule from a different list</td><td class="num">233</td><td><span class="tag px">proxy</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td><code>$shide</code> · <code>$specifichide</code></td><td>Turn off site-specific cosmetic filtering</td><td class="num">1</td><td><span class="tag px">proxy</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+<tr><td><code>$ehide</code> · <code>$elemhide</code></td><td>Turn off <em>all</em> cosmetic filtering on a site</td><td class="num">0</td><td><span class="tag px">proxy</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+<tr><td><code>$genericblock</code></td><td>Turn off generic <em>network</em> rules on a site</td><td class="num">0</td><td><span class="tag px">proxy</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+<tr><td><code>$reason=</code></td><td>Free text explaining why the rule exists</td><td class="num">11</td><td><span class="tag px">proxy</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+<tr><td><code>$_</code></td><td>No-op, used to pad a rule</td><td class="num">3</td><td><span class="tag px">proxy</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+</tbody>
+</table>
+</div>
+
+<p><code>$reason=</code> is the most annoying of these. It changes nothing about matching — it is a
+comment attached to a rule — and it costs us 11 rules because the parser has never heard of it.
+Same for <code>$_</code>, written <code>$_____</code> in all three of its uses here — though those
+three rules name a second unknown option as well, so stripping <code>$_</code> alone recovers
+none of them. Both could be stripped from the text before parsing, in one line each.</p>
+
+<h3>2.6 Getting past the closed option table without a parser</h3>
+
+<p>The table is closed, but the crate still gives us enough to work around it, so none of these
+rows require writing a filter parser.</p>
+
+<ul>
+  <li><code>adblock::lists::parse_filter</code> (<code>src/lists.rs:393</code>) and
+    <code>FilterSet::add_filter</code> (<code>:247</code>) are public and return a typed error for
+    one rule. We can see exactly which rules are rejected, and why, at load time — that is how the
+    4,157 figure on this page was produced.</li>
+  <li><code>src/adblock/mod.rs:444</code> already builds <code>FilterSet::new(true)</code>, so
+    <code>BlockerResult.filter</code> comes back carrying the text of the rule that matched.
+    <code>attribution()</code> at <code>mod.rs:381</code> already uses it.</li>
+</ul>
+
+<p>That is enough for the obvious approach: at load, strip the option the crate refuses, give the
+remainder to the engine, and record the extra condition in a table keyed by the rule text. At match
+time the engine names the rule, so checking the extra condition is a lookup, not a second matching
+engine. What needs writing is one small check per option — is the method GET, is the host in the
+<code>$denyallow</code> set — not a parser.</p>
+
+<h2>3. All 19 cosmetic operators<span class="pct">13 of 19 covered · 68%</span></h2>
+
+<p>uBO's extended-CSS operator table has 19 canonical entries. Three of them are plain CSS or
+plain style. The other 16 select elements by something a stylesheet cannot express — the text
+inside, the computed style, an ancestor, an XPath — so they can only be decided by looking at the
+real page.</p>
+
+<p>This used to be the table where the two columns disagreed most. <code>adblock-rust</code> says
+yes to 13 of the 19, and all 13 now work.</p>
+
+<div class="tablewrap">
+<table>
+<thead><tr><th>Operator</th><th>Selects / does</th><th class="num">Uses</th><th>Needs</th><th>adblock-rust</th><th>What we have built</th></tr></thead>
+<tbody>
+<tr><td><code>:has()</code> <span class="tag na">-abp-has, :if</span></td><td>Elements containing a match</td><td class="num">997</td><td><span class="tag px">proxy</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td><code>:not()</code></td><td>Exclude a match</td><td class="num">253</td><td><span class="tag px">proxy</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td><code>:style()</code></td><td>Apply a style instead of hiding</td><td class="num">1,306</td><td><span class="tag px">proxy</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td><code>:has-text()</code> <span class="tag na">contains, -abp-contains</span></td><td>Elements whose text matches</td><td class="num">914</td><td><span class="tag dom">live DOM</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td><code>:upward()</code></td><td>Walk up to an ancestor and act there</td><td class="num">51</td><td><span class="tag dom">live DOM</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td><code>:remove()</code></td><td>Delete the element outright</td><td class="num">60</td><td><span class="tag dom">live DOM</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td><code>:remove-attr()</code></td><td>Strip an attribute</td><td class="num">45</td><td><span class="tag dom">live DOM</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td><code>:xpath()</code></td><td>Select by XPath expression</td><td class="num">26</td><td><span class="tag dom">live DOM</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td><code>:remove-class()</code></td><td>Strip a class</td><td class="num">18</td><td><span class="tag dom">live DOM</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td><code>:matches-css()</code> <span class="tag na">-before, -after</span></td><td>Match on computed style</td><td class="num">17</td><td><span class="tag dom">live DOM</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td><code>:matches-path()</code></td><td>Only on certain URL paths</td><td class="num">8</td><td><span class="tag dom">live DOM</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td><code>:matches-attr()</code></td><td>Match on an attribute's value</td><td class="num">6</td><td><span class="tag dom">live DOM</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td><code>:min-text-length()</code></td><td>Match on text length</td><td class="num">0</td><td><span class="tag dom">live DOM</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td><code>:others()</code></td><td>The siblings that did <em>not</em> match</td><td class="num">2</td><td><span class="tag dom">live DOM</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+<tr><td><code>:watch-attr()</code> <span class="tag na">watch-attrs</span></td><td>Re-run when an attribute changes</td><td class="num">1</td><td><span class="tag dom">live DOM</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+<tr><td><code>:nth-ancestor()</code></td><td>Older name for <code>:upward()</code></td><td class="num">0</td><td><span class="tag dom">live DOM</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+<tr><td><code>:matches-prop()</code> <span class="tag na">matches-property</span></td><td>Match on a JavaScript property of the element</td><td class="num">0</td><td><span class="tag dom">live DOM</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+<tr><td><code>:matches-media()</code></td><td>Only under a media query</td><td class="num">0</td><td><span class="tag dom">live DOM</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+<tr><td><code>:if()</code> · <code>:if-not()</code></td><td>Older names for <code>:has</code> / <code>:not</code></td><td class="num">0</td><td><span class="tag dom">live DOM</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+</tbody>
+</table>
+</div>
+
+<p><strong><code>adblock-rust</code> supports 13 of the 19, and all 13 work.</strong> The 10 that
+needed a live DOM are used 1,145 times across your lists, six of them accounting for 97%:
+<code>:has-text</code> (914), <code>:remove()</code> (60), <code>:upward</code> (51),
+<code>:remove-attr</code> (45), <code>:xpath</code> (26), <code>:remove-class</code> (18). Note
+where <code>:has-text</code> lives now: 772 of its 914 uses are in <code>#?#</code> rules, the ABP
+form, which is why that family went from nothing to the second-biggest cosmetic family in your
+lists.</p>
+
+<p>What the crate does with them: parses each into a <code>CosmeticFilterOperator</code> or
+<code>CosmeticFilterAction</code>, serialises the pair to JSON, and returns it on
+<code>UrlSpecificResources.procedural_actions</code>. What we now do with them:
+<code>cosmetic_css()</code> keeps calling <code>as_css()</code> and emits everything that reduces
+to a stylesheet, and <code>procedural_injection()</code> takes the rest — the ones
+<code>as_css()</code> answers <code>None</code> for — and embeds that JSON in
+<code>src/adblock/procedural_runtime.js</code>. The proxy injects the finished script without
+reading it, so nothing is applied twice and no rule is dropped.</p>
+
+<p>The evaluator walks each rule's chain against the live DOM: the first entry is a plain CSS
+selector, and each operator after it narrows the set (<code>:has-text</code>,
+<code>:matches-css</code>) or moves it (<code>:upward</code>, <code>:xpath</code>). Then the action
+runs — hide by default, or <code>:style()</code>, <code>:remove()</code>,
+<code>:remove-attr()</code>, <code>:remove-class()</code>. A debounced
+<code>MutationObserver</code> re-runs it for content that arrives later. Every action reads the
+page's current state before changing anything, so a pass with nothing to do makes no edit at all:
+that is what keeps its own edits from waking it forever, and it also means a rule the page has
+undone gets applied again.</p>
+
+<p>Two things it is worth being honest about. Injecting it strips the page's CSP, like any inline
+script of ours. And an <code>:upward()</code> or <code>:remove()</code> rule now deletes real
+nodes, so a bad rule breaks a page more visibly than a bad hide rule does.</p>
+
+<p>The 6 the crate does not support cover 10 rules: <code>:-abp-properties</code> (7),
+<code>:others()</code> (2) and <code>:watch-attr()</code> (1). These are the only cosmetic rules in
+your lists that would need parsing code of our own, and at 10 rules that is not worth writing.
+<code>:-abp-has</code> and <code>:-abp-contains</code> were counted here in the earlier version of
+this page; they should not have been. All five of their uses sit inside <code>#?#</code> or
+<code>#@?#</code> rules, where the crate turns on ABP translation and rewrites them to
+<code>:has()</code> and <code>:has-text()</code>. They work.</p>
+
+<p>Separately from the operator table, the crate throws out 213 cosmetic rules for six reasons of
+its own: 123 <code>##^</code> HTML filters, 44 selectors its CSS parser will not accept, 17
+<code>#$#</code>/<code>#%#</code>/<code>#$?#</code> syntaxes, 16 with unparseable scriptlet
+arguments, 11 generic <code>#@#</code> unhides, and 2 procedural rules carrying more than one CSS
+selector.</p>
+
+<h2>4. What needs a live DOM, and what that actually blocks</h2>
+
+<p>This was billed as the single biggest parity item. It turned out to be two separate problems
+that were being counted as one, and only the smaller of them is still open — which is why this
+section has been rewritten rather than ticked off.</p>
+
+<h3>4.1 The rule</h3>
+
+<p>A filter can be decided in the proxy if everything it needs is in the bytes going past:
+the URL, the request headers, the response headers, the response body. A filter needs a live DOM
+if it depends on something that only exists after the browser has parsed the page and run its
+JavaScript.</p>
+
+<div class="tablewrap">
+<table>
+<thead><tr><th>Depends on</th><th>Where it lives</th><th>Decidable in the proxy?</th></tr></thead>
+<tbody>
+<tr><td>The URL, the request method, headers</td><td>The request</td><td>Yes</td></tr>
+<tr><td>The response body as served</td><td>The response</td><td>Yes</td></tr>
+<tr><td>A CSS selector with no procedural part</td><td>Handed to the browser as a stylesheet</td><td>Yes — the browser evaluates it for us</td></tr>
+<tr><td>The <em>text</em> inside an element</td><td>Only after parsing</td><td>No</td></tr>
+<tr><td>The <em>computed</em> style of an element</td><td>Only after layout</td><td>No</td></tr>
+<tr><td>An element that JavaScript created</td><td>Only after scripts run</td><td>No</td></tr>
+<tr><td>Deleting a node, or an attribute, or a class</td><td>An action, not a selection</td><td>No — CSS can hide, it cannot delete</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>That last row is worth dwelling on. <code>:remove()</code> is not a matching problem, it is a
+capability problem. CSS can make something invisible. It cannot take it out of the document. Some
+anti-adblock scripts check whether their element is still <em>present</em>, not whether it is
+visible, so hiding is not always as good as removing.</p>
+
+<h3>4.2 The 19 things that need a live DOM</h3>
+
+<ul>
+  <li>16 cosmetic operators — everything in the table above marked <span class="tag dom">live DOM</span>.
+    The 10 of them <code>adblock-rust</code> parses now run in the injected evaluator.</li>
+  <li>Generic cosmetic filtering on content that JavaScript adds after load. This is the one that
+    still needs a channel back to the proxy — see 4.3.</li>
+  <li>The <code>#?#</code> rule family (working) and <code>#$?#</code> (the crate rejects it)</li>
+  <li><code>##^responseheader()</code> is <em>not</em> one of these — it is a header, pure proxy work</li>
+</ul>
+
+<h3>4.3 Two live-DOM problems, only one of which needs a channel</h3>
+
+<p>This is the distinction the earlier version of this page got wrong, and it decides what is
+blocked and what is not.</p>
+
+<p><strong>Applying a rule to the live DOM needs no channel.</strong> Which procedural rules a page
+gets is decided by its hostname, which the proxy knows as it serves the page. So the rules go into
+the page with the page, and <code>src/adblock/procedural_runtime.js</code> evaluates them there.
+Nothing is asked of the proxy, nothing crosses an origin, and it works in every browser.</p>
+
+<p><strong>Asking which generic rule matches a name that appeared later does.</strong> There are
+hundreds of thousands of generic rules; they cannot all be sent, so the page has to ask.
+<code>src/proxy/cosmetic_runtime.js</code> watches the page with a
+<code>MutationObserver</code>, collects new class and id names, and asks the proxy what matches.</p>
+
+<p>That second one does not work in Safari or Firefox.</p>
+
+<pre><code>[blocked] The page at https://www.youtube.com/... requested insecure content
+from http://127.0.0.1:8081/api/cosmetic. This content was blocked.</code></pre>
+
+<p>The runtime is injected into the page, so its request carries the page's origin. An
+<code>https://</code> page making a plain <code>http://</code> request is mixed content. Chromium
+allows it because it treats <code>127.0.0.1</code> as trustworthy. WebKit and Gecko do not.
+<code>cosmetic_runtime.js:61</code> swallows the failure in an empty <code>catch</code>, which is
+why it went unnoticed.</p>
+
+<p>So on Safari and Firefox today you get the static scan of the served HTML, the scriptlets, the
+site-specific cosmetic rules and the procedural rules — but no <em>generic</em> rule for a class
+name that appeared after the page was served. On a page that builds itself in JavaScript, that is
+a real hole, just a narrower one than it looked.</p>
+
+<div class="note">
+<p><strong>This is why <code>extension/</code> exists</strong> — but it is no longer the only way
+out. A background script's request leaves the extension's own origin, so mixed content does not
+apply, and it is the only route to <code>$popup</code>. For the generic lookup alone there is a
+smaller fix: the proxy already terminates TLS with its own CA, so it can answer the cosmetic
+endpoint on an <code>https://</code> origin the page is allowed to call. Same-scheme, no mixed
+content, no extension to install, and it works in every browser at once. Not built yet; it is item
+5 on the work list.</p>
+<p>The procedural evaluator did not wait for either of them, because it never needed to ask
+anything.</p>
+</div>
+
+<h2>5. Every method uBO uses</h2>
+
+<p>Counting distinct machinery rather than option names: <strong>19 ways to stop something</strong>
+and <strong>7 ways to keep sites working</strong>.</p>
+
+<h3>5.1 Stopping things<span class="pct">10 of 19 covered · 53%</span></h3>
+
+<div class="tablewrap">
+<table>
+<thead><tr><th>#</th><th>Method</th><th>How it works</th><th>Needs</th><th>adblock-rust</th><th>What we have built</th></tr></thead>
+<tbody>
+<tr><td>1</td><td>Block the request</td><td>The request is never made</td><td><span class="tag px">proxy</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td>2</td><td>Serve a stand-in</td><td>A neutered copy, so page code keeps running</td><td><span class="tag px">proxy</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td>3</td><td>Strip URL parameters</td><td>Request goes through, tracking removed</td><td><span class="tag px">proxy</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td>4</td><td>Rewrite the request URL</td><td><code>$uritransform</code>, <code>$urlskip</code></td><td><span class="tag px">proxy</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+<tr><td>5</td><td>Rewrite the response body</td><td><code>$replace</code>, regex on the bytes</td><td><span class="tag px">proxy</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+<tr><td>6</td><td>Filter the HTML</td><td>Delete nodes before the parser sees them</td><td><span class="tag px">proxy</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+<tr><td>7</td><td>Strip a response header</td><td><code>##^responseheader()</code></td><td><span class="tag px">proxy</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+<tr><td>8</td><td>Inject a CSP</td><td>Let the browser's policy engine block what a filter cannot name</td><td><span class="tag px">proxy</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td>9</td><td>Inject a Permissions-Policy</td><td>Turn off camera, geolocation, and so on</td><td><span class="tag px">proxy</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+<tr><td>10</td><td>Match on method or header</td><td>Only POSTs, or only responses carrying a header</td><td><span class="tag px">proxy</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+<tr><td>11</td><td>Uncloak CNAMEs</td><td>Resolve first, match against the real host</td><td><span class="tag na">DNS</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+<tr><td>12</td><td>Match on IP</td><td>Catch a tracker that keeps renaming itself</td><td><span class="tag na">DNS</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+<tr><td>13</td><td>Block popups</td><td>Only fires when a window opens</td><td><span class="tag na">browser</span></td><td><span class="tag none">no</span></td><td><span class="tag none">not supported</span></td></tr>
+<tr><td>14</td><td>Hide with CSS</td><td>A stylesheet injected into the page</td><td><span class="tag px">proxy</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td>15</td><td>Generic hiding</td><td>Match rules against the class and id names on the page</td><td><span class="tag px">proxy</span></td><td><span class="tag full">yes</span></td><td><span class="tag part">chromium only</span></td></tr>
+<tr><td>16</td><td>Restyle</td><td><code>:style()</code> — undo a scroll lock rather than hide</td><td><span class="tag px">proxy</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td>17</td><td>Procedural selection</td><td>Pick by text, ancestor, computed style, XPath</td><td><span class="tag dom">live DOM</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td>18</td><td>DOM actions</td><td><code>:remove()</code>, <code>:remove-attr()</code>, <code>:remove-class()</code></td><td><span class="tag dom">live DOM</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td>19</td><td>Scriptlet injection</td><td>Run code in the page to defuse what filtering cannot reach</td><td><span class="tag px">proxy</span></td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+</tbody>
+</table>
+</div>
+
+<p>The one <span class="tag part">chromium only</span> row left is generic hiding, and the crate is
+not what limits it. <code>hidden_class_id_selectors()</code> is called for both the served-HTML
+scan and the live lookup, so everything the engine offers is used. What is missing is the page
+being able to <em>reach</em> the proxy on Safari and Firefox — a mixed-content rule in the browser.
+See 4.3.</p>
+
+<h3>5.2 Keeping sites working<span class="pct">7 of 7 covered · 100%</span></h3>
+
+<p>This half gets less attention and matters just as much. A blocker that only blocks is unusable
+within a day.</p>
+
+<div class="tablewrap">
+<table>
+<thead><tr><th>#</th><th>Method</th><th>The problem it solves</th><th>adblock-rust</th><th>What we have built</th></tr></thead>
+<tbody>
+<tr><td>1</td><td>Exception rules (<code>@@</code>)</td><td>A rule is right in general and wrong on one site</td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td>2</td><td>Cosmetic exceptions (<code>#@#</code>)</td><td>A hide rule eats real content</td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td>3</td><td><code>$badfilter</code></td><td>Cancel a bad rule without editing someone else's list</td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td>4</td><td>Cosmetic off-switches</td><td><code>$ghide</code>, <code>$shide</code>, <code>$ehide</code>, <code>$genericblock</code></td><td><span class="tag part">ghide only</span></td><td><span class="tag part">ghide only</span></td></tr>
+<tr><td>5</td><td>Stand-in resources</td><td>A missing script throws and stops the page; a fake one does not</td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td>6</td><td>Fake success, never fail</td><td>A blocked request is detectable; a faked 200 is not</td><td><span class="tag full">yes</span></td><td><span class="tag full">full</span></td></tr>
+<tr><td>7</td><td>Unbreak and Quick-fixes lists</td><td>Curated repairs, updated fast when a site changes</td><td><span class="tag na">n/a</span></td><td><span class="tag full">full</span></td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Point 6 is the design principle worth internalising, because it is the one easiest to get wrong
+by hand. uBO handles <code>youtube.com/api/stats/atr</code> with a scriptlet that returns a
+fabricated 200, not with a network rule. A request that fails is a signal the site can read. A
+request that succeeds with nothing in it is not.</p>
+
+<h2>6. The work, in order</h2>
+
+<p>Ordered by what you get for what it costs. Items 2, 3 and 6 are done, and are kept here with what
+each turned out to involve. Item 1 is still the cheapest thing left.</p>
+
+<p>The <em>Rules</em> column is what each item would actually recover: rules where the named option
+is the <strong>only</strong> thing the crate refuses. A rule that also carries a second unknown
+option stays dropped either way, so counting it under both would flatter every row.</p>
+
+<div class="tablewrap">
+<table>
+<thead><tr><th>#</th><th>Job</th><th class="num">Rules</th><th>Cost</th><th>Notes</th></tr></thead>
+<tbody>
+<tr><td>1</td><td>Normalise synonyms before parsing</td><td class="num">21</td><td>~3 lines</td>
+    <td><code>rewrite=</code>→<code>redirect=</code> (10), drop <code>$reason=</code> (11).
+    <code>queryprune=</code> is unused here and <code>$_</code> recovers nothing on its own. Pure
+    text substitution when a list is loaded.</td></tr>
+<tr><td>2</td><td><s>Ship the non-JS stand-in files</s> <span class="tag full">done</span></td><td class="num">186</td><td>~10 lines</td>
+    <td><code>tools/convert-ubo-scriptlets.mjs</code> emits all 50 web-accessible resources as
+    bytes, and the pack has been regenerated: 198 resources, 20 of them non-JavaScript.
+    186 rules ask for one of those 20 and now get it. No Rust change.</td></tr>
+<tr><td>3</td><td><code>$csp</code> <span class="tag full">done</span> · <code>$permissions</code> still open</td><td class="num">40 of 51</td><td>~30 lines</td>
+    <td><code>get_csp_directives()</code> comes back on the block decision and the proxy appends the header after injection. <code>$permissions</code> (11) needs the crate to parse the option first, so it is item 8 work.</td></tr>
+<tr><td>4</td><td><code>##^responseheader()</code></td><td class="num">1</td><td>~15 lines</td>
+    <td>Same header-editing path as item 3.</td></tr>
+<tr><td>5</td><td><strong>Reach the proxy from a Safari/Firefox page</strong></td><td class="num">—</td><td>unblocks generic hiding</td>
+    <td>Two ways. <strong>Finish <code>extension/</code></strong>: a background script's request
+    leaves the extension's origin, so mixed content does not apply — and it is the only route to
+    <code>$popup</code>. Or <strong>answer the lookup over HTTPS from the proxy itself</strong>:
+    the proxy already terminates TLS with its own CA, so it can serve the cosmetic endpoint on an
+    <code>https://</code> origin the page is allowed to call, and the mixed-content block
+    disappears with no extension to install. The second is smaller and helps every browser; the
+    first is still needed for popups.</td></tr>
+<tr><td>6</td><td><s>Procedural evaluator</s> <span class="tag full">done</span></td><td class="num">1,145</td><td>~270 lines JS</td>
+    <td><strong>No Rust parsing work, and no extension either.</strong> The crate returns these on
+    <code>procedural_actions</code>; <code>as_css()</code> now sorts them into the stylesheet and
+    the JSON, and <code>src/adblock/procedural_runtime.js</code> goes out with the page's own
+    rules in it. All 9 procedural operators, the plain selector they hang off, and all 4
+    actions.</td></tr>
+<tr><td>7</td><td>HTML filtering (<code>##^</code>)</td><td class="num">122</td><td>~200 lines</td>
+    <td>One of only two places a parser of our own is needed. We already buffer the HTML body. A capability a Chrome extension cannot have.</td></tr>
+<tr><td>8</td><td>Matching options: <code>$to</code>, <code>$denyallow</code>, <code>$method</code>, <code>$strict1p/3p</code>, <code>$header</code>, <code>$top</code></td><td class="num">371</td><td>medium</td>
+    <td>Side table keyed by rule text, per section 2.6. No crate patch, no parser — one small check
+    per option. <code>$to</code> alone is 260 of it; <code>$top</code> is unused here.</td></tr>
+<tr><td>9</td><td><code>$urlskip</code>, <code>$uritransform</code></td><td class="num">200</td><td>medium</td>
+    <td>Both rewrite the request before it goes out — the same plumbing <code>$removeparam</code> already uses.</td></tr>
+<tr><td>10</td><td><code>$replace</code></td><td class="num">44</td><td>~200 lines</td>
+    <td>All 48 patterns compile in Rust's <code>regex</code> crate — checked, no lookahead and no backreferences. Real cost is buffering non-HTML bodies and handling compression.</td></tr>
+<tr><td>11</td><td><code>$cname</code>, <code>$ipaddress</code></td><td class="num">51</td><td>medium</td>
+    <td>Easier for us than for uBO. We own the resolver.</td></tr>
+<tr><td>12</td><td>Cosmetic off-switches <code>$shide</code>, <code>$ehide</code>, <code>$genericblock</code></td><td class="num">1</td><td>medium</td>
+    <td>One rule today, and only <code>$shide</code> — but these are unbreak levers. Getting one wrong breaks a site with no obvious cause.</td></tr>
+<tr><td>13</td><td><code>$popup</code>, <code>$popunder</code></td><td class="num">3,127</td><td>hard</td>
+    <td>Only correctly solvable in the extension. See below.</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3>Why <code>$popup</code> is the hard one</h3>
+
+<p>Measured against the lists: 3,127 rules, which is 81% of every network rule the engine
+rejects and 75% of everything dropped for any reason. It is the one place a proxy is genuinely
+worse placed than a browser extension.</p>
+
+<p>A popup rule means "block this URL, but only when it is opening a new window". uBO knows that
+because the browser tells it — it sees the tab being created and which page created it. At the HTTP
+layer a popup and a clicked link are the same thing: a document request with
+<code>Sec-Fetch-Mode: navigate</code>. No header distinguishes them.</p>
+
+<ol>
+  <li><strong>Treat <code>$popup</code> as <code>$document</code>.</strong> Most of these rules
+    target domains that exist only to serve popup ads, so blocking them on any navigation is
+    usually right. "Usually" means some deliberate clicks would break, with no obvious cause.
+    Worth knowing: this is already what happens for <code>$all</code> rules, which include the
+    document type — so the approach is in use, just not yet extended to <code>$popup</code>
+    itself.</li>
+  <li><strong>Do it in the extension.</strong> A content script sees <code>window.open</code>; a
+    background script sees tab creation. Correct, and only works where the extension is
+    installed.</li>
+</ol>
+
+<h2>7. Two honest caveats about "100%"</h2>
+
+<p><strong>Some of the gap is already covered twice.</strong> 17 of the 48 <code>$replace</code>
+rules target YouTube, stripping <code>"adPlacements"</code> out of the player response. uBO also
+ships scriptlet versions of exactly those edits — <code>trusted-replace-fetch-response</code>,
+<code>json-prune-fetch-response</code> — and those scriptlets <em>do</em> run here. uBO does it in
+both places deliberately, as belt and braces. Adding <code>$replace</code> gives you the belt you
+are missing; the braces are already holding.</p>
+
+<p><strong>Parity with which uBO?</strong> Three of the big gaps — <code>$replace</code>, HTML
+filtering, <code>$cname</code> — only exist in uBO on <em>Firefox</em>. uBO on Chrome never had
+them, because Chrome has no <code>webRequest.filterResponseData</code> and no DNS API for
+extensions. uBOL has none of the three either. Measured against uBOL we are now ahead on almost
+everything: procedural cosmetic used to be the one place we were behind it, and that closed on
+2026-08-01. What is left against uBOL is generic hiding of JavaScript-added content outside
+Chromium — see item 5. Measured against uBO on Firefox, the table above is the distance.</p>
+
+<h2>8. How this was measured</h2>
+
+<p>The <code>vendor/ubol-safari/</code> checkout this page originally cited is no longer in the
+repository, so the uBO side was re-read from uBO's own source upstream
+(<code>gorhill/uBlock</code>, <code>src/js/static-filtering-parser.js</code>). Every line number
+below was confirmed against that file on 2026-08-01; the crate references were confirmed against
+the <code>adblock</code> 0.9.8 source in the Cargo registry.</p>
+
+<ul>
+  <li><strong>uBO's supported options:</strong> <code>nodeTypeFromOptionName</code> at
+    <code>static-filtering-parser.js:223–292</code>. 50 canonical options, plus 17 synonyms and one
+    empty "unknown" entry.</li>
+  <li><strong>uBO's cosmetic operators:</strong> <code>proceduralOperatorTokens</code> at
+    line 4193 of the same file. 24 entries, 19 canonical once aliases are folded in.</li>
+  <li><strong>uBO's rule families:</strong> the separator regex
+    <code>/(#@?(?:\$\?|\$|%|\?)?#).{1,2}/</code> at line 803, plus the dispatch in
+    <code>parseExtPattern()</code> at line 2365.</li>
+  <li><strong>What we support:</strong> the match table at
+    <code>adblock-0.9.8/src/filters/network.rs:391–466</code>. Anything not in it hits
+    <code>UnrecognisedOption</code> and the whole rule is discarded by
+    <code>add_filter_list</code>, silently. 25 accepted spellings, one of which
+    (<code>$tag</code>) is the crate's own and not a uBO option — so 24 of uBO's 50. Cosmetic
+    separators at <code>filters/cosmetic.rs:355–400</code>; the CSS conversion at
+    <code>cosmetic_filter_cache.rs:403</code>. The <code>$redirect=</code> priority suffix is split
+    off in <code>blocker.rs:289–318</code>.</li>
+  <li><strong>What the crate parses, and where it lands now:</strong> the procedural operators are
+    canonicalised at <code>filters/cosmetic.rs:886–936</code> — 9 accepted, 13 rejected in the same
+    <code>match</code>. Three of those 13 (<code>remove</code>, <code>remove-attr</code>,
+    <code>remove-class</code>) are rejected only as selectors; they are handled as actions
+    instead. The four actions are <code>CosmeticFilterAction</code> at
+    <code>filters/cosmetic.rs:51–75</code>. Both reach us through
+    <code>UrlSpecificResources.procedural_actions</code>, and
+    <code>AdBlocker::procedural_injection</code> (<code>src/adblock/mod.rs:354</code>) hands the
+    evaluator everything <code>as_css()</code> cannot express. Stand-in file types are <code>MimeType</code>
+    at <code>src/resources/mod.rs:199–226</code>; the converter emits all of them.</li>
+  <li><strong>Which rules are dropped, and why, per rule:</strong> <code>parse_filter</code> at
+    <code>src/lists.rs:393</code> and <code>FilterSet::add_filter</code> at <code>:247</code>, both
+    public, both returning <code>FilterParseError</code>. Every non-comment line in
+    <code>data/blocklists/</code> was run through <code>parse_filter</code> and the error variants
+    tallied — that is where 4,157 and its breakdown come from, and it is the crate's own verdict
+    rather than a reimplementation of its tables.</li>
+  <li><strong>Per-option use counts:</strong> a separate pass using uBO's option names. Two details
+    matter and were wrong before: the option separator is found by scanning <em>right to left</em>
+    for a <code>$</code> whose next token is a real option name (a pattern can contain
+    <code>$</code> itself), and a value beginning with <code>/</code> is a regex that runs to its
+    closing slash, so commas inside <code>$replace=</code> do not split the option list. The
+    per-option totals from this pass agree with the crate's own 3,881 exactly.</li>
+  <li><strong>The percentages:</strong> counted off the tables in this document, one row per rule
+    type. <em>Covered</em> is the rows marked <span class="tag full">full</span> or
+    <span class="tag part">part</span> over all rows; <em>of the crate</em> is the same over only
+    the rows where the <em>adblock-rust</em> column says <span class="tag full">yes</span>. §2.4
+    has 16 rows for 14 options because the two uBO synonyms are listed separately.</li>
+  <li><strong>Rule counts:</strong> every non-comment line in the 15 files in
+    <code>data/blocklists/</code> — 1,470,512 as of 2026-08-01. All 15 are loaded —
+    <code>DiskStore::load</code> reads every <code>.txt</code> in the directory, there is no enabled
+    flag.</li>
+  <li><strong>Scriptlet and stand-in coverage:</strong> names from every
+    <code>##+js(...)</code> and <code>$redirect=</code> token, matched against the names and
+    aliases in <code>data/scriptlets/scriptlets.json</code>, then compared against the file list of
+    <code>src/web_accessible_resources/</code> in uBO upstream (50 files) and the alias map in
+    <code>src/js/redirect-resources.js</code>.</li>
+  <li><strong>Behaviour claims:</strong> checked against the code, not assumed. The repository's
+    288 tests pass, and they cover the specific claims here — the <code>$ping</code> second look,
+    <code>$csp</code> being appended after injection, <code>:style()</code> staying in the
+    stylesheet while procedural rules go to JSON, the stand-in body surviving as bytes, and each
+    switch actually gating what it names.</li>
+</ul>
+
+</body>
+</html>

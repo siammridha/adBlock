@@ -33,6 +33,12 @@ use scriptlets::ScriptletLibrary as Scriptlets;
 pub const CUSTOM_LIST: &str = "custom";
 const CUSTOM_SOURCE: &str = "config + ui";
 
+/// The in-page evaluator for procedural cosmetic rules. It lives here rather
+/// than with the injection code because what `:has-text` or `:remove()` means
+/// is a filter-rule question, and the rules are adblock's to interpret — the
+/// caller only injects what comes back from `procedural_injection`.
+const PROCEDURAL_RUNTIME: &str = include_str!("procedural_runtime.js");
+
 /// Loosen rule-tester input into a full URL: the tester accepts bare hosts,
 /// protocol-relative URLs, and bare paths. Owned by adblock because the rule
 /// tester is adblock's; callers pass raw input through.
@@ -77,8 +83,9 @@ impl EngineCore {
 
 pub struct AdBlocker {
     core: Arc<EngineCore>,
-    /// Whether a decision may carry a `$redirect` body or a `$removeparam`
-    /// URL. Adblock's own switches: the caller never asks for either.
+    /// Whether a decision may carry a `$redirect` body, a `$removeparam`
+    /// URL, or `$csp` directives. Adblock's own switches: the caller never
+    /// asks for any of them.
     decisions: settings::DecisionPolicy,
 }
 
@@ -111,6 +118,11 @@ pub struct BlockDecision {
     /// The request URL with tracking parameters stripped, from `$removeparam`.
     /// Only meaningful when the request is not blocked.
     pub rewritten_url: Option<String>,
+    /// Content-Security-Policy directives a `$csp` rule wants added to this
+    /// page, for the caller to append to the response. Only ever set for a
+    /// document or subdocument request that was not blocked — a blocked page
+    /// has no response to add a header to.
+    pub csp: Option<String>,
 }
 
 impl BlockDecision {
@@ -120,6 +132,7 @@ impl BlockDecision {
             attribution: BlockAttribution { rule: None, list: None },
             redirect: None,
             rewritten_url: None,
+            csp: None,
         }
     }
 }
@@ -231,6 +244,12 @@ impl AdBlocker {
                 .then(|| result.redirect.as_deref().and_then(decode_redirect))
                 .flatten(),
             rewritten_url: allow.removeparam.then_some(result.rewritten_url).flatten(),
+            // `$csp` only ever applies to a page the browser is going to render,
+            // and the engine itself ignores every other request type, so this
+            // costs nothing on the requests it does not concern.
+            csp: (allow.csp && !result.matched)
+                .then(|| engine.get_csp_directives(&request))
+                .flatten(),
         }
     }
 
@@ -316,6 +335,51 @@ impl AdBlocker {
                 .into_iter()
                 .collect(),
         )
+    }
+
+    /// The finished evaluator for the cosmetic rules a stylesheet cannot
+    /// express: pick by the text inside an element, by an ancestor, by computed
+    /// style, by XPath, and delete a node, an attribute or a class rather than
+    /// only hiding it.
+    ///
+    /// Ready-to-inject JavaScript carrying this page's own rules, like
+    /// `cosmetic_css` and `scriptlet_injection` — the caller injects it and
+    /// never reads it. `None` when the page has no such rules, which is the
+    /// common case.
+    ///
+    /// The rules go in as a JSON literal, so `<` is escaped: a rule matching on
+    /// `</script>` text would otherwise end the tag it is sitting in. Inside
+    /// JSON the character can only appear in a string, where `<` means the
+    /// same thing.
+    pub fn procedural_injection(&self, url: &str) -> Option<String> {
+        let rules = self.procedural_actions(url);
+        (!rules.is_empty()).then(|| {
+            PROCEDURAL_RUNTIME.replace("__PROCEDURAL_FILTERS__", &rules.replace('<', "\\u003c"))
+        })
+    }
+
+    /// This page's procedural rules as the engine's own JSON array. The rules
+    /// that do reduce to CSS went out with `cosmetic_css` instead, so nothing
+    /// is applied twice.
+    fn procedural_actions(&self, url: &str) -> String {
+        if !self.core.enabled {
+            return String::new();
+        }
+        let engine = self.core.engine.read().expect("engine lock").clone();
+        let mut rules: Vec<String> = engine
+            .url_cosmetic_resources(url)
+            .procedural_actions
+            .into_iter()
+            .filter(|json| {
+                serde_json::from_str::<ProceduralOrActionFilter>(json)
+                    .is_ok_and(|f| f.as_css().is_none())
+            })
+            .collect();
+        if rules.is_empty() {
+            return String::new();
+        }
+        rules.sort();
+        format!("[{}]", rules.join(","))
     }
 
     pub fn scriptlets_enabled(&self) -> bool {
@@ -801,6 +865,33 @@ mod tests {
     }
 
     #[test]
+    fn a_stand_in_can_be_a_binary_file_and_is_never_injectable() {
+        // 1x1.gif, uBO's transparent pixel, as raw bytes rather than text.
+        let gif: [u8; 14] = [
+            0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 1, 0, 1, 0, 0x80, 0, 0, 0,
+        ];
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        let (b, c) = blocker_with_resources(
+            &["||ads.example.com/px.gif^$image,redirect=1x1-transparent.gif"],
+            serde_json::json!([{
+                "name": "1x1.gif",
+                "aliases": ["1x1-transparent.gif"],
+                "kind": {"mime": "image/gif"},
+                "content": STANDARD.encode(gif)
+            }]),
+        );
+        let d = b.check("https://ads.example.com/px.gif", "https://news.test/", "image");
+        assert!(d.blocked);
+        let r = d.redirect.expect("an image rule must serve an image");
+        assert_eq!(r.mime, "image/gif");
+        assert_eq!(r.body, gif, "the bytes must survive the round trip");
+
+        let lib = c.scriptlets().library();
+        let entry = lib.iter().find(|s| s.name == "1x1.gif").unwrap();
+        assert!(!entry.injectable, "a stand-in file is served, never injected");
+    }
+
+    #[test]
     fn a_plain_block_has_no_stand_in_body() {
         let (b, _) = blocker_with(&["||ads.example.com^"]);
         let d = b.check("https://ads.example.com/x.js", "", "script");
@@ -825,6 +916,7 @@ mod tests {
             &[
                 "||ads.example.com/analytics.js^$script,redirect=noopjs",
                 "$removeparam=utm_source",
+                "$csp=worker-src 'none',domain=shop.example",
             ],
             serde_json::json!([{
                 "name": "noop.js",
@@ -837,17 +929,24 @@ mod tests {
         let redirect = |b: &AdBlocker| {
             b.check("https://ads.example.com/analytics.js", "https://news.test/", "script")
         };
-        let cleaned =
-            |b: &AdBlocker| b.check("https://shop.example/i?id=7&utm_source=ad", "", "document");
+        let cleaned = |b: &AdBlocker| {
+            b.check(
+                "https://shop.example/i?id=7&utm_source=ad",
+                "https://shop.example/",
+                "document",
+            )
+        };
 
         b.set_decisions(br#"{"redirect":false}"#).unwrap();
         assert!(redirect(&b).blocked, "the block itself is not a switch");
         assert!(redirect(&b).redirect.is_none(), "no stand-in body once it is off");
-        assert!(cleaned(&b).rewritten_url.is_some(), "the other switch is untouched");
+        assert!(cleaned(&b).rewritten_url.is_some(), "the other switches are untouched");
+        assert!(cleaned(&b).csp.is_some());
 
-        b.set_decisions(br#"{"redirect":true,"removeparam":false}"#).unwrap();
+        b.set_decisions(br#"{"redirect":true,"removeparam":false,"csp":false}"#).unwrap();
         assert!(redirect(&b).redirect.is_some(), "back on");
         assert!(cleaned(&b).rewritten_url.is_none(), "no cleaned url once it is off");
+        assert!(cleaned(&b).csp.is_none(), "no directives once it is off");
 
         assert!(b.set_decisions(b"[]").is_err(), "adblock rejects what is not an object");
     }
@@ -919,6 +1018,99 @@ mod tests {
         assert!(css.contains(".site-ad"), "site-specific rule stays: {css}");
         let css = b.cosmetic_css("https://other.example/", &strings(&["adsbox"]), &[]);
         assert!(css.contains(".adsbox"), "css was: {css}");
+    }
+
+    #[test]
+    fn procedural_rules_go_out_as_json_for_the_page_to_evaluate() {
+        let (b, _) = blocker_with(&[
+            "example.com##.promo:has-text(Ad)",
+            "example.com##.wrap:upward(2)",
+            "example.com##.tile:remove()",
+            "example.com##.box:remove-attr(onclick)",
+            "example.com##.ad-banner",
+            "example.com##body:style(overflow: auto !important)",
+        ]);
+        let json = b.procedural_actions("https://example.com/");
+        let rules: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
+        assert_eq!(rules.len(), 4, "only the rules plain CSS cannot carry: {json}");
+        assert!(json.contains(r#"{"type":"has-text","arg":"Ad"}"#), "{json}");
+        assert!(json.contains(r#"{"type":"upward","arg":"2"}"#), "{json}");
+        assert!(json.contains(r#""action":{"type":"remove"}"#), "{json}");
+        assert!(json.contains(r#""action":{"type":"remove-attr","arg":"onclick"}"#), "{json}");
+        assert!(!json.contains("ad-banner"), "a plain hide rule is CSS, not procedural: {json}");
+        assert!(!json.contains("overflow"), ":style() alone is CSS too: {json}");
+
+        assert!(b.procedural_actions("https://other.test/").is_empty(), "wrong site, no rules");
+
+        // The `#?#` family is the same thing written the ABP way.
+        let (b, _) = blocker_with(&["example.com#?#.promo:-abp-contains(Ad)"]);
+        let json = b.procedural_actions("https://example.com/");
+        assert!(json.contains(r#"{"type":"has-text","arg":"Ad"}"#), "{json}");
+
+        // Every entry starts with the selector chain, which is what the
+        // in-page evaluator walks.
+        assert!(rules.iter().all(|r| r["selector"].is_array()), "{json}");
+    }
+
+    #[test]
+    fn the_evaluator_comes_back_finished_and_carrying_its_rules() {
+        let (b, _) = blocker_with(&["example.com##.promo:has-text(Ad)"]);
+        let js = b.procedural_injection("https://example.com/").unwrap();
+        assert!(js.contains(r#"{"type":"has-text","arg":"Ad"}"#), "{js}");
+        assert!(!js.contains("__PROCEDURAL_FILTERS__"), "placeholder must be replaced");
+        assert!(b.procedural_injection("https://other.test/").is_none(), "no rules, no script");
+
+        // A rule that matches on markup must not be able to close the tag it is
+        // sitting in.
+        let (b, _) = blocker_with(&["example.com##.promo:has-text(</script>)"]);
+        let js = b.procedural_injection("https://example.com/").unwrap();
+        assert!(!js.contains("</script>"), "{js}");
+        assert!(js.contains("u003c/script>"), "escaped, still the same string: {js}");
+    }
+
+    /// The evaluator ships as text and only ever runs in a browser, so a syntax
+    /// error in it would reach every page before anyone noticed. Node parses it
+    /// here as a stand-in; skipped where node is not installed.
+    #[test]
+    fn the_evaluator_parses_as_javascript() {
+        if std::process::Command::new("node").arg("-v").output().is_err() {
+            eprintln!("node not installed; skipping the evaluator syntax check");
+            return;
+        }
+        let (b, _) = blocker_with(&["example.com##.promo:has-text(</b>)"]);
+        let js = b.procedural_injection("https://example.com/").unwrap();
+        let path =
+            std::env::temp_dir().join(format!("adblock-js-check-{}.js", std::process::id()));
+        std::fs::write(&path, &js).unwrap();
+        let out = std::process::Command::new("node").arg("--check").arg(&path).output().unwrap();
+        assert!(
+            out.status.success(),
+            "the evaluator does not parse: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn csp_rules_hand_their_directives_to_the_caller() {
+        let (b, _) = blocker_with(&[
+            "||ads.example.com^",
+            "$csp=worker-src 'none',domain=example.com",
+        ]);
+        let page = b.check("https://example.com/", "https://example.com/", "document");
+        assert!(!page.blocked);
+        assert_eq!(page.csp.as_deref(), Some("worker-src 'none'"));
+
+        let frame = b.check("https://example.com/f", "https://example.com/", "subdocument");
+        assert_eq!(frame.csp.as_deref(), Some("worker-src 'none'"), "frames carry it too");
+
+        let script = b.check("https://example.com/a.js", "https://example.com/", "script");
+        assert!(script.csp.is_none(), "$csp is only for a page the browser renders");
+        let other = b.check("https://other.test/", "https://other.test/", "document");
+        assert!(other.csp.is_none(), "wrong site");
+        let blocked = b.check("https://ads.example.com/", "https://example.com/", "document");
+        assert!(blocked.blocked);
+        assert!(blocked.csp.is_none(), "a blocked page has no response to add a header to");
     }
 
     #[test]

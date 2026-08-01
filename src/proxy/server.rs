@@ -431,10 +431,24 @@ impl Proxy {
             );
         }
 
-        let decision = self
+        let mut decision = self
             .inner
             .adblock
             .check(&plan.url, &plan.source, &plan.req_type);
+
+        // A `navigator.sendBeacon()` call arrives as an ordinary no-cors POST,
+        // so it was matched above as a `fetch`. Most `$ping` rules name only
+        // that type, and would miss it. Ask a second time as a `ping` — but
+        // only for a request already shaped like a beacon, and only when
+        // nothing matched it the first way, so an ordinary fetch keeps its own
+        // verdict and the extra lookup stays off the common path.
+        if !decision.blocked && plan.maybe_beacon {
+            let as_beacon = self.inner.adblock.check(&plan.url, &plan.source, "ping");
+            if as_beacon.blocked {
+                tracing::debug!(url = %plan.url, "matched as a beacon, not a fetch");
+                decision = as_beacon;
+            }
+        }
 
         // Collect the request up front so blocked and forwarded requests capture
         // their headers and body through the same path. A block happens before
@@ -528,9 +542,26 @@ impl Proxy {
                 capture::headers_text(upstream.headers())
             )
         });
-        let response = self
+        let mut response = self
             .inspect_response(upstream, &plan.url, plan.injection_target, exchange)
             .await?;
+
+        // `$csp`: add the rule's directives to the page. Appended rather than
+        // set, because two CSP headers are enforced together and the site's own
+        // policy has to keep applying. This happens after injection on purpose —
+        // injecting strips the site's CSP so our own inline script can run, and
+        // adding ours before that would strip it again.
+        if let Some(csp) = &decision.csp {
+            match hyper::header::HeaderValue::from_str(csp) {
+                Ok(v) => {
+                    tracing::debug!(url = %plan.url, %csp, "adding content-security-policy");
+                    response
+                        .headers_mut()
+                        .append(hyper::header::CONTENT_SECURITY_POLICY, v);
+                }
+                Err(e) => tracing::warn!(error = %e, %csp, "unusable $csp directives"),
+            }
+        }
 
         Ok(response)
     }
@@ -558,11 +589,26 @@ impl Proxy {
                 true => self.inner.cosmetic_runtime.as_deref().unwrap_or(""),
                 false => "",
             };
-            let script = match injection.as_ref() {
-                Some(i) if !runtime.is_empty() => format!("{}\n{runtime}", i.js),
-                Some(i) => i.js.clone(),
-                None => runtime.to_string(),
-            };
+            // Procedural rules — `:has-text`, `:upward`, `:remove()` — are
+            // cosmetic filtering that a stylesheet cannot carry, so they ride
+            // the cosmetic switch and go out with the page rather than being
+            // asked for later. Adblock hands back the finished evaluator with
+            // the page's rules already in it, the same as the CSS and the
+            // scriptlets: what those rules mean is adblock's to decide.
+            let procedural = inject
+                .cosmetic
+                .then(|| self.inner.adblock.procedural_injection(url))
+                .flatten()
+                .unwrap_or_default();
+            let script = [
+                injection.as_ref().map_or("", |i| i.js.as_str()),
+                procedural.as_str(),
+                runtime,
+            ]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
             // Any inline script of ours needs the page's CSP out of the way,
             // scriptlet or runtime alike.
             let plan =
@@ -1043,6 +1089,127 @@ mod tests {
         assert_eq!(recs[0].status, 200);
         assert!(recs[0].resp_headers.contains("content-type: text/html"));
         assert!(recs[0].resp_body.contains("<html>"));
+    }
+
+    #[tokio::test]
+    async fn a_ping_rule_catches_a_beacon_without_swallowing_ordinary_fetches() {
+        let upstream = CannedUpstream::new(StatusCode::OK, vec![], b"ok");
+        let (proxy, _state) = test_proxy(
+            // Both shapes the lists use: a `$ping`-only rule, and a plain one.
+            &["||track.example/collect^$ping", "||other.example/api^$xhr"],
+            upstream,
+            FixedResolver::to(&["93.184.216.34:80"]),
+        );
+        let beacon = |url: &str| {
+            Request::builder()
+                .method(hyper::Method::POST)
+                .uri(url)
+                .header("sec-fetch-mode", "no-cors")
+                .header("sec-fetch-dest", "empty")
+                .body(Full::new(Bytes::new()))
+                .unwrap()
+        };
+
+        let resp = proxy.handle_forward(beacon("http://track.example/collect"), false).await;
+        assert!(
+            resp.is_err() || resp.unwrap().status() == StatusCode::FORBIDDEN,
+            "a sendBeacon call must match the $ping rule written for it"
+        );
+
+        // The second look only ever adds a block; a request nothing matches
+        // still goes through, and an $xhr rule keeps its own verdict.
+        let resp = proxy.handle_forward(beacon("http://allowed.example/collect"), false).await;
+        assert_eq!(resp.unwrap().status(), StatusCode::OK, "unmatched beacons still pass");
+
+        let xhr = Request::builder()
+            .method(hyper::Method::POST)
+            .uri("http://other.example/api")
+            .header("sec-fetch-mode", "cors")
+            .header("sec-fetch-dest", "empty")
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+        let resp = proxy.handle_forward(xhr, false).await;
+        assert!(
+            resp.is_err() || resp.unwrap().status() == StatusCode::FORBIDDEN,
+            "an ordinary fetch is still matched as one"
+        );
+    }
+
+    #[tokio::test]
+    async fn procedural_rules_ride_along_with_the_page() {
+        let upstream = CannedUpstream::new(
+            StatusCode::OK,
+            vec![("content-type", "text/html")],
+            b"<html><head></head><body>x</body></html>",
+        );
+        let (proxy, _state) = test_proxy(
+            &["example.com##.promo:has-text(Sponsored)", "example.com##.ad-banner"],
+            upstream,
+            FixedResolver::to(&["93.184.216.34:80"]),
+        );
+
+        let req = get("http://example.com/", &[("accept", "text/html")]);
+        let resp = proxy.handle_forward(req, false).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let html = std::str::from_utf8(&body).unwrap();
+        assert!(html.contains(r#"{"type":"has-text","arg":"Sponsored"}"#), "html: {html}");
+        assert!(html.contains("MutationObserver"), "the evaluator itself: {html}");
+        assert!(
+            html.contains(".ad-banner{display:none !important}"),
+            "a plain rule still goes out as CSS: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_page_without_procedural_rules_gets_no_evaluator() {
+        let upstream = CannedUpstream::new(
+            StatusCode::OK,
+            vec![("content-type", "text/html")],
+            b"<html><head></head><body>x</body></html>",
+        );
+        let (proxy, _state) = test_proxy(
+            &["example.com##.ad-banner"],
+            upstream,
+            FixedResolver::to(&["93.184.216.34:80"]),
+        );
+
+        let req = get("http://example.com/", &[("accept", "text/html")]);
+        let resp = proxy.handle_forward(req, false).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let html = std::str::from_utf8(&body).unwrap();
+        assert!(!html.contains("<script"), "nothing to evaluate, no script: {html}");
+        assert!(html.contains(".ad-banner"), "html: {html}");
+    }
+
+    #[tokio::test]
+    async fn a_csp_rule_adds_its_directives_to_the_page() {
+        let upstream = CannedUpstream::new(
+            StatusCode::OK,
+            vec![
+                ("content-type", "text/html"),
+                ("content-security-policy", "img-src 'self'"),
+            ],
+            b"<html><head></head><body>x</body></html>",
+        );
+        let (proxy, _state) = test_proxy(
+            &["$csp=worker-src 'none',domain=example.com"],
+            upstream,
+            FixedResolver::to(&["93.184.216.34:80"]),
+        );
+
+        let req = get("http://example.com/", &[("accept", "text/html")]);
+        let resp = proxy.handle_forward(req, false).await.unwrap();
+        let csp: Vec<&str> = resp
+            .headers()
+            .get_all("content-security-policy")
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .collect();
+        assert_eq!(
+            csp,
+            vec!["img-src 'self'", "worker-src 'none'"],
+            "the site's own policy has to keep applying alongside ours"
+        );
     }
 
     #[tokio::test]
