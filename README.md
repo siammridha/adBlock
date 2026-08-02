@@ -60,7 +60,7 @@ An intercepting HTTP/HTTPS proxy in Rust that blocks ads and trackers:
                                   upstream
 ```
 
-`src/` holds five modules. Each owns its own settings, storage, validation, and
+`src/` holds six modules. Each owns its own settings, storage, validation, and
 outbound networking, and is reachable from outside only through its `api`
 submodule. Nothing is shared between them — no `utils/`, no common config, no
 shared error type; duplication is preferred to coupling. The full rules, the
@@ -73,6 +73,7 @@ allowed dependency edges, and how they are enforced are in
 | `proxy`   | The accept loop, plain-HTTP forwarding, CONNECT/MITM, the signing CA and managed cert store, MITM exclusions, its pooled upstream HTTP client, egress policy (resolver-only, IPv6). It changes no request and no response: every one goes past the adblock API and whatever comes back is what it forwards. |
 | `dns`     | The DNS listener, cache, upstream pool (UDP/TCP/DoT/DoH) and health, rewrites, ECH stripping and probing. |
 | `stats`   | Counters, the rolling 24 h window, the event log, the request/query logs and their rotating files on disk, body capture storage and decoding, retention. |
+| `tester`  | The rule-type test page at `/test`, the filter list it serves, its test assets, and the record of which of them arrived. Calls nothing — every verdict is reached in the browser, so the page reports on whichever blocker is running. |
 | `web`     | Nothing of its own. It instantiates the modules, calls their APIs, and renders the dashboard + JSON API on `admin_listen`. |
 
 `main.rs` is wiring only: it builds each module's config, constructs them, hands
@@ -471,6 +472,174 @@ How injection works:
   guarantees the CSP survives.
 - The **Scriptlets** dashboard tab and the `scriptlets injected` log lines show
   which scriptlets fired into which page, for debugging.
+
+---
+
+## Rule-type tester
+
+`http://127.0.0.1:8081/test` runs one probe per rule type and reports which ones
+your blocker actually enforced. It is deliberately independent of everything
+else here: every verdict is reached inside the browser, so the same page works
+with this proxy, with uBlock Origin and the proxy switched off, or with no
+blocker at all. Use it to check the claims in
+[docs/UBO_PARITY.html](docs/UBO_PARITY.html) against a real browser.
+
+It has an on/off switch under **Settings → Setup**. It is on by default; off,
+nothing under `/test` is served — no page, no filter list, no test assets. The
+choice is persisted to `data/settings/tester.json` and applies immediately.
+
+The run is paced, one group at a time. While a group runs the page shows that
+group's name and the rule types in it, replacing the previous line rather than
+stacking up a transcript. A group is the smallest thing the page can name as it
+runs: its probes have to be in flight together, because the server is asked once
+at the end which of them arrived. A full run takes about fifteen seconds.
+
+**Every row is enforced or not enforced.** There is no third verdict and no
+gate. Each rule type stands on its own probe, so a rule missing from the list
+fails its own row and no other. A row whose probe could not be made — a
+third-party host that never reached the server, a frame that never reported —
+reads as not enforced, and the *What happened* column says which.
+
+**The last two columns are not results.** *This project* and *uBO* are what
+[docs/UBO_PARITY.html](docs/UBO_PARITY.html) says each of the two supports, so a
+row that is meant to be red reads differently from a regression. uBO is the
+parity target in that document, so every rule type on the page is one uBO has
+and the column reads `full` unless the support is conditional: `firefox` means
+only uBO on Firefox has it, because Chrome exposes no API for it; `trusted`
+means uBO drops the rule unless **Trust my filters** is ticked. The *No setup
+needed* rows are hosts and selectors rather than rule types, so there the column
+means uBO's default lists cover them.
+
+**Copy result** turns the finished run into plain text — the two counts, the
+page address, the browser, then one line per row, each carrying both columns.
+Paste it into a bug report instead of the table.
+
+How a verdict is reached:
+
+- **Network rules** — the page requests one asset per type (`$script` from a
+  `<script>`, `$font` through `FontFace`, `$ping` from `sendBeacon`, `$other`
+  from a prefetch, and so on) and then asks the server which of them arrived. An
+  asset that never arrived was stopped. Each probe has to be the request type the
+  rule names — a `fetch()` is an `$xmlhttprequest` whatever it asks for. The
+  fiddly kinds have an unfiltered twin, so "nothing arrived" cannot be mistaken
+  for a block when the browser never issued the request.
+- **Options decided after the request goes out** — `$header=` and
+  `$requestheader=` cannot be read off the server, which sees the request either
+  way. They are judged on the response never arriving, against a twin sent to the
+  same URL without the header.
+- **Cosmetic rules** — a fixture per operator, checked with `getComputedStyle`
+  or for the node still being there. `:others()` gets a frame of its own: it
+  hides every sibling up to `<body>`, so on a shared page it hid most of the
+  other fixtures and turned their rows green for the wrong reason.
+- **Scriptlets** — a `set-constant` rule the page reads back, plus
+  `abort-on-property-read` and `nowebrtc`.
+- **URL and body rewrites** — the server reports the URL it actually received,
+  so `$removeparam`, `$uritransform` and friends are read off that.
+- **Header rules** — `$csp` and `$inline-script` are probed with an iframe whose
+  inline script reports back. Silence is the block.
+
+The last section needs no setup: it requests real ad hosts that every general
+list carries. Those requests are sent `no-cors`, because a cross-origin request
+to an ad host fails for want of an allow-origin header whether a blocker is
+there or not — reading that failure as a block made all eight rows pass with
+nothing installed. With `no-cors` the only thing that can stop the request is
+the browser itself, and `redirect: "error"` catches the other kind of block, the
+stand-in a blocker swaps in by redirecting. The trade is that a host which
+legitimately redirects reads as blocked, and that a machine with no route to
+those hosts reads the same as a machine that is blocking them.
+
+Everything else needs rules aimed at the page, so it serves its
+own list at `/test/rules.txt`. The list only touches `/test/a/` paths and the
+page's own classes, and is written for the host that asked for it — take it from
+the address you open the tester on, because a copy made on `localhost` does
+nothing on a LAN address.
+
+To load it into uBlock Origin: press **Copy the list** on the test page, click
+the uBO toolbar icon, click the gears icon to open the dashboard, open the **My
+filters** tab, paste into the box, tick **Trust my filters**, press **Apply
+changes**, then reload the test page. Do it that way rather than subscribing —
+uBO only trusts that box, and it discards `$replace`, `$urlskip` and
+`$uritransform` from any list it does not trust. In this project's own
+dashboard, add the same URL as a blocklist.
+
+`$document` and `$popup` need a tab or a window, so they sit behind buttons
+below the table.
+
+Four rule types are awkward enough to be worth naming:
+
+- **`$permissions=`** is probed with fullscreen. The frame is embedded with
+  `allow="fullscreen"`, so `document.fullscreenEnabled` is true in it unless the
+  header takes that away. Fullscreen is the one policy-gated feature a page can
+  read without asking the user for anything.
+- **`##^responseheader()`** is probed with a cookie. `respheader.html` is the one
+  asset served with a `Set-Cookie`, named after the run so no earlier run can
+  fake it. If the rule stripped the header the frame finds no cookie.
+- **`$ipaddress=`** has two rules, one for `loopback` and one for `lan`.
+  Whichever describes the address you opened the page at should block and the
+  other should not, so a blocker that drops the option and one that reads it as
+  a plain block are both told apart from one that honours it.
+- **`:if()`** is scoped to the third-party host and probed in a frame served
+  from there. uBO throws while compiling `:if()`, and the throw takes down every
+  other procedural rule compiled alongside it — eighteen rows for one. Blockers
+  compile per host, so keeping it off the page's own host keeps the damage
+  inside that frame. If the third-party host does not reach this server the row
+  says so instead.
+
+`$cname` is the one type with no probe at all: it needs a real CNAME record
+pointing a first-party name at an ad host, which this server cannot create. It
+still has a row, and the row says that.
+
+Three things about the host you open it on:
+
+- **Testing this project's proxy needs a name, not loopback.** Browsers send
+  loopback addresses straight to the server and never to a proxy, so a page
+  opened on `localhost` or `127.0.0.1` never passes through it and every row
+  reports not enforced. Add a DNS rewrite of `*.test` to
+  `127.0.0.1` and open the page at `http://tester.test:8081/test` instead. The
+  browser hands the name to the proxy, the proxy resolves it through the DNS
+  module, and the request comes back to the admin server. Keep the port in the
+  URL — a rewrite changes the address, not the port.
+- **Generic cosmetic rules need a registrable domain.** Blockers switch generic
+  cosmetic filtering off on a bare IP or a single-label name like `localhost`.
+  On such a host those rows cannot pass, and say so in the *What happened*
+  column — the `*.test` rewrite above fixes this too.
+- **uBO needs the list trusted.** Paste `/test/rules.txt` into *My filters* and
+  tick *Trust my filters*; uBO discards `$replace`, `$urlskip` and
+  `$uritransform` from an untrusted list, whichever list it is.
+
+Third-party rows need a second host with a different registrable domain that
+still reaches this server. On `localhost` the page uses `127.0.0.1` and the
+other way round. On any other name it uses `thirdparty.test`, which the same
+`*.test` rewrite already covers.
+
+**Testing the proxy over plain HTTP understates it.** Browsers attach
+`Sec-Fetch-Dest` only to a potentially trustworthy origin, so on an `http://`
+page the proxy never learns what a request was for and has to guess from
+`Accept`, which separates pages from images and little else. Every rule that
+names a type other than `$image` or `$document` — `$script`, `$stylesheet`,
+`$font`, `$media`, `$subdocument`, `$xmlhttprequest`, `$object`, `$other`,
+`$ping` — reads as not enforced there, and does match once the same request
+arrives over HTTPS. Read the plain-HTTP run as a floor, not a score.
+
+A few rows cannot go green in a given browser, for reasons that are not this
+page's doing. `$replace` needs `webRequest.filterResponseData`, which is
+Firefox-only, and `##^` HTML filtering is Firefox-only for the same reason — on
+Chromium both are red however good the blocker is. `$ghide` is commonly honoured
+only on a top-level document, which the probe frame cannot be, so that row is
+usually red against a blocker that does implement it. `:if()` is not probed at
+all: uBO throws while compiling one and the throw takes every other procedural
+rule on the page with it, so testing it would cost eighteen other rows. It is a
+deprecated alias for `:has()`, which is tested.
+
+A score on its own says little. Read it against a run of the same browser with
+the blocker switched off — the gap between the two is the part that means
+something.
+
+One caveat when testing **this project** rather than an extension: the page has
+to reach you *through* the proxy. Browsers and OS proxy settings bypass loopback,
+so open the dashboard on the machine's LAN address and keep that address out of
+the excluded hosts. Testing an extension needs none of that — turn the proxy off
+and the page still works, which is the point of the module calling nothing.
 
 ---
 

@@ -67,6 +67,14 @@ A cosmetic rule the engine cannot reduce to a plain hide, because it carries an 
 The script that applies procedural rules to the live page. Adblock builds it — rules and all — and puts it into the page, the same as the cosmetic CSS. It carries that page's rules with it, so it asks the admin server nothing, unlike the live-DOM runtime, which exists to ask.
 _Avoid_: procedural engine, DOM filter
 
+**Rule tester**:
+Adblock's own answer to "what would this rule do to this URL?", asked from the dashboard. It never issues a request; it asks the engine.
+_Avoid_: confusing it with the rule-type tester
+
+**Rule-type tester**:
+The page at `/test` that issues a real probe per rule type and reports which types a blocker enforced. It is its own module and asks no other module anything, so it reports on whichever blocker is running — this proxy, a browser extension, or none.
+_Avoid_: test page, parity page
+
 ## Control
 
 **Runtime**:

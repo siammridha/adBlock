@@ -9,6 +9,7 @@ pub mod dns;
 mod error;
 pub mod proxy;
 pub mod stats;
+pub mod tester;
 pub mod web;
 
 pub use error::{Error, Result};

@@ -1,0 +1,141 @@
+! Title: Rule-type tester
+! Description: Rules that exist only so the tester page at /test can tell which
+! rule types your blocker enforces. Everything here is scoped to /test/a/ or to
+! the tester's own classes, so no real site is affected.
+! Expires: 1 day
+!
+! Subscribe to this list in uBlock Origin (or add it as a blocklist here), then
+! open /test and press Run. In uBO, paste it into "My filters" and tick "Trust
+! my filters" — without that uBO throws away $replace, $urlskip and
+! $uritransform, whichever list they came from.
+
+! ---------------------------------------------------------------- 2.1 types
+/test/a/*/net-script.js$script
+/test/a/*/net-image.gif$image
+/test/a/*/net-style.css$stylesheet
+/test/a/*/net-font.woff2$font
+/test/a/*/net-media.mp4$media
+/test/a/*/net-frame.html$subdocument
+/test/a/*/net-xhr.json$xmlhttprequest
+/test/a/*/net-object.html$object
+/test/a/*/net-other.txt$other
+/test/a/*/net-ping.gif$ping
+/test/a/*/net-beacon.gif$ping
+/test/a/*/net-ws.ws$websocket
+/test/a/*/net-doc.html$document
+/test/a/*/net-all.gif$all
+
+! ------------------------------------------------------- 2.2 scope and party
+/test/a/*/tp-third.json$3p
+/test/a/*/tp-first.json$1p
+/test/a/*/from-match.json$domain={{H}}
+/test/a/*/from-other.json$domain=example.invalid
+! $match-case is only allowed on a regex pattern, so this one has to be a regex.
+/\/test\/a\/[^\/]+\/MatchCase\.json/$match-case
+/test/a/*/to.json$to={{H}}
+! $denyallow and $top are two-sided: one rule that should bite, one that should
+! not, so a blocker that ignores the option cannot look like one that honours it.
+/test/a/*/denyallow-blocked.json$from={{H}},denyallow=example.invalid
+/test/a/*/denyallow-allowed.json$from={{H}},denyallow={{H}}
+/test/a/*/strict1p.json$strict1p
+/test/a/*/strict3p.json$strict3p
+/test/a/*/top-match.json$top={{H}}
+/test/a/*/top-other.json$top=example.invalid
+
+! ---------------------------------------------------- 2.3 advanced matching
+/test/a/*/method.json$method=post
+/test/a/*/header.json$header=x-test-marker
+/test/a/*/reqheader.json$requestheader=x-test-request
+! $ipaddress is two-sided. Whichever of these two describes the address you
+! opened the tester on should be blocked and the other should not, so a blocker
+! that drops the option (neither blocked) and one that reads it as a plain block
+! (both blocked) are both told apart from one that honours it.
+/test/a/*/ipaddr-loopback.gif$image,ipaddress=loopback
+/test/a/*/ipaddr-lan.gif$image,ipaddress=lan
+! No $cname rule. It needs a real CNAME record pointing a first-party name at an
+! ad host, which this server cannot create. The row says so rather than guessing.
+
+! ---------------------------------------------------------------- 2.4 actions
+/test/a/*/redirect.js$script,redirect=noopjs
+/test/a/*/redirectrule.js$script
+/test/a/*/redirectrule.js$script,redirect-rule=noopjs
+/test/a/*/rewrite.js$script,rewrite=abp-resource:blank-js
+/test/a/*/removeparam.json$removeparam=utm_source
+/test/a/*/queryprune.json$queryprune=utm_source
+/test/a/*/uritransform.json$uritransform=/uritransform/uritransformed/
+/test/a/*/replace.json$replace=/NEEDLE/REPLACED/
+! $urlskip is not applied to fetch/XHR, so the probe is an image.
+/test/a/*/urlskip.gif$urlskip=?u
+/test/a/*/csp.html$csp=script-src 'none'
+! The perm.html frame is embedded with allow="fullscreen", so
+! document.fullscreenEnabled is true in it unless this header takes it away.
+! Fullscreen is the one policy-gated feature a page can read without prompting.
+/test/a/*/perm.html$permissions=fullscreen=()
+/test/a/*/inline.html$inline-script
+/test/a/*/empty.json$empty
+/test/a/*/silent.mp4$mp4
+/test/a/*/popup.html$popup
+
+! --------------------------------------------- 2.5 control and exceptions
+/test/a/*/important.gif$image,important
+@@/test/a/*/important.gif
+/test/a/*/badfilter.gif$image
+/test/a/*/badfilter.gif$image,badfilter
+/test/a/*/exception.gif$image
+@@/test/a/*/exception.gif$image
+/test/a/*/gb-probe.gif$image
+@@/test/a/*/ghide.html$ghide
+@@/test/a/*/ehide.html$ehide
+@@/test/a/*/shide.html$shide
+@@/test/a/*/genericblock.html$genericblock
+
+! ------------------------------------------------------- 1. cosmetic families
+##.t-generic
+{{H}}##.t-hide
+{{H}}##.t-unhide
+{{H}}#@#.t-unhide
+{{H}}##.t-specific
+{{H}}##.t-style:style(outline: 3px solid rgb(1, 2, 3))
+{{H}}#$#.t-cssdecl { display: none !important; }
+{{H}}##^script:has-text(HTMLFILTERME)
+! respheader.html is served with a Set-Cookie the frame reads back out of
+! document.cookie. If this rule ran, the header never arrived and the cookie is
+! not there. The cookie is named after the run, so no earlier run can fake it.
+{{H}}##^responseheader(set-cookie)
+
+! ------------------------------------------------------- 3. cosmetic operators
+{{H}}##.t-has:has(> .t-needle)
+{{H}}##.t-not > div:not(.t-keep)
+{{H}}#?#.t-hastext:has-text(BLOCKTHIS)
+{{H}}#?#.t-upward-inner:upward(1)
+{{H}}#?#.t-remove:remove()
+{{H}}#?#.t-removeattr:remove-attr(data-ad)
+{{H}}#?#.t-removeclass:remove-class(t-adclass)
+{{H}}#?#.t-xpath:xpath(./div)
+{{H}}#?#.t-matchescss:matches-css(color: rgb(1, 2, 3))
+{{H}}#?#.t-matchespath:matches-path(/test)
+{{H}}#?#.t-matchesattr:matches-attr(data-x=/adv/)
+{{H}}#?#.t-mintext:min-text-length(20)
+! :others() hides every sibling up to <body>, so its fixture lives in a frame of
+! its own. On a shared page it hid nearly every other fixture and turned rows
+! green that had done nothing.
+{{H}}#?#.t-others > div:has-text(keepme):others()
+{{H}}#?#.t-watchattr:watch-attr(data-y):matches-attr(data-y=hideme)
+{{H}}#?#.t-nthancestor-inner:nth-ancestor(1)
+{{H}}#?#.t-matchesprop:matches-prop(id=t-matchesprop-id)
+! :matches-media() only works in front of the selector, not appended to it.
+{{H}}#?#:matches-media((min-width: 1px)) .t-matchesmedia
+! :if() is scoped to the third-party host, and its fixture is a frame served
+! from there. uBO 1.72 throws while compiling :if(), and the throw takes down
+! every other procedural rule compiled alongside it — on this page that was
+! eighteen rows for one. Blockers compile per host, so keeping this rule off
+! {{H}} keeps the damage inside its own frame.
+{{TP}}#?#.t-if:if(.t-needle)
+{{H}}#$?#.t-procstyle:has-text(STYLEME) { outline: 3px solid rgb(4, 5, 6) !important; }
+
+! ------------------------------------------------------------- 1. scriptlets
+{{H}}##+js(set-constant, __t_setconst, true)
+{{H}}##+js(abort-on-property-read, __t_aopr)
+{{H}}##+js(nowebrtc)
+{{H}}##+js(set-constant, __t_scriptlet_exception, true)
+{{H}}#@#+js(set-constant, __t_scriptlet_exception, true)

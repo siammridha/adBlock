@@ -14,10 +14,10 @@
 
 use std::path::{Path, PathBuf};
 
-/// The four modules that hide behind an `api` facade. `web` has no facade: it
+/// The modules that hide behind an `api` facade. `web` has no facade: it
 /// implements nothing and is only wired up from the root.
-const FACADE_MODULES: [&str; 4] = ["adblock", "proxy", "dns", "stats"];
-const ALL_MODULES: [&str; 5] = ["adblock", "proxy", "dns", "stats", "web"];
+const FACADE_MODULES: [&str; 5] = ["adblock", "proxy", "dns", "stats", "tester"];
+const ALL_MODULES: [&str; 6] = ["adblock", "proxy", "dns", "stats", "tester", "web"];
 
 /// A file belongs to a "zone": the module it lives in, `web`, or `root`
 /// (the top-level wiring files: main.rs, lib.rs, config.rs, error.rs).
@@ -35,12 +35,16 @@ fn zone_of(rel_to_src: &Path) -> String {
 /// module; the rest follow the architecture's dependency edges.
 fn allowed_targets(zone: &str) -> &'static [&'static str] {
     match zone {
-        "root" => &["adblock", "proxy", "dns", "stats", "web"],
-        "web" => &["adblock", "proxy", "dns", "stats"],
+        "root" => &["adblock", "proxy", "dns", "stats", "tester", "web"],
+        "web" => &["adblock", "proxy", "dns", "stats", "tester"],
         "adblock" => &["stats"],
         "proxy" => &["adblock", "dns", "stats"],
         "dns" => &["adblock", "stats"],
         "stats" => &["adblock", "proxy", "dns"],
+        // The tester judges rules from inside the browser. It asks no module
+        // anything, so that nothing it reports depends on this project's own
+        // filtering being the one under test.
+        "tester" => &[],
         _ => &[],
     }
 }

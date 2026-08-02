@@ -720,7 +720,7 @@
   </section>
 
   <section class="panel tabpane" id="pane-tester">
-    <h2>Rule tester <span class="hint">— check a URL against the current rules without sending traffic</span></h2>
+    <h2>Rule tester <span class="hint">— check a URL against the current rules without sending traffic. For real traffic, the <a href="/test" target="_blank">rule-type tester</a> probes every rule type in a browser.</span></h2>
     <div class="actions" style="margin-top:0;flex-wrap:wrap">
       <input type="text" id="rt-url" placeholder="weather-analytics-events.apple.com/report — or a host, or just /ads.js"
         style="flex:1;min-width:260px">
@@ -797,7 +797,8 @@
     </div>
   </section>
 
-  <section class="panel tabpane" id="pane-setup">
+  <section class="tabpane" id="pane-setup">
+    <div class="panel">
     <h2>Setup &amp; requirements</h2>
     <p class="hint" style="margin-top:12px">Point your client's HTTP + HTTPS proxy at
       <strong id="listen-addr">…</strong>.</p>
@@ -826,6 +827,23 @@
               browse to <a href="https://tls-ech.dev" target="_blank" rel="noopener">tls-ech.dev</a>
               through the proxy — it reports whether the connection used ECH.</td></tr>
     </table>
+    </div>
+
+    <div class="panel">
+      <h2>Rule-type test page</h2>
+      <div>
+        <label class="sw"><input type="checkbox" id="ts-enabled"> Serve the test page at
+          <a href="/test" target="_blank">/test</a></label>
+        <p class="hint">A page that loads one bait resource per rule type and reports which of
+          them were stopped. Every verdict is reached in the browser, so it reports on whatever
+          blocker is active — this proxy, a browser extension, or none. Off means nothing under
+          <code>/test</code> is served.</p>
+      </div>
+      <div class="actions">
+        <button id="ts-save">Save</button>
+        <span class="hint" id="ts-status"></span>
+      </div>
+    </div>
   </section>
 
   <section class="tabpane" id="pane-stats">
@@ -1188,6 +1206,26 @@ $("ab-save").addEventListener("click", async ()=>{
   } catch(e){ say(el, "failed: " + e.message); }
 });
 
+// ---- rule-type tester: whether /test is served at all ---------------------
+async function refreshTester(){
+  try {
+    const r = await fetch("/api/tester"); const d = await r.json();
+    $("ts-enabled").checked = !!d.enabled;
+  } catch(e){}
+}
+$("ts-save").addEventListener("click", async ()=>{
+  const el = $("ts-status"); say(el, "saving…");
+  try {
+    const r = await fetch("/api/tester/config", {method:"POST",
+      headers:{"content-type":"application/json"},
+      body: JSON.stringify({enabled: $("ts-enabled").checked})});
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.error || r.status);
+    say(el, "saved ✓ (applied live, persisted)");
+    refreshTester();
+  } catch(e){ say(el, "failed: " + e.message); }
+});
+
 // ---- certificates tab -----------------------------------------------------
 async function refreshCerts(){
   const status = $("certs-status");
@@ -1418,6 +1456,8 @@ function showTab(pane){
   // The proxy egress DNS/ECH policy toggles and the page-filtering toggles.
   if(pane === "pane-proxycfg"){ refreshProxyCfg(); }
   if(pane === "pane-adblockcfg"){ refreshAdblockCfg(); }
+  // The rule-type tester's own on/off switch.
+  if(pane === "pane-setup") refreshTester();
   // The managed CA list.
   if(pane === "pane-certs") refreshCerts();
   // Statistics settings + the stats-exclusion list.

@@ -23,6 +23,7 @@ use crate::proxy::api::CertStore;
 use crate::proxy::api::ExclusionStore;
 use crate::adblock::api::BlocklistFetcher;
 use crate::stats::api::SharedState;
+use crate::tester::api::Tester;
 
 mod blocklists;
 mod certs;
@@ -88,6 +89,7 @@ pub struct Admin {
     dns_runtime: Arc<DnsRuntime>,
     egress: Arc<EgressPolicy>,
     certs: Arc<CertStore>,
+    tester: Arc<Tester>,
 }
 
 impl Admin {
@@ -103,6 +105,7 @@ impl Admin {
         dns_runtime: Arc<DnsRuntime>,
         egress: Arc<EgressPolicy>,
         certs: Arc<CertStore>,
+        tester: Arc<Tester>,
     ) -> Arc<Self> {
         Arc::new(Self {
             state,
@@ -115,6 +118,7 @@ impl Admin {
             dns_runtime,
             egress,
             certs,
+            tester,
         })
     }
 
@@ -149,6 +153,18 @@ impl Admin {
         let path = req.uri().path().to_string();
         let query = req.uri().query().unwrap_or("").to_string();
 
+        // The rule-type tester owns everything under /test. It is a module like
+        // any other: we hand it the request and render what it returns.
+        let host = req
+            .headers()
+            .get(hyper::header::HOST)
+            .and_then(|h| h.to_str().ok())
+            .unwrap_or("localhost")
+            .to_string();
+        if let Some(res) = self.tester.route(&method, &path, &query, &host) {
+            return res;
+        }
+
         match (&method, path.as_str()) {
             (&Method::GET, "/") => html(dashboard()),
             (&Method::GET, "/api/stream") => sse_stream(self.state.clone()),
@@ -182,6 +198,9 @@ impl Admin {
                 self.with_dns(|dns| json_ok(rewrites_json(&dns)))
             }
             (&Method::GET, "/api/certs") => json_ok(certs::certs_json(&self.certs)),
+            (&Method::GET, "/api/tester") => {
+                json_ok(json!({ "enabled": self.tester.enabled() }))
+            }
             (&Method::GET, "/api/cert") => certs::cert_download(&self.certs, &query),
             // Legacy path: download the active CA, served by the proxy (which
             // owns certificate state) — same bytes and filename as before.
@@ -218,6 +237,7 @@ impl Admin {
             "/api/blocklists" => self.add_blocklist(body).await,
             "/api/exclusions" => edit_exclusions(&self.state, &self.exclusions, body),
             "/api/adblock/config" => edit_adblock_config(&self.state, &self.adblock, body),
+            "/api/tester/config" => self.set_tester_enabled(body),
             "/api/check" => check_rule(&self.adblock, body),
             "/api/cosmetic" => cosmetic_for_page(&self.adblock, body),
             "/api/dns/flush" => self.with_dns(|dns| {
@@ -236,6 +256,21 @@ impl Admin {
             }
             "/api/dns/ech-probe" => probe_ech(&self.state, &self.dns_runtime.service()).await,
             _ => text_status(StatusCode::NOT_FOUND, "not found"),
+        }
+    }
+
+    /// The tester owns its switch and decides what a valid update is; this
+    /// hands over the raw body and renders the answer.
+    fn set_tester_enabled(&self, body: &[u8]) -> AdminResponse {
+        match self.tester.set_enabled(body) {
+            Ok(on) => {
+                self.state.log_event(
+                    crate::stats::api::EventKind::Info,
+                    format!("rule-type tester {}", if on { "enabled" } else { "disabled" }),
+                );
+                json_ok(json!({ "enabled": on }))
+            }
+            Err(e) => json_status(StatusCode::BAD_REQUEST, json!({ "error": e })),
         }
     }
 
@@ -362,6 +397,7 @@ mod tests {
             dns_runtime,
             egress,
             certs,
+            Arc::new(Tester::memory()),
         )
     }
 
@@ -384,6 +420,35 @@ mod tests {
     async fn body_json(resp: AdminResponse) -> Value {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_tester_is_mounted_and_gets_the_host_header() {
+        let admin = admin(&[], Arc::new(CannedDownloader("")));
+        let req = Request::builder()
+            .uri("/test/rules.txt")
+            .header("host", "127.0.0.1:8080")
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+        let resp = admin.route(req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8_lossy(&body).contains("127.0.0.1##.t-hide"));
+    }
+
+    /// Switching the tester off takes its pages with it: the web app has no
+    /// route of its own under `/test`, so they stop existing.
+    #[tokio::test]
+    async fn the_tester_switch_is_read_and_written_through_the_web_app() {
+        let admin = admin(&[], Arc::new(CannedDownloader("")));
+        assert_eq!(body_json(admin.route(get("/api/tester")).await).await["enabled"], true);
+
+        let resp = admin.route(post("/api/tester/config", r#"{"enabled":false}"#)).await;
+        assert_eq!(body_json(resp).await["enabled"], false);
+        assert_eq!(admin.route(get("/test")).await.status(), StatusCode::NOT_FOUND);
+
+        let resp = admin.route(post("/api/tester/config", "{}")).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "the tester rejects it, not the web app");
     }
 
     #[tokio::test]

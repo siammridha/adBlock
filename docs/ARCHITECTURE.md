@@ -28,6 +28,7 @@ going forward so the direction is clear.
 | **Proxy**   | HTTP(S) proxying, excluded hosts, TLS certificates            |
 | **DNS**     | DNS resolution, rewrite list                                  |
 | **Stats**   | Logs, log files, aggregated metrics                           |
+| **Tester**  | The rule-type test page, its filter list, test assets and switch |
 | **Web App** | Nothing. It instantiates modules and calls their APIs.        |
 
 ---
@@ -194,6 +195,34 @@ including retention settings and clearing data.
 
 ---
 
+## Tester
+
+A page that reports which adblock rule types are actually being enforced, and by
+implication which are not. It exists so the parity claims in
+`docs/UBO_PARITY.html` can be checked against a running browser rather than read.
+
+**Exposes to the Web App:** hand it a request, get back a response or nothing —
+plus its own on/off switch, which the Web App reads and writes like any other
+module's setting. Off, the tester answers nothing, including its own pages. The
+Web App mounts it and renders what comes back.
+
+**Calls:** nothing. This is the point of the module, not an accident. Every
+verdict is reached inside the browser, from what the page can see and from which
+test assets reached the server, so the same page reports on this project's proxy,
+on a browser extension with the proxy switched off, or on no blocker at all. The
+moment the tester asked Adblock anything, it would stop being able to test
+anything else.
+
+**Owns internally:**
+
+- The test page and its fixtures
+- The filter list it serves for blockers to subscribe to, written for the host
+  that asked for it
+- The test assets, and the record of which of them arrived
+- Its own on/off switch and its persistence
+
+---
+
 ## Web App
 
 The Web App implements no functionality of its own. Its entire scope:
@@ -214,7 +243,7 @@ owns it.
 ## Allowed dependency directions
 
 ```
-Web App  ──────►  Adblock, Proxy, DNS, Stats
+Web App  ──────►  Adblock, Proxy, DNS, Stats, Tester
 
 Proxy    ──────►  Adblock (request decisions, response rewriting)
 DNS      ──────►  Adblock (block decisions)
@@ -231,6 +260,7 @@ Stats    ──────►  Adblock, Proxy, DNS (log collection)
 Anything not listed above is not allowed. In particular:
 
 - Nothing imports the Web App.
+- The Tester imports nothing. Only the Web App imports it.
 - Adblock does not import Proxy or DNS.
 - DNS does not import Proxy. The Proxy → DNS dependency is one-directional.
 - Nothing touches another module's internals — only its exposed API.

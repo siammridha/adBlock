@@ -6,7 +6,7 @@
 
 ## Architecture boundaries (non-negotiable)
 
-Modules: `adblock/`, `proxy/`, `dns/`, `stats/`, `webapp/`.
+Modules: `adblock/`, `proxy/`, `dns/`, `stats/`, `tester/`, `webapp/`.
 
 - Each module owns its own settings, storage, validation, and network access.
 - Modules interact ONLY through each other's exposed APIs. Never import another module's internals.
@@ -15,4 +15,6 @@ Modules: `adblock/`, `proxy/`, `dns/`, `stats/`, `webapp/`.
 - `webapp/` implements nothing. It instantiates modules and calls their APIs. It never validates input; the owning module validates and returns success/error.
 - `proxy/` never changes a request or a response. No URL rewriting, no filtering headers, no HTML edits, no script or style injection, no stand-in bodies. It passes each request and each response to the `adblock/` API and forwards exactly what comes back. Setting hop-by-hop headers, `Host`, and TLS termination is the proxy's own job and is fine.
 - `adblock/` applies every rule and makes every change to a request or response body or URL. The switches for those changes (`$redirect`, `$removeparam`, `$csp`, cosmetic filtering, scriptlets) live in `adblock/`, not in the caller.
+- `tester/` is the rule-type test page. It calls no module, not even `adblock/` — every verdict is reached in the browser, so the page reports on whichever blocker is active (this proxy, an extension, or none). The web app serves it and nothing else.
+
 Before adding code, ask: which module owns this? Put it there. Full rationale: @docs/ARCHITECTURE.md

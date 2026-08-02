@@ -1,0 +1,1006 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Adblock rule-type tester</title>
+<style>
+:root { color-scheme: light dark; --fg:#1a1a1a; --bg:#fff; --muted:#5a5a5a; --line:#d8d8d8; --code:#f4f4f4;
+  --pass-bg:#dcf0dc; --pass-fg:#14591f; --fail-bg:#f8dada; --fail-fg:#8a1f1f; --accent:#0a5ea8; }
+@media (prefers-color-scheme: dark) { :root { --fg:#e6e6e6; --bg:#16181a; --muted:#a0a0a0; --line:#33383d; --code:#22262a;
+  --pass-bg:#1d3a21; --pass-fg:#8fdc9b; --fail-bg:#401f1f; --fail-fg:#f09b9b; --accent:#6fb3f2; } }
+* { box-sizing: border-box; }
+body { margin:0 auto; padding:1.5rem 1rem 4rem; max-width:64rem; background:var(--bg); color:var(--fg);
+  font:15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+h1 { font-size:1.5rem; margin:0 0 .35rem; }
+h2 { font-size:1.05rem; margin:2rem 0 .5rem; padding-top:.6rem; border-top:1px solid var(--line); }
+p { margin:0 0 .8rem; }
+code { background:var(--code); padding:.1em .35em; border-radius:3px; font-size:.87em;
+  font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+a { color:var(--accent); }
+.muted { color:var(--muted); font-size:.9rem; }
+table { border-collapse:collapse; width:100%; font-size:.88rem; }
+th, td { border:1px solid var(--line); padding:.3rem .5rem; text-align:left; vertical-align:top; }
+th { background:var(--code); font-weight:600; }
+.tag { display:inline-block; padding:.05em .5em; border-radius:3px; font-size:.78rem; font-weight:600; white-space:nowrap; }
+.pass { background:var(--pass-bg); color:var(--pass-fg); }
+.fail { background:var(--fail-bg); color:var(--fail-fg); }
+.bar { display:flex; gap:.6rem; align-items:center; flex-wrap:wrap; margin:0 0 1rem; }
+button { font:inherit; padding:.4rem .9rem; border:1px solid var(--line); border-radius:5px;
+  background:var(--code); color:var(--fg); cursor:pointer; }
+button:disabled { opacity:.5; cursor:default; }
+.setup { border:1px solid var(--line); border-radius:6px; padding:.8rem 1rem; margin:0 0 1.5rem; }
+.steps { margin:0 0 .8rem; padding-left:1.4rem; }
+.steps li { margin:0 0 .35rem; }
+#copied { color:var(--muted); font-size:.9rem; }
+#listurl { background:var(--code); padding:.1em .35em; border-radius:3px; font-size:.87em;
+  font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; word-break:break-all; }
+#now { margin:0 0 1.2rem; font-size:.88rem; }
+#now:empty { display:none; }
+.score { display:flex; gap:1.5rem; flex-wrap:wrap; margin:0 0 1rem; font-variant-numeric:tabular-nums; }
+.score b { font-size:1.4rem; display:block; line-height:1.1; }
+#sink { position:absolute; left:-9999px; top:0; width:300px; }
+#fixtures { position:absolute; left:-9999px; top:0; width:400px; }
+#fixtures div { padding:2px; }
+</style>
+</head>
+<body>
+
+<h1>Adblock rule-type tester</h1>
+<p class="muted">One probe per rule type, judged from inside this page. It reports what your blocker
+actually did, whoever the blocker is — this project's proxy, uBlock Origin, or nothing. Turn the
+proxy off and the results describe your extension instead.</p>
+
+<div class="setup">
+  <p><strong>Setup.</strong> The <em>No setup needed</em> section works as-is. Every other section
+  needs rules aimed at this page, and your blocker has to be given them. It only touches
+  <code>/test/a/</code> paths and this page's own classes, so no real site is affected.</p>
+
+  <p><strong>In uBlock Origin</strong> — do it this way rather than subscribing, because uBO
+  discards <code>$replace</code>, <code>$urlskip</code> and <code>$uritransform</code>
+  from a list it does not trust, and it only trusts this box.</p>
+  <ol class="steps">
+    <li>Press <button id="copylist" type="button">Copy the list</button> <span id="copied"></span></li>
+    <li>Click the uBlock Origin icon in the toolbar, then the gears icon (⚙) in the popup. The
+      dashboard opens in a new tab.</li>
+    <li>Open the <strong>My filters</strong> tab along the top.</li>
+    <li>Click in the big text box and paste, below anything already in there.</li>
+    <li>Tick <strong>Trust my filters</strong>, above the box.</li>
+    <li>Press <strong>Apply changes</strong>, top right.</li>
+    <li>Come back here, reload this page, and press <em>Run all tests</em>.</li>
+  </ol>
+  <p class="muted" style="margin:0 0 .8rem">If the copy button does not work (clipboard access
+  needs a secure page), open <span id="listurl"></span> in a tab and copy the text by hand.</p>
+
+  <p><strong>In this project's dashboard</strong>, add that same URL as a blocklist. Re-fetch it
+  after any change.</p>
+
+  <p class="muted" style="margin:.5rem 0 0">The list is written for the exact host you asked it
+  from, so take it from the address you open the tester on — a copy made on
+  <code>localhost</code> does nothing on a LAN address. Third-party tests use
+  <code id="tphost"></code>, which has to reach this same server or those tests mean nothing.</p>
+  <p id="nodomain" class="muted" hidden style="margin:.5rem 0 0"></p>
+  <p class="muted" style="margin:.5rem 0 0">To test <em>this project's proxy</em> rather than an
+  extension, the page has to reach you through the proxy. Browsers send loopback straight to the
+  server and never to a proxy, so <code>localhost</code> and <code>127.0.0.1</code> cannot be used
+  for that. Add a DNS rewrite of <code>*.test</code> to <code>127.0.0.1</code>, then open this page
+  at <code>http://tester.test<span class="port"></span>/test</code>. Keep the port — the rewrite
+  changes the address, not the port. Check the name is not in the proxy's excluded hosts. To test
+  an extension instead, turn the proxy off — nothing here depends on it.</p>
+</div>
+
+<div class="bar">
+  <button id="run">Run all tests</button>
+  <button id="copyresult" type="button" disabled>Copy result</button>
+  <span id="status" class="muted">idle</span>
+</div>
+
+<p id="now"></p>
+
+<div class="score">
+  <div><b id="n-pass">0</b><span class="muted">enforced</span></div>
+  <div><b id="n-fail">0</b><span class="muted">not enforced</span></div>
+</div>
+
+<p class="muted">The last two columns are not results. They are what
+<code>docs/UBO_PARITY.html</code> says each blocker supports, so a row that is meant to be red
+reads differently from a regression. <em>firefox</em> means uBO only has it on Firefox;
+<em>trusted</em> means uBO drops the rule unless <strong>Trust my filters</strong> is ticked.</p>
+
+<div id="results"></div>
+
+<!-- Fixtures sit in the static HTML so cosmetic filtering sees them at document start. -->
+<div id="fixtures">
+  <div class="t-generic">generic hide</div>
+  <div class="t-hide">specific hide</div>
+  <div class="t-unhide">unhidden by exception</div>
+  <div class="t-cssdecl">css declaration</div>
+  <div class="t-style">style()</div>
+  <div class="t-has"><span class="t-needle">x</span>has()</div>
+  <div class="t-not"><div class="t-keep">keep</div><div class="t-drop">drop</div></div>
+  <div class="t-hastext">BLOCKTHIS</div>
+  <div class="t-upward-outer"><div class="t-upward-inner">upward()</div></div>
+  <div class="t-remove">remove()</div>
+  <div class="t-removeattr" data-ad="1">remove-attr()</div>
+  <div class="t-removeclass t-adclass">remove-class()</div>
+  <div class="t-xpath"><div id="t-xpath-target">xpath()</div></div>
+  <div class="t-matchescss" style="color: rgb(1, 2, 3)">matches-css()</div>
+  <div class="t-matchespath">matches-path()</div>
+  <div class="t-matchesattr" data-x="advert">matches-attr()</div>
+  <div class="t-mintext">this text is comfortably longer than twenty characters</div>
+  <div class="t-watchattr" data-y="start">watch-attr()</div>
+  <div class="t-nthancestor-outer"><div class="t-nthancestor-inner">nth-ancestor()</div></div>
+  <div class="t-matchesprop" id="t-matchesprop-id">matches-prop()</div>
+  <div class="t-matchesmedia">matches-media()</div>
+  <div class="t-procstyle">STYLEME</div>
+  <!-- Zero-setup bait. Each of these four is a generic hide rule that EasyList
+       actually carries — checked against the list, not guessed from the shape
+       of the name. A name no list hides would fail every blocker equally. -->
+  <div id="ad-slot">bait</div>
+  <div id="ad_banner">bait</div>
+  <div id="banner-ad">bait</div>
+  <div class="sponsored-link">bait</div>
+</div>
+<div id="sink"></div>
+
+<script>window.__t_htmlfilter = true; /* HTMLFILTERME */</script>
+
+<script>
+"use strict";
+
+var RUN = Math.random().toString(36).slice(2, 10);
+var PORT = location.port ? ":" + location.port : "";
+// Third-party tests need a host with a different registrable domain that still
+// reaches this server. Between the two loopback spellings that is free. On a
+// real name — which is the only way to reach this page through the proxy, since
+// browsers bypass loopback — there is no second spelling, so use a fixed name
+// and let a DNS rewrite point it back here.
+var TPHOST = location.hostname === "localhost" ? "127.0.0.1"
+  : location.hostname === "127.0.0.1" ? "localhost"
+  : "thirdparty.test";
+var TPBASE = location.protocol + "//" + TPHOST + PORT;
+var A = function (name) { return "/test/a/" + RUN + "/" + name; };
+
+var LISTURL = location.origin + "/test/rules.txt";
+document.getElementById("listurl").textContent = LISTURL;
+document.getElementById("tphost").textContent = TPHOST + PORT;
+Array.prototype.forEach.call(document.getElementsByClassName("port"), function (el) {
+  el.textContent = PORT;
+});
+
+// navigator.clipboard does not exist on a plain-http page that is not
+// localhost, which is exactly where this page gets opened, so the old
+// execCommand path is the one that usually runs.
+function copyText(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(text).then(function () { return true; });
+  }
+  var ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed";
+  ta.style.left = "-9999px";
+  document.body.appendChild(ta);
+  ta.select();
+  var ok = document.execCommand("copy");
+  document.body.removeChild(ta);
+  return Promise.resolve(ok);
+}
+
+document.getElementById("copylist").onclick = function () {
+  var note = document.getElementById("copied");
+  note.textContent = "fetching…";
+  fetch(LISTURL, { cache: "no-store" }).then(function (r) { return r.text(); })
+    .then(copyText).then(function (ok) {
+      note.textContent = ok ? "copied — now paste it into uBO" : "could not copy, use the link below";
+    }, function () {
+      note.textContent = "could not copy, use the link below";
+    });
+};
+
+var HITS = [];      // what the server actually received this run
+var CLIENT = {};    // probe name -> what the browser saw
+var FRAMES = {};    // frame name -> the message it posted back, if any
+
+var BAIT = [
+  { name: "doubleclick", url: "https://securepubads.g.doubleclick.net/tag/js/gpt.js" },
+  { name: "googlesyndication", url: "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js" },
+  { name: "google-analytics", url: "https://www.google-analytics.com/analytics.js" },
+  { name: "adnxs", url: "https://ib.adnxs.com/ttj" },
+  { name: "scorecardresearch", url: "https://sb.scorecardresearch.com/beacon.js" },
+  { name: "criteo", url: "https://static.criteo.net/js/ld/publishertag.js" },
+  { name: "taboola", url: "https://cdn.taboola.com/libtrc/unip/loader.js" },
+  { name: "outbrain", url: "https://widgets.outbrain.com/outbrain.js" }
+];
+
+// ---------------------------------------------------------------- probes
+
+function sink(tag, attrs) {
+  var e = document.createElement(tag);
+  for (var k in attrs) e.setAttribute(k, attrs[k]);
+  document.getElementById("sink").appendChild(e);
+  return e;
+}
+
+function element(name, tag, attrs) {
+  CLIENT[name] = new Promise(function (res) {
+    var e = sink(tag, attrs);
+    e.onload = function () { res({ ok: true }); };
+    e.onerror = function () { res({ ok: false }); };
+    setTimeout(function () { res({ ok: false, timeout: true }); }, 5000);
+  });
+}
+
+// <video> never fires `load`, so it needs its own waiter.
+function video(name, url) {
+  CLIENT[name] = new Promise(function (res) {
+    var v = sink("video", { preload: "auto", src: url });
+    v.onloadeddata = function () { res({ ok: true }); };
+    v.onerror = function () { res({ ok: false }); };
+    setTimeout(function () { res({ ok: false, timeout: true }); }, 5000);
+  });
+}
+
+function request(name, url, opts) {
+  CLIENT[name] = fetch(url, Object.assign({ cache: "no-store" }, opts || {})).then(
+    function (r) {
+      return r.text().then(
+        function (t) { return { ok: true, status: r.status, text: t }; },
+        function () { return { ok: true, status: r.status, text: "", opaque: true }; }
+      );
+    },
+    function (e) { return { ok: false, err: String(e) }; }
+  );
+}
+
+function client(name) { return CLIENT[name] || { ok: false, missing: true }; }
+
+function font(url) { return new FontFace("t" + RUN + Math.random(), "url(" + url + ")").load(); }
+
+// Chrome types a prefetch as "other". A <track> looks like "media" to it, so it
+// cannot stand in for this.
+function prefetch(url) {
+  sink("link", { rel: "prefetch", href: url });
+}
+
+function anchorPing(url) {
+  var a = sink("a", { href: "#p", ping: url });
+  a.textContent = "ping";
+  a.click();
+}
+
+function websocket(url) {
+  try { new WebSocket(location.origin.replace(/^http/, "ws") + url); } catch (e) {}
+}
+
+// Did the server receive a request whose path contains this fragment? Only the
+// path is searched: a redirector carries its target's name in the query string,
+// so matching the whole URL would report the target as arrived when it never did.
+function hit(fragment) {
+  for (var i = 0; i < HITS.length; i++) {
+    if (HITS[i].url.split("?")[0].indexOf(fragment) !== -1) return HITS[i];
+  }
+  return null;
+}
+
+function hitMethod(fragment, method) {
+  for (var i = 0; i < HITS.length; i++) {
+    if (HITS[i].url.split("?")[0].indexOf(fragment) !== -1 && HITS[i].method === method) return HITS[i];
+  }
+  return null;
+}
+
+// `extra` is merged over the defaults, so it can add an attribute the frame
+// needs (allow="fullscreen") or point the frame at another host entirely.
+function frame(name, extra) {
+  var attrs = { src: A(name + ".html"), width: "300", height: "80" };
+  for (var k in extra) attrs[k] = extra[k];
+  sink("iframe", attrs);
+}
+
+window.addEventListener("message", function (e) {
+  if (e.data && e.data.frame) FRAMES[e.data.frame] = e.data;
+});
+
+// ---------------------------------------------------------------- DOM checks
+
+function el(sel) { return document.querySelector(sel); }
+function gone(sel) { return !el(sel); }
+
+function hidden(sel) {
+  var e = el(sel);
+  if (!e) return true;                       // removed outright still counts as hidden
+  var s = getComputedStyle(e);
+  return s.display === "none" || s.visibility === "hidden";
+}
+
+function styled(sel, prop, value) {
+  var e = el(sel);
+  return !!e && getComputedStyle(e)[prop] === value;
+}
+
+function state(sel) {
+  var e = el(sel);
+  if (!e) return "element removed";
+  var s = getComputedStyle(e);
+  return s.display === "none" ? "hidden" : (s.visibility === "hidden" ? "invisible" : "visible");
+}
+
+// A neutered RTCPeerConnection still constructs — the usual stand-in is a stub
+// whose methods do nothing. The tell is createOffer() not returning a promise.
+function webrtcBlocked() {
+  var C = window.RTCPeerConnection || window.webkitRTCPeerConnection;
+  if (!C) return true;
+  try {
+    var offer = new C({ iceServers: [] }).createOffer();
+    if (offer && typeof offer.then === "function") { offer.catch(function () {}); return false; }
+    return true;
+  } catch (e) { return true; }
+}
+
+// Blockers switch generic cosmetic filtering off on a host with no registrable
+// domain — a bare IP, or a single-label name like "localhost". Generic rows
+// cannot pass there, so the row says why rather than just "visible".
+var NO_REGISTRABLE = location.hostname.indexOf(".") === -1 ||
+  /^\d+\.\d+\.\d+\.\d+$/.test(location.hostname) ||
+  location.hostname.indexOf(":") !== -1;
+
+if (NO_REGISTRABLE) {
+  var warn = document.getElementById("nodomain");
+  warn.textContent = "Heads up: " + location.hostname + " has no registrable domain, so blockers " +
+    "switch generic cosmetic filtering off here. Those rows cannot pass. Point a real name at " +
+    "this machine to test them.";
+  warn.hidden = false;
+}
+
+function genericRow(add, sec, name, doc, sel) {
+  if (NO_REGISTRABLE) {
+    return add(sec, name, doc, "fail",
+      location.hostname + " has no registrable domain, so generic cosmetic rules are switched off");
+  }
+  add(sec, name, doc, hidden(sel) ? "pass" : "fail", state(sel));
+}
+
+// ---------------------------------------------------------------- issuing
+
+// The run is paced, one group at a time. A group's probes have to be in flight
+// together — the server is asked once, at the end, which of them arrived — so
+// the group is the finest thing the page can name while it runs. It names the
+// rule types in the group, and replaces that line each step rather than
+// stacking up a transcript.
+var PACE = 1400;
+
+var PHASES = [];
+function phase(title, types, go) { PHASES.push({ title: title, types: types, go: go }); }
+
+phase("Request types",
+  ["$script", "$image", "$stylesheet", "$font", "$media", "$subdocument", "$xmlhttprequest",
+   "$object", "$other", "$ping", "$websocket", "$all", "$webrtc"],
+  function () {
+    element("script", "script", { src: A("net-script.js") });
+    element("image", "img", { src: A("net-image.gif") });
+    element("stylesheet", "link", { rel: "stylesheet", href: A("net-style.css") });
+    element("frame", "iframe", { src: A("net-frame.html"), width: "10", height: "10" });
+    video("media", A("net-media.mp4"));
+    video("mediaControl", A("ctl-media.mp4"));
+    element("object", "object", { data: A("net-object.html"), width: "10", height: "10" });
+    element("objectControl", "object", { data: A("ctl-object.html"), width: "10", height: "10" });
+
+    font(A("net-font.woff2")).catch(function () {});
+    font(A("ctl-font.woff2")).catch(function () {});
+    prefetch(A("net-other.txt"));
+    prefetch(A("ctl-other.txt"));
+    anchorPing(A("net-ping.gif"));
+    anchorPing(A("ctl-ping.gif"));
+    websocket(A("net-ws.ws"));
+    websocket(A("ctl-ws.ws"));
+
+    var xhr = new XMLHttpRequest();
+    xhr.open("GET", A("net-xhr.json"));
+    try { xhr.send(); } catch (e) { /* blocked synchronously */ }
+
+    try { navigator.sendBeacon(A("net-beacon.gif"), "beacon"); } catch (e) {}
+    try { navigator.sendBeacon(A("ctl-beacon.gif"), "beacon"); } catch (e) {}
+
+    element("all", "img", { src: A("net-all.gif") });
+  });
+
+phase("Scope and party",
+  ["$3p", "$1p", "$domain= / $from=", "$match-case", "$to=", "$denyallow=", "$strict1p",
+   "$strict3p", "$top="],
+  function () {
+    request("third", TPBASE + A("tp-third.json"), { mode: "no-cors" });
+    request("tpcontrol", TPBASE + A("tp-control.json"), { mode: "no-cors" });
+    request("strict3p", TPBASE + A("strict3p.json"), { mode: "no-cors" });
+    request("first", A("tp-first.json"));
+    request("fromMatch", A("from-match.json"));
+    request("fromOther", A("from-other.json"));
+    request("matchCase", A("MatchCase.json"));
+    request("matchCaseLower", A("matchcase.json"));
+    request("to", A("to.json"));
+    request("denyallowBlocked", A("denyallow-blocked.json"));
+    request("denyallowAllowed", A("denyallow-allowed.json"));
+    request("strict1p", A("strict1p.json"));
+    request("topMatch", A("top-match.json"));
+    request("topOther", A("top-other.json"));
+  });
+
+phase("Advanced matching",
+  ["$method=", "$header=", "$requestheader=", "$ipaddress=", "$cname"],
+  function () {
+    request("methodPost", A("method.json"), { method: "POST", body: "x" });
+    request("methodGet", A("method.json?get=1"));
+    request("header", A("header.json"));
+    request("reqheader", A("reqheader.json"), { headers: { "x-test-request": "1" } });
+    // Same URL, same rule, no header — so the header is the only difference.
+    request("reqheaderControl", A("reqheader.json?twin=1"));
+    element("ipLoopback", "img", { src: A("ipaddr-loopback.gif") });
+    element("ipLan", "img", { src: A("ipaddr-lan.gif") });
+  });
+
+phase("Actions",
+  ["$redirect=", "$redirect-rule=", "$rewrite=", "$removeparam=", "$queryprune=", "$uritransform=",
+   "$replace=", "$urlskip=", "$csp=", "$permissions=", "$inline-script", "$empty", "$mp4"],
+  function () {
+    element("redirect", "script", { src: A("redirect.js") });
+    element("redirectRule", "script", { src: A("redirectrule.js") });
+    element("rewrite", "script", { src: A("rewrite.js") });
+    request("removeparam", A("removeparam.json?utm_source=tester&keep=1"));
+    request("queryprune", A("queryprune.json?utm_source=tester&keep=1"));
+    request("uritransform", A("uritransform.json"));
+    request("replace", A("replace.json"));
+    // $urlskip is not applied to fetch/XHR, and $mp4 only to media, so both
+    // probes have to be elements rather than requests.
+    element("urlskip", "img", {
+      src: A("urlskip.gif?u=") + encodeURIComponent(location.origin + A("skiptarget.gif"))
+    });
+    request("empty", A("empty.json"));
+    video("mp4", A("silent.mp4"));
+    frame("csp");
+    // Without allow="fullscreen" a frame has no fullscreen permission to begin
+    // with, and the row could not tell the rule from the default.
+    frame("perm", { allow: "fullscreen" });
+    frame("inline");
+    frame("others");
+  });
+
+phase("Control and exceptions",
+  ["$important", "$badfilter", "@@ exception", "$ghide", "$ehide", "$shide", "$genericblock"],
+  function () {
+    element("important", "img", { src: A("important.gif") });
+    element("badfilter", "img", { src: A("badfilter.gif") });
+    element("exception", "img", { src: A("exception.gif") });
+    frame("ghide");
+    frame("ehide");
+    frame("shide");
+    frame("genericblock");
+  });
+
+phase("Cosmetic rules and scriptlets",
+  ["##", "#@#", "#$#", "#$?#", "##^", "##^responseheader()", ":style()", ":has()", ":not()",
+   ":has-text()", ":upward()", ":remove()", ":remove-attr()", ":remove-class()", ":xpath()",
+   ":matches-css()", ":matches-path()", ":matches-attr()", ":min-text-length()", ":others()",
+   ":watch-attr()", ":nth-ancestor()", ":matches-prop()", ":matches-media()", ":if()", "+js()"],
+  function () {
+    var e = el(".t-watchattr");
+    if (e) e.setAttribute("data-y", "hideme");
+    frame("respheader");
+    // :if() lives on the third-party host so a blocker that throws while
+    // compiling it takes down that frame's procedural rules and not this page's.
+    frame("ifop", { src: TPBASE + A("ifop.html") });
+  });
+
+phase("Real ad hosts",
+  ["general blocklist coverage — no setup needed"],
+  function () {
+    // These have to be no-cors. A CORS request to an ad host fails for want of
+    // an allow-origin header whether a blocker is there or not, and reading that
+    // failure as "blocked" made all eight of these pass with no blocker at all.
+    // With no-cors the only thing that can fail the request is the browser
+    // refusing to send it. `redirect: "error"` catches the other kind of block:
+    // a blocker that swaps in a stand-in does it by redirecting, which the body
+    // of an opaque response is too hidden to show.
+    //
+    // example.com proves the browser can reach the internet at all.
+    request("baitControl", "https://example.com/", { mode: "no-cors" });
+    BAIT.forEach(function (b) {
+      request("bait:" + b.name, b.url, { mode: "no-cors", redirect: "error" });
+    });
+  });
+
+// ---------------------------------------------------------------- the table
+//
+// doc: what docs/UBO_PARITY.html says this project supports, so a red row that
+// is meant to be red reads differently from a regression.
+//
+// UBO: what uBO supports, from the same document. uBO is the parity target
+// there, so every rule type on this page is one uBO has — the value is "full"
+// unless the support is conditional:
+//   firefox      only uBO on Firefox has it; Chrome has no API for it
+//   trusted      uBO drops the rule unless the list is trusted, which for a
+//                pasted list means "Trust my filters" is ticked
+// A name missing from this table shows as "?" in the column rather than blank.
+var UBO = {
+  // 2.1 request type
+  "$script": "full", "$image": "full", "$stylesheet": "full", "$font": "full",
+  "$media": "full", "$subdocument": "full", "$xmlhttprequest": "full", "$object": "full",
+  "$other": "full", "$ping (<a ping>)": "full", "$ping (sendBeacon)": "full",
+  "$websocket": "full", "$all": "full", "$webrtc": "via scriptlet",
+  // 2.2 scope and party
+  "$3p": "full", "$1p": "full", "$domain= / $from=": "full", "$match-case": "full",
+  "$to=": "full", "$denyallow=": "full", "$strict1p": "full", "$strict3p": "full",
+  "$top=": "full",
+  // 2.3 advanced matching
+  "$method=": "full", "$header= (response)": "full", "$requestheader=": "full",
+  "$ipaddress=": "full", "$cname": "firefox",
+  // 2.4 actions
+  "$redirect=": "full", "$redirect-rule=": "full", "$rewrite=": "full",
+  "$removeparam=": "full", "$queryprune=": "full", "$uritransform=": "trusted",
+  "$replace=": "firefox, trusted", "$urlskip=": "trusted", "$csp=": "full",
+  "$permissions=": "full", "$inline-script": "full", "$empty": "full", "$mp4": "full",
+  // 2.5 control and exceptions
+  "$important": "full", "$badfilter": "full", "@@ exception": "full", "$ghide": "full",
+  "$ehide": "full", "$shide": "full", "$genericblock": "full",
+  // 1. rule families
+  "Cosmetic hide ##": "full", "Cosmetic exception #@#": "full",
+  "Generic hide (no domain)": "full", "CSS declaration #$#": "full",
+  "Procedural + style #$?#": "full", "HTML filter ##^": "firefox",
+  "HTML filter ##^responseheader()": "trusted",
+  // 3. cosmetic operators
+  ":style()": "full", ":has()": "full", ":if()": "full", ":not()": "full",
+  ":has-text()": "full", ":upward()": "full", ":remove()": "full",
+  ":remove-attr()": "full", ":remove-class()": "full", ":xpath()": "full",
+  ":matches-css()": "full", ":matches-path()": "full", ":matches-attr()": "full",
+  ":min-text-length()": "full", ":others()": "full", ":watch-attr()": "full",
+  ":nth-ancestor()": "full", ":matches-prop()": "full", ":matches-media()": "full",
+  // scriptlets
+  "+js(set-constant)": "full", "+js(abort-on-property-read)": "full",
+  "+js(nowebrtc)": "full", "Scriptlet exception #@#+js()": "full",
+  // no setup needed — these are not rule types but hosts and selectors every
+  // general list carries, so the column reads as "uBO's default lists cover it"
+  "doubleclick": "full", "googlesyndication": "full", "google-analytics": "full",
+  "adnxs": "full", "scorecardresearch": "full", "criteo": "full", "taboola": "full",
+  "outbrain": "full", "generic hide #ad-slot": "full", "generic hide #ad_banner": "full",
+  "generic hide #banner-ad": "full", "generic hide .sponsored-link": "full"
+};
+
+function tests() {
+  var t = [];
+  var add = function (sec, name, doc, verdict, detail) {
+    t.push({ sec: sec, name: name, doc: doc, ubo: UBO[name] || "?",
+             verdict: verdict, detail: detail });
+  };
+
+  // A network row: blocked means the server never saw it. `control` names an
+  // unfiltered twin — if that did not arrive either, the browser never issued
+  // the request and the row says nothing.
+  var netRow = function (sec, name, doc, fragment, control) {
+    if (control && !hit(control)) {
+      return add(sec, name, doc, "fail", "this browser never issued the request");
+    }
+    var blocked = !hit(fragment);
+    add(sec, name, doc, blocked ? "pass" : "fail",
+      blocked ? "request never reached the server" : "request arrived");
+  };
+
+  // ---- 2.1 request types
+  var S = "2.1 Request type";
+  netRow(S, "$script", "full", "net-script.js");
+  netRow(S, "$image", "full", "net-image.gif");
+  netRow(S, "$stylesheet", "full", "net-style.css");
+  netRow(S, "$font", "full", "net-font.woff2", "ctl-font.woff2");
+  netRow(S, "$media", "full", "net-media.mp4", "ctl-media.mp4");
+  netRow(S, "$subdocument", "full", "net-frame.html");
+  netRow(S, "$xmlhttprequest", "full", "net-xhr.json");
+  netRow(S, "$object", "full", "net-object.html", "ctl-object.html");
+  netRow(S, "$other", "full", "net-other.txt", "ctl-other.txt");
+  netRow(S, "$ping (<a ping>)", "full", "net-ping.gif", "ctl-ping.gif");
+  netRow(S, "$ping (sendBeacon)", "full", "net-beacon.gif", "ctl-beacon.gif");
+  netRow(S, "$websocket", "full", "net-ws.ws", "ctl-ws.ws");
+  netRow(S, "$all", "part", "net-all.gif");
+  add(S, "$webrtc", "part, via scriptlet", webrtcBlocked() ? "pass" : "fail",
+    "RTCPeerConnection " + (webrtcBlocked() ? "is neutered" : "still works"));
+
+  // ---- 2.2 scope and party
+  S = "2.2 Scope and party";
+  var reachable = !!hit("tp-control.json");
+  var party = function (name, doc, fragment) {
+    if (!reachable) {
+      return add(S, name, doc, "fail",
+        TPHOST + " never reached this server, so a third-party request could not be made");
+    }
+    netRow(S, name, doc, fragment);
+  };
+  party("$3p", "full", "tp-third.json");
+  netRow(S, "$1p", "full", "tp-first.json");
+  var fm = !hit("from-match.json"), fo = !!hit("from-other.json");
+  add(S, "$domain= / $from=", "full", fm && fo ? "pass" : "fail",
+    (fm ? "matching domain blocked" : "matching domain got through") + ", " +
+    (fo ? "other domain allowed" : "other domain blocked too"));
+  var mc = !hit("MatchCase.json"), ml = !!hit("matchcase.json");
+  add(S, "$match-case", "full", mc && ml ? "pass" : "fail",
+    (mc ? "exact case blocked" : "exact case got through") + ", " +
+    (ml ? "other case allowed" : "other case blocked too"));
+  netRow(S, "$to=", "none", "to.json");
+  twoSided(add, S, "$denyallow=", "none", "denyallow-blocked.json", "denyallow-allowed.json",
+    "the exempt host");
+  netRow(S, "$strict1p", "none", "strict1p.json");
+  party("$strict3p", "none", "strict3p.json");
+  twoSided(add, S, "$top=", "none", "top-match.json", "top-other.json", "the other top host");
+
+  // ---- 2.3 advanced matching
+  S = "2.3 Advanced matching";
+  var post = !hitMethod("method.json", "POST"), get = !!hitMethod("method.json", "GET");
+  add(S, "$method=", "none", post && get ? "pass" : "fail",
+    (post ? "POST blocked" : "POST arrived") + ", " + (get ? "GET allowed" : "GET blocked too"));
+  add(S, "$header= (response)", "none", client("header").ok ? "fail" : "pass",
+    client("header").ok ? "the response was delivered" : "the response was cancelled");
+  // Like $header=, this is decided after the request has gone out, so the
+  // server sees it either way. The tell is the response never arriving.
+  var rh = client("reqheader"), rhc = client("reqheaderControl");
+  add(S, "$requestheader=", "none", !rh.ok && rhc.ok ? "pass" : "fail",
+    (rh.ok ? "the response was delivered" : "the response was cancelled") + ", " +
+    (rhc.ok ? "the header-free twin arrived" : "the header-free twin was cancelled too"));
+  // Which of the two bites depends on the address this page was opened at, so
+  // the row wants exactly one. Neither means the option was dropped; both means
+  // it was read as a plain block.
+  var ipLoop = !hit("ipaddr-loopback.gif"), ipLan = !hit("ipaddr-lan.gif");
+  add(S, "$ipaddress=", "none", ipLoop !== ipLan ? "pass" : "fail",
+    ipLoop && ipLan ? "both were blocked, so the address was never read"
+      : !ipLoop && !ipLan ? "neither was blocked"
+      : "the " + (ipLoop ? "loopback" : "lan") + " rule blocked and the other did not");
+  add(S, "$cname", "none", "fail",
+    "needs a CNAME record pointing a name here at an ad host, which this server cannot create");
+
+  // ---- 2.4 actions
+  S = "2.4 Actions";
+  var standin = function (name, doc, fragment, probe) {
+    var c = client(probe), blocked = !hit(fragment);
+    add(S, name, doc, blocked && c.ok ? "pass" : "fail",
+      blocked ? (c.ok ? "a stand-in was served" : "blocked outright, no stand-in")
+              : "the original was fetched");
+  };
+  standin("$redirect=", "full", "redirect.js", "redirect");
+  standin("$redirect-rule=", "full", "redirectrule.js", "redirectRule");
+  standin("$rewrite=", "none", "rewrite.js", "rewrite");
+  paramRow(add, S, "$removeparam=", "full", "removeparam.json");
+  paramRow(add, S, "$queryprune=", "none", "queryprune.json");
+  var ut = !!hit("uritransformed.json");
+  add(S, "$uritransform=", "none", ut ? "pass" : "fail",
+    ut ? "the server saw the rewritten path" : "the server saw the original path");
+  var rep = (client("replace").text || "").indexOf("REPLACED") !== -1;
+  add(S, "$replace=", "none", rep ? "pass" : "fail",
+    rep ? "the body was edited" : "the body arrived unchanged");
+  var us = !!hit("skiptarget.gif");
+  add(S, "$urlskip=", "none", us ? "pass" : "fail",
+    us ? "went straight to the target" : "followed the redirector");
+  frameScript(add, S, "$csp=", "full", "csp");
+  permRow(add, S, "$permissions=", "none");
+  frameScript(add, S, "$inline-script", "none", "inline");
+  standin("$empty", "none", "empty.json", "empty");
+  standin("$mp4", "none", "silent.mp4", "mp4");
+
+  // ---- 2.5 control and exceptions
+  S = "2.5 Control and exceptions";
+  netRow(S, "$important", "full", "important.gif");
+  var bf = !!hit("badfilter.gif");
+  add(S, "$badfilter", "full", bf ? "pass" : "fail",
+    bf ? "the cancelled rule did not block" : "still blocked, so $badfilter was ignored");
+  var ex = !!hit("exception.gif");
+  add(S, "@@ exception", "full", ex ? "pass" : "fail",
+    ex ? "the exception let it through" : "still blocked");
+  ghideRow(add, S, "$ghide", "full");
+  frameRow(add, S, "$ehide", "none", "ehide", "visible", "visible");
+  frameRow(add, S, "$shide", "none", "shide", "hidden", "visible", true);
+  var gb = FRAMES.genericblock;
+  add(S, "$genericblock", "none", gb && gb.probe === "loaded" ? "pass" : "fail",
+    !gb ? "the frame never reported"
+        : "the generic network rule " + (gb.probe === "loaded" ? "was switched off in the frame" : "still applied"));
+
+  // ---- 1. rule families
+  S = "1. Rule families";
+  add(S, "Cosmetic hide ##", "full", hidden(".t-hide") ? "pass" : "fail", state(".t-hide"));
+  add(S, "Cosmetic exception #@#", "full", !hidden(".t-unhide") ? "pass" : "fail", state(".t-unhide"));
+  genericRow(add, S, "Generic hide (no domain)", "full", ".t-generic");
+  add(S, "CSS declaration #$#", "none", hidden(".t-cssdecl") ? "pass" : "fail", state(".t-cssdecl"));
+  add(S, "Procedural + style #$?#", "none",
+    styled(".t-procstyle", "outlineColor", "rgb(4, 5, 6)") ? "pass" : "fail", outline(".t-procstyle"));
+  var stripped = typeof window.__t_htmlfilter === "undefined";
+  add(S, "HTML filter ##^", "none", stripped ? "pass" : "fail",
+    stripped ? "the marked script was stripped" : "the script ran");
+  respHeaderRow(add, S, "HTML filter ##^responseheader()", "none");
+
+  // ---- 3. cosmetic operators
+  S = "3. Cosmetic operators";
+  var op = function (name, doc, ok, detail) { add(S, name, doc, ok ? "pass" : "fail", detail); };
+  op(":style()", "full", styled(".t-style", "outlineColor", "rgb(1, 2, 3)"), outline(".t-style"));
+  op(":has()", "full", hidden(".t-has"), state(".t-has"));
+  ifRow(add, S, ":if()", "none");
+  op(":not()", "full", hidden(".t-not > .t-drop") && !hidden(".t-not > .t-keep"),
+    "target " + state(".t-not > .t-drop") + ", excluded one " + state(".t-not > .t-keep"));
+  op(":has-text()", "full", hidden(".t-hastext"), state(".t-hastext"));
+  op(":upward()", "full", hidden(".t-upward-outer"), state(".t-upward-outer"));
+  op(":remove()", "full", gone(".t-remove"), gone(".t-remove") ? "node removed" : "node still there");
+  op(":remove-attr()", "full", attrGone(".t-removeattr", "data-ad"),
+    attrGone(".t-removeattr", "data-ad") ? "attribute gone" : "attribute still set");
+  op(":remove-class()", "full", classGone(".t-removeclass", "t-adclass"),
+    classGone(".t-removeclass", "t-adclass") ? "class gone" : "class still set");
+  op(":xpath()", "full", hidden("#t-xpath-target"), state("#t-xpath-target"));
+  op(":matches-css()", "full", hidden(".t-matchescss"), state(".t-matchescss"));
+  op(":matches-path()", "full", hidden(".t-matchespath"), state(".t-matchespath"));
+  op(":matches-attr()", "full", hidden(".t-matchesattr"), state(".t-matchesattr"));
+  op(":min-text-length()", "full", hidden(".t-mintext"), state(".t-mintext"));
+  othersRow(add, S, ":others()", "none");
+  op(":watch-attr()", "none", hidden(".t-watchattr"), state(".t-watchattr"));
+  op(":nth-ancestor()", "none", hidden(".t-nthancestor-outer"), state(".t-nthancestor-outer"));
+  op(":matches-prop()", "none", hidden(".t-matchesprop"), state(".t-matchesprop"));
+  op(":matches-media()", "none", hidden(".t-matchesmedia"), state(".t-matchesmedia"));
+
+  // ---- scriptlets
+  S = "Scriptlets";
+  add(S, "+js(set-constant)", "full", window.__t_setconst === true ? "pass" : "fail",
+    "window.__t_setconst is " + String(window.__t_setconst));
+  var aopr = false;
+  try { void window.__t_aopr; } catch (e) { aopr = true; }
+  add(S, "+js(abort-on-property-read)", "full", aopr ? "pass" : "fail",
+    aopr ? "reading the property threw" : "reading the property was fine");
+  add(S, "+js(nowebrtc)", "full", webrtcBlocked() ? "pass" : "fail",
+    webrtcBlocked() ? "RTCPeerConnection is neutered" : "RTCPeerConnection still works");
+  var cancelled = typeof window.__t_scriptlet_exception === "undefined";
+  add(S, "Scriptlet exception #@#+js()", "full", cancelled ? "pass" : "fail",
+    cancelled ? "the cancelled scriptlet did not run" : "it ran anyway");
+
+  // ---- no setup needed
+  S = "No setup needed";
+  var online = client("baitControl").ok;
+  BAIT.forEach(function (b) {
+    var c = client("bait:" + b.name);
+    if (!online) {
+      return add(S, b.name, "full", "fail", "this browser has no route to the internet");
+    }
+    add(S, b.name, "full", c.ok ? "fail" : "pass",
+      c.ok ? "the request went out and completed"
+           : "the request was stopped or diverted before it completed");
+  });
+  ["#ad-slot", "#ad_banner", "#banner-ad", ".sponsored-link"].forEach(function (sel) {
+    genericRow(add, S, "generic hide " + sel, "full", sel);
+  });
+
+  return t;
+}
+
+function outline(sel) {
+  var e = el(sel);
+  return e ? "outline colour " + getComputedStyle(e).outlineColor : "element removed";
+}
+
+function attrGone(sel, attr) {
+  var e = el(sel);
+  return !!e && !e.hasAttribute(attr);
+}
+
+function classGone(sel, cls) {
+  var e = el(sel);
+  return !!e && !e.classList.contains(cls);
+}
+
+// An option is only proven when the rule that should bite does and its twin,
+// which differs only in that option's value, does not.
+function twoSided(add, sec, name, doc, blockedFrag, allowedFrag, twinLabel) {
+  var bit = !hit(blockedFrag), twin = !!hit(allowedFrag);
+  add(sec, name, doc, bit && twin ? "pass" : "fail",
+    (bit ? "blocked" : "not blocked") + ", " +
+    twinLabel + " " + (twin ? "allowed" : "blocked too"));
+}
+
+function paramRow(add, sec, name, doc, fragment) {
+  var h = hit(fragment);
+  if (!h) return add(sec, name, doc, "fail", "the request never arrived, so there is no query to read");
+  var stripped = h.url.indexOf("utm_source") === -1, kept = h.url.indexOf("keep=1") !== -1;
+  add(sec, name, doc, stripped && kept ? "pass" : "fail",
+    "the server saw " + (h.url.split("?")[1] || "no query string"));
+}
+
+// The frame's inline script posts back when it runs, so silence means it was
+// stopped. Silence also means the frame document never arrived, which is not
+// the same thing — check the server saw it before reading anything into it.
+function frameScript(add, sec, name, doc, key) {
+  if (!hit(key + ".html")) return add(sec, name, doc, "fail", "the frame document never arrived");
+  add(sec, name, doc, !FRAMES[key] ? "pass" : "fail",
+    !FRAMES[key] ? "the frame's inline script did not run" : "the frame's inline script ran");
+}
+
+// $permissions= adds a Permissions-Policy header. The frame is embedded with
+// allow="fullscreen", so document.fullscreenEnabled is true in it unless the
+// header took that away. Fullscreen is the one policy-gated feature a page can
+// read without asking the user for anything.
+function permRow(add, sec, name, doc) {
+  var m = FRAMES.perm;
+  if (!m) return add(sec, name, doc, "fail", "the frame never reported");
+  add(sec, name, doc, m.fullscreen ? "fail" : "pass",
+    m.fullscreen ? "fullscreen is still allowed in the frame"
+                 : "fullscreen was taken away from the frame");
+}
+
+// respheader.html is the one asset served with a Set-Cookie. If the rule
+// stripped that header the frame finds no cookie of its own name.
+function respHeaderRow(add, sec, name, doc) {
+  var m = FRAMES.respheader;
+  if (!m) return add(sec, name, doc, "fail", "the frame never reported");
+  add(sec, name, doc, m.cookie ? "fail" : "pass",
+    m.cookie ? "the cookie the header set arrived" : "the header was stripped, no cookie");
+}
+
+// :if() is judged in a frame on the third-party host — see rules.txt for why it
+// is kept off this page. If that host does not reach this server the frame
+// never reports, and the row says that rather than blaming the blocker.
+function ifRow(add, sec, name, doc) {
+  var m = FRAMES.ifop;
+  if (!m) {
+    return add(sec, name, doc, "fail",
+      "the frame on " + TPHOST + " never reported, so this could not be tested");
+  }
+  add(sec, name, doc, m.ifop === "none" ? "pass" : "fail",
+    m.ifop === "none" ? "hidden" : "still shown");
+}
+
+// :others() is judged in its own frame — see others.html for why.
+function othersRow(add, sec, name, doc) {
+  var m = FRAMES.others;
+  if (!m) return add(sec, name, doc, "fail", "the frame never reported");
+  var ok = m.drop === "none" && m.keep !== "none";
+  add(sec, name, doc, ok ? "pass" : "fail",
+    "the kept node is " + (m.keep === "none" ? "hidden too" : "still shown") +
+    ", the others are " + (m.drop === "none" ? "hidden" : "still shown"));
+}
+
+// $ghide is judged in a sub-frame, which is the only frame this page can make.
+// Many blockers honour it only on a top-level document, so a red row here can
+// mean the blocker scoped it that way rather than ignored it — the detail says
+// which.
+function ghideRow(add, sec, name, doc) {
+  var m = FRAMES.ghide;
+  if (!m) return add(sec, name, doc, "fail", "the frame never reported");
+  if (NO_REGISTRABLE) {
+    return add(sec, name, doc, "fail",
+      location.hostname + " has no registrable domain, so generic cosmetic rules are off either way");
+  }
+  if (m.generic !== "none") return add(sec, name, doc, "pass", "generic rules were switched off");
+  add(sec, name, doc, "fail",
+    "generic rules still applied in the sub-frame, which is the only frame this page can make");
+}
+
+function frameRow(add, sec, name, doc, key, wantGeneric, wantSpecific, needsGeneric) {
+  var m = FRAMES[key];
+  if (!m) return add(sec, name, doc, "fail", "the frame never reported");
+  if (needsGeneric && NO_REGISTRABLE) {
+    return add(sec, name, doc, "fail",
+      location.hostname + " has no registrable domain, so generic cosmetic rules are off either way");
+  }
+  var g = m.generic === "none" ? "hidden" : "visible";
+  var s = m.specific === "none" ? "hidden" : "visible";
+  add(sec, name, doc, g === wantGeneric && s === wantSpecific ? "pass" : "fail",
+    "generic " + g + ", specific " + s);
+}
+
+// ---------------------------------------------------------------- rendering
+
+// Plain text of the last run, for the Copy result button. One line per row, so
+// a whole run pastes into a bug report without a table coming with it.
+function reportText(rows, counts) {
+  var out = "tester " + counts.pass + " enforced / " + counts.fail + " not enforced\n" +
+    "page: " + location.href + "\n" +
+    "ua: " + navigator.userAgent + "\n";
+  var section = null;
+  rows.forEach(function (r) {
+    if (r.sec !== section) { section = r.sec; out += "\n# " + section + "\n"; }
+    out += (r.verdict === "pass" ? "PASS " : "FAIL ") + r.name +
+      " | " + r.detail + " | this project: " + r.doc + " | uBO: " + r.ubo + "\n";
+  });
+  return out;
+}
+
+function render(rows) {
+  var counts = { pass: 0, fail: 0 };
+  var out = "", section = null;
+  rows.forEach(function (r) {
+    counts[r.verdict]++;
+    if (r.sec !== section) {
+      if (section !== null) out += "</tbody></table>";
+      section = r.sec;
+      out += "<h2>" + esc(section) + "</h2><table><thead><tr><th>Rule</th><th>Result</th>" +
+        "<th>What happened</th><th>This project</th><th>uBO</th></tr></thead><tbody>";
+    }
+    out += "<tr><td><code>" + esc(r.name) + "</code></td>" +
+      "<td><span class='tag " + r.verdict + "'>" + label(r.verdict) + "</span></td>" +
+      "<td>" + esc(r.detail) + "</td><td class='muted'>" + esc(r.doc) + "</td>" +
+      "<td class='muted'>" + esc(r.ubo) + "</td></tr>";
+  });
+  out += "</tbody></table>";
+  out += "<h2>Manual tests</h2><p class='muted'>These open a tab or a window, so they cannot run " +
+    "unattended.</p><p><button id='doc-test'>Run document test</button> " +
+    "<button id='popup-test'>Run popup test</button> <span id='manual' class='muted'></span></p>";
+  document.getElementById("results").innerHTML = out;
+  document.getElementById("n-pass").textContent = counts.pass;
+  document.getElementById("n-fail").textContent = counts.fail;
+  var copy = document.getElementById("copyresult");
+  var status = document.getElementById("status");
+  copy.disabled = false;
+  copy.onclick = function () {
+    copyText(reportText(rows, counts)).then(function (ok) {
+      status.textContent = ok ? "result copied" : "could not copy";
+    }, function () { status.textContent = "could not copy"; });
+  };
+  document.getElementById("doc-test").onclick = function () { manual("net-doc.html", "$document", true); };
+  document.getElementById("popup-test").onclick = function () { manual("popup.html", "$popup", false); };
+}
+
+function label(v) { return v === "pass" ? "enforced" : "not enforced"; }
+
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, function (c) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+  });
+}
+
+function manual(name, what, newTab) {
+  var note = document.getElementById("manual");
+  note.textContent = "opening…";
+  var w = window.open(A(name), newTab ? "_blank" : "tester-popup", newTab ? "" : "width=400,height=300");
+  setTimeout(function () {
+    refreshHits().then(function () {
+      var arrived = !!hit(name);
+      if (w) { try { w.close(); } catch (e) {} }
+      note.textContent = what + ": " +
+        (arrived ? "the request arrived, so it was not blocked" : "the request never reached the server") +
+        (w ? "" : ", and the window did not open");
+    });
+  }, 2000);
+}
+
+// ---------------------------------------------------------------- driver
+
+function refreshHits() {
+  return fetch("/test/hits?run=" + RUN, { cache: "no-store" })
+    .then(function (r) { return r.json(); })
+    .then(function (j) { HITS = j.hits || []; });
+}
+
+function settle(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+async function run() {
+  var btn = document.getElementById("run");
+  var status = document.getElementById("status");
+  var now = document.getElementById("now");
+  btn.disabled = true;
+
+  for (var i = 0; i < PHASES.length; i++) {
+    var p = PHASES[i];
+    status.textContent = "step " + (i + 1) + " of " + PHASES.length + ": " + p.title;
+    now.innerHTML = "<strong>" + esc(p.title) + "</strong><br><span class='muted'>" +
+      p.types.map(function (x) { return "<code>" + esc(x) + "</code>"; }).join(" ") + "</span>";
+    p.go();
+    await settle(PACE);
+  }
+
+  now.innerHTML = "";
+  status.textContent = "waiting for the last requests to finish…";
+  await settle(2500);
+  status.textContent = "reading what happened…";
+  await refreshHits();
+  for (var k in CLIENT) {
+    CLIENT[k] = await Promise.resolve(CLIENT[k]).catch(function () { return { ok: false }; });
+  }
+  render(tests());
+  status.textContent = "done — run " + RUN;
+  btn.disabled = false;
+  // A run edits the fixtures (nodes removed, attributes stripped), so a second
+  // pass would judge leftovers. Reload for a clean one.
+  btn.textContent = "Run again";
+  btn.onclick = function () { location.reload(); };
+}
+
+document.getElementById("run").onclick = run;
+if (location.hash === "#auto") run();
+</script>
+</body>
+</html>

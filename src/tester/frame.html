@@ -1,0 +1,44 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>tester frame {{NAME}}</title>
+<style>body{font:13px sans-serif;margin:0;padding:4px}div{padding:2px}</style>
+<div class="t-generic">generic-hide bait</div>
+<div class="t-specific">specific-hide bait</div>
+<!-- Only the frame served from the third-party host has an :if() rule aimed at
+     this; everywhere else it is an unused div. See rules.txt for why it is kept
+     off the main page. -->
+<div class="t-if"><span class="t-needle">x</span>if() bait</div>
+<script>
+// Inline on purpose: if a $csp rule reached this frame, this never runs and the
+// parent sees no message at all. That silence is the test.
+(function () {
+  function send(extra) {
+    var read = function (sel) {
+      var el = document.querySelector(sel);
+      if (!el) return 'gone';
+      return getComputedStyle(el).display;
+    };
+    var msg = {
+      frame: '{{NAME}}',
+      inline: true,
+      generic: read('.t-generic'),
+      specific: read('.t-specific'),
+      ifop: read('.t-if'),
+      // The ##^responseheader() probe: only respheader.html is served with this
+      // cookie, so everywhere else it is false and no row reads it.
+      cookie: document.cookie.indexOf('t{{RUN}}=1') !== -1,
+      fullscreen: document.fullscreenEnabled === true,
+      probe: extra || 'none'
+    };
+    parent.postMessage(msg, '*');
+  }
+  // Read the DOM on a fixed delay rather than the moment the probe settles:
+  // cosmetic rules are applied asynchronously and a fast probe beats them to it.
+  var probe = 'timeout';
+  fetch('/test/a/{{RUN}}/gb-probe.gif', { cache: 'no-store' }).then(
+    function () { probe = 'loaded'; },
+    function () { probe = 'blocked'; }
+  );
+  setTimeout(function () { send(probe); }, 900);
+})();
+</script>

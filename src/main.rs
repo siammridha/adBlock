@@ -15,6 +15,7 @@ use adBlock::proxy::api::{
     ProxyRuntime,
 };
 use adBlock::stats::api::{LoggingConfig, SharedState, StaticInfo};
+use adBlock::tester::api::Tester;
 use adBlock::web;
 use adBlock::Result;
 
@@ -157,6 +158,7 @@ async fn main() -> Result<()> {
             dns_runtime.clone(),
             egress.clone(),
             certs.clone(),
+            Arc::new(Tester::load(&data_dir)),
         );
         tokio::spawn(async move {
             if let Err(e) = admin.serve(addr).await {

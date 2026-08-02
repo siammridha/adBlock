@@ -1,0 +1,27 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>tester frame others</title>
+<style>body{font:13px sans-serif;margin:0;padding:4px}div{padding:2px}</style>
+<!--
+  :others() hides every sibling from the kept element up to <body>, which is the
+  point of it on a real page and ruinous on a page of fixtures: on the main
+  tester page it hid nearly every other fixture, so unrelated rows read as
+  enforced when their own rule had done nothing. It gets a document to itself.
+-->
+<div class="t-others"><div>keepme</div><div class="t-others-drop">drop me</div></div>
+<div class="t-others-bystander">bystander</div>
+<script>
+// Read on a delay: cosmetic rules are applied asynchronously.
+setTimeout(function () {
+  var read = function (sel) {
+    var el = document.querySelector(sel);
+    return el ? getComputedStyle(el).display : 'gone';
+  };
+  parent.postMessage({
+    frame: 'others',
+    drop: read('.t-others-drop'),
+    keep: read('.t-others > div'),
+    bystander: read('.t-others-bystander')
+  }, '*');
+}, 900);
+</script>
