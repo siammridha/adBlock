@@ -1,11 +1,14 @@
-//! What a block decision is allowed to carry, and where that choice is kept.
+//! Which rules Adblock is allowed to act on, and where that choice is kept.
 //!
-//! Three switches: serving a `$redirect` stand-in body in place of a blocked
-//! resource, reporting the `$removeparam` cleaned URL, and handing over the
-//! `$csp` directives for a page. All three belong to Adblock rather than the
-//! caller — the caller asks one thing ("blocked?") and gets these back inside
-//! the answer without asking for them, so Adblock is the module that decides
-//! whether to offer them.
+//! Three switches for what a block decision may carry: serving a `$redirect`
+//! stand-in body in place of a blocked resource, reporting the `$removeparam`
+//! cleaned URL, and adding the `$csp` directives to a page. Three more for what
+//! Adblock puts into a page it rewrites: cosmetic CSS, uBO scriptlets, and the
+//! live-DOM runtime.
+//!
+//! All six belong to Adblock rather than the caller. The caller hands over a
+//! request or a response and takes back what Adblock made of it; it never asks
+//! for a rule to be applied, so it has nothing to switch off.
 //!
 //! Persisted to Adblock's own settings file. Nothing else writes that file, so
 //! saving rewrites it whole.
@@ -22,6 +25,9 @@ pub struct DecisionOverrides {
     pub redirect: Option<bool>,
     pub removeparam: Option<bool>,
     pub csp: Option<bool>,
+    pub cosmetic: Option<bool>,
+    pub scriptlets: Option<bool>,
+    pub runtime: Option<bool>,
 }
 
 impl DecisionOverrides {
@@ -35,6 +41,9 @@ impl DecisionOverrides {
             redirect: flag("redirect"),
             removeparam: flag("removeparam"),
             csp: flag("csp"),
+            cosmetic: flag("cosmetic"),
+            scriptlets: flag("scriptlets"),
+            runtime: flag("runtime"),
         })
     }
 }
@@ -44,12 +53,26 @@ pub struct DecisionSettings {
     pub redirect: bool,
     pub removeparam: bool,
     pub csp: bool,
+    pub cosmetic: bool,
+    pub scriptlets: bool,
+    pub runtime: bool,
+}
+
+impl DecisionSettings {
+    /// Whether anything at all would go into a page. Nothing on means Adblock
+    /// has no reason to read a response body.
+    pub(crate) fn injects(&self) -> bool {
+        self.cosmetic || self.scriptlets || self.runtime
+    }
 }
 
 pub struct DecisionPolicy {
     redirect: AtomicBool,
     removeparam: AtomicBool,
     csp: AtomicBool,
+    cosmetic: AtomicBool,
+    scriptlets: AtomicBool,
+    runtime: AtomicBool,
     path: PathBuf,
 }
 
@@ -65,6 +88,9 @@ impl DecisionPolicy {
             redirect: AtomicBool::new(saved.redirect.unwrap_or(true)),
             removeparam: AtomicBool::new(saved.removeparam.unwrap_or(true)),
             csp: AtomicBool::new(saved.csp.unwrap_or(true)),
+            cosmetic: AtomicBool::new(saved.cosmetic.unwrap_or(true)),
+            scriptlets: AtomicBool::new(saved.scriptlets.unwrap_or(true)),
+            runtime: AtomicBool::new(saved.runtime.unwrap_or(true)),
             path,
         };
         // Seed the file a fresh install does not have yet, so every switch is
@@ -88,20 +114,26 @@ impl DecisionPolicy {
             redirect: self.redirect.load(Ordering::Relaxed),
             removeparam: self.removeparam.load(Ordering::Relaxed),
             csp: self.csp.load(Ordering::Relaxed),
+            cosmetic: self.cosmetic.load(Ordering::Relaxed),
+            scriptlets: self.scriptlets.load(Ordering::Relaxed),
+            runtime: self.runtime.load(Ordering::Relaxed),
         }
     }
 
     /// Apply an update and persist it. Takes effect on the next request — the
-    /// switches are read per decision, nothing is rebuilt.
+    /// switches are read per decision and per page, nothing is rebuilt.
     pub fn apply(&self, upd: &DecisionOverrides) -> DecisionSettings {
-        if let Some(v) = upd.redirect {
-            self.redirect.store(v, Ordering::Relaxed);
-        }
-        if let Some(v) = upd.removeparam {
-            self.removeparam.store(v, Ordering::Relaxed);
-        }
-        if let Some(v) = upd.csp {
-            self.csp.store(v, Ordering::Relaxed);
+        for (flag, cell) in [
+            (upd.redirect, &self.redirect),
+            (upd.removeparam, &self.removeparam),
+            (upd.csp, &self.csp),
+            (upd.cosmetic, &self.cosmetic),
+            (upd.scriptlets, &self.scriptlets),
+            (upd.runtime, &self.runtime),
+        ] {
+            if let Some(v) = flag {
+                cell.store(v, Ordering::Relaxed);
+            }
         }
         if let Err(e) = self.persist() {
             tracing::warn!(error = %e, "persisting adblock settings");
@@ -120,6 +152,9 @@ impl DecisionPolicy {
                 redirect: Some(snap.redirect),
                 removeparam: Some(snap.removeparam),
                 csp: Some(snap.csp),
+                cosmetic: Some(snap.cosmetic),
+                scriptlets: Some(snap.scriptlets),
+                runtime: Some(snap.runtime),
             },
         )
     }
@@ -139,10 +174,13 @@ mod tests {
 
     #[test]
     fn parse_picks_up_only_present_flags() {
-        let o = DecisionOverrides::parse(br#"{"redirect":false}"#).unwrap();
+        let o = DecisionOverrides::parse(br#"{"redirect":false,"cosmetic":false}"#).unwrap();
         assert_eq!(o.redirect, Some(false));
+        assert_eq!(o.cosmetic, Some(false));
         assert_eq!(o.removeparam, None, "an absent key leaves that switch alone");
         assert_eq!(o.csp, None);
+        assert_eq!(o.scriptlets, None);
+        assert_eq!(o.runtime, None);
         assert!(DecisionOverrides::parse(b"[]").is_err(), "not an object");
         assert!(DecisionOverrides::parse(b"nonsense").is_err());
     }
@@ -156,22 +194,44 @@ mod tests {
 
         let policy = DecisionPolicy::load(path.clone());
         let s = policy.settings();
-        assert_eq!((s.redirect, s.removeparam, s.csp), (true, true, true), "defaults are on");
+        assert_eq!(
+            (s.redirect, s.removeparam, s.csp, s.cosmetic, s.scriptlets, s.runtime),
+            (true, true, true, true, true, true),
+            "defaults are on"
+        );
         assert!(path.exists(), "a fresh install gets a settings file to edit");
 
         let snap = policy.apply(&DecisionOverrides {
             redirect: Some(false),
-            removeparam: None,
             csp: Some(false),
+            runtime: Some(false),
+            ..Default::default()
         });
         assert_eq!(
-            (snap.redirect, snap.removeparam, snap.csp),
-            (false, true, false),
+            (snap.redirect, snap.removeparam, snap.csp, snap.cosmetic, snap.runtime),
+            (false, true, false, true, false),
             "untouched switch stays"
         );
+        assert!(snap.injects(), "cosmetic and scriptlets are still on");
 
         let reloaded = DecisionPolicy::load(path.clone()).settings();
-        assert_eq!((reloaded.redirect, reloaded.removeparam, reloaded.csp), (false, true, false));
+        assert_eq!(
+            (reloaded.redirect, reloaded.removeparam, reloaded.csp, reloaded.runtime),
+            (false, true, false, false)
+        );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn nothing_to_inject_when_every_page_switch_is_off() {
+        let policy = DecisionPolicy::all_on();
+        assert!(policy.settings().injects());
+        let snap = policy.apply(&DecisionOverrides {
+            cosmetic: Some(false),
+            scriptlets: Some(false),
+            runtime: Some(false),
+            ..Default::default()
+        });
+        assert!(!snap.injects(), "no page edits left to make");
     }
 }

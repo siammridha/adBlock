@@ -1,5 +1,9 @@
 //! The proxy server: accepts connections, MITMs HTTPS via CONNECT, and blocks
 //! or forwards each request.
+//!
+//! It never edits a request or a response. Every request and every response
+//! goes past the Adblock API on the way through, and whatever Adblock hands
+//! back is what gets forwarded.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -16,7 +20,6 @@ use tokio_rustls::TlsAcceptor;
 use crate::adblock::api::AdBlocker;
 use crate::proxy::error::{Error, Result};
 use crate::proxy::exclusions::ExclusionStore;
-use crate::proxy::injection::InjectionPolicy;
 use crate::stats::api::Metric;
 use super::http_client::HttpClient;
 use crate::proxy::blackhole::{BlackholeProbe, EgressResolver, Resolver};
@@ -107,69 +110,43 @@ pub struct Proxy {
 }
 
 struct Inner {
-    max_inspect_bytes: usize,
     adblock: Arc<AdBlocker>,
     exclusions: Arc<ExclusionStore>,
-    injection: Arc<InjectionPolicy>,
     ca: Arc<CertAuthority>,
     state: Arc<SharedState>,
     client: Arc<dyn Upstream>,
     blackhole: BlackholeProbe,
-    /// The live-DOM cosmetic script, built once from the admin address. `None`
-    /// when no admin server is running for it to talk to.
-    cosmetic_runtime: Option<String>,
 }
 
 impl Proxy {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
-        max_inspect_bytes: usize,
         adblock: Arc<AdBlocker>,
         exclusions: Arc<ExclusionStore>,
-        injection: Arc<InjectionPolicy>,
         ca: Arc<CertAuthority>,
         state: Arc<SharedState>,
         client: Arc<HttpClient>,
         egress: Arc<crate::proxy::egress::EgressPolicy>,
-        admin_listen: &str,
     ) -> Self {
         let resolver = Arc::new(EgressResolver(egress));
-        Self::with_seams(
-            max_inspect_bytes,
-            adblock,
-            exclusions,
-            injection,
-            ca,
-            state,
-            client,
-            resolver,
-            admin_listen,
-        )
+        Self::with_seams(adblock, exclusions, ca, state, client, resolver)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn with_seams(
-        max_inspect_bytes: usize,
         adblock: Arc<AdBlocker>,
         exclusions: Arc<ExclusionStore>,
-        injection: Arc<InjectionPolicy>,
         ca: Arc<CertAuthority>,
         state: Arc<SharedState>,
         client: Arc<dyn Upstream>,
         resolver: Arc<dyn Resolver>,
-        admin_listen: &str,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
-                max_inspect_bytes,
                 adblock,
                 exclusions,
-                injection,
                 ca,
                 state,
                 client,
                 blackhole: BlackholeProbe::new(resolver),
-                cosmetic_runtime: crate::proxy::html::cosmetic_runtime(admin_listen),
             }),
         }
     }
@@ -289,7 +266,10 @@ impl Proxy {
 
         let plan = pipeline::plan_connect(
             &authority,
-            |url| self.inner.adblock.check(url, "", "document"),
+            |url| {
+                let decision = self.inner.adblock.check(url, "", "document");
+                decision.blocked.then(|| decision.attribution.display())
+            },
             |host| self.inner.exclusions.matching(host),
         );
         if let pipeline::ConnectVerdict::Deny { blocked_by } = &plan.verdict {
@@ -422,14 +402,7 @@ impl Proxy {
     {
         let state = &self.inner.state;
 
-        let mut req = req;
-        let plan = pipeline::plan_request(&req, secure, self.inner.adblock.enabled())?;
-        if plan.injection_target {
-            req.headers_mut().insert(
-                hyper::header::ACCEPT_ENCODING,
-                hyper::header::HeaderValue::from_static("identity"),
-            );
-        }
+        let plan = pipeline::plan_request(&req, secure)?;
 
         let mut decision = self
             .inner
@@ -497,15 +470,10 @@ impl Proxy {
 
         state.count(Metric::Requests, &plan.host);
 
-        // `$removeparam`: forward the cleaned URL. The browser is never told, so
-        // the parameter stays in its address bar; only the request the site
-        // receives is stripped.
-        if let Some(clean) = &decision.rewritten_url {
-            if let Some(uri) = pipeline::rewrite_uri(&parts.uri, clean) {
-                tracing::debug!(from = %plan.url, to = %clean, "stripped tracking parameters");
-                parts.uri = uri;
-            }
-        }
+        // Adblock decides what the request going upstream looks like — a
+        // `$removeparam` cleaned URL, and asking for a body it can read. The
+        // proxy hands over the request and forwards what comes back.
+        self.inner.adblock.filter_request(&decision, &mut parts);
 
         let fwd = Request::from_parts(parts, Full::new(req_bytes.clone()));
 
@@ -542,102 +510,41 @@ impl Proxy {
                 capture::headers_text(upstream.headers())
             )
         });
-        let mut response = self
-            .inspect_response(upstream, &plan.url, plan.injection_target, exchange)
-            .await?;
-
-        // `$csp`: add the rule's directives to the page. Appended rather than
-        // set, because two CSP headers are enforced together and the site's own
-        // policy has to keep applying. This happens after injection on purpose —
-        // injecting strips the site's CSP so our own inline script can run, and
-        // adding ours before that would strip it again.
-        if let Some(csp) = &decision.csp {
-            match hyper::header::HeaderValue::from_str(csp) {
-                Ok(v) => {
-                    tracing::debug!(url = %plan.url, %csp, "adding content-security-policy");
-                    response
-                        .headers_mut()
-                        .append(hyper::header::CONTENT_SECURITY_POLICY, v);
-                }
-                Err(e) => tracing::warn!(error = %e, %csp, "unusable $csp directives"),
-            }
-        }
-
-        Ok(response)
+        self.filter_response(upstream, &plan.url, &decision, exchange).await
     }
 
-    async fn inspect_response(
+    /// Run the upstream response past Adblock and forward what it hands back.
+    /// The proxy only decides whether to buffer the body or stream it — Adblock
+    /// answers that too, because only Adblock knows whether it needs to read it.
+    async fn filter_response(
         &self,
         resp: Response<ResBody>,
         url: &str,
-        injection_target: bool,
+        decision: &crate::adblock::api::BlockDecision,
         exchange: Exchange,
     ) -> std::result::Result<Response<ResBody>, BoxError> {
-        if pipeline::response_wants_inspection(injection_target, resp.status(), resp.headers()) {
-            // The switches are the proxy's: ask Adblock only for what is on.
-            let inject = self.inner.injection.settings();
-            let injection = inject
-                .scriptlets
-                .then(|| self.inner.adblock.scriptlet_injection(url))
-                .flatten();
-            // The scan below sees the page only as it was served, so on a page
-            // that builds itself in JavaScript the runtime is the only thing
-            // that can ask about the class and id names appearing later. Its
-            // own switch: it costs a script tag and a request per page, which
-            // is worth turning off separately from the CSS.
-            let runtime = match inject.runtime {
-                true => self.inner.cosmetic_runtime.as_deref().unwrap_or(""),
-                false => "",
-            };
-            // Procedural rules — `:has-text`, `:upward`, `:remove()` — are
-            // cosmetic filtering that a stylesheet cannot carry, so they ride
-            // the cosmetic switch and go out with the page rather than being
-            // asked for later. Adblock hands back the finished evaluator with
-            // the page's rules already in it, the same as the CSS and the
-            // scriptlets: what those rules mean is adblock's to decide.
-            let procedural = inject
-                .cosmetic
-                .then(|| self.inner.adblock.procedural_injection(url))
-                .flatten()
-                .unwrap_or_default();
-            let script = [
-                injection.as_ref().map_or("", |i| i.js.as_str()),
-                procedural.as_str(),
-                runtime,
-            ]
-            .into_iter()
-            .filter(|part| !part.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n");
-            // Any inline script of ours needs the page's CSP out of the way,
-            // scriptlet or runtime alike.
-            let plan =
-                pipeline::plan_inspection(!script.is_empty(), self.inner.max_inspect_bytes);
-            let (mut parts, body) = resp.into_parts();
-            let resp_enc = capture::BodyEncoding::from_headers(&parts.headers);
-            let collected = body.collect().await?.to_bytes();
-            capture::response_body(&exchange, &collected, resp_enc);
-            let mutated = plan.apply(&mut parts, &collected, &script, |classes, ids| {
-                if inject.cosmetic {
-                    self.inner.adblock.cosmetic_css(url, classes, ids)
-                } else {
-                    String::new()
-                }
-            });
-            if let Some(html) = mutated {
-                if let Some(inj) = &injection {
-                    tracing::info!(%url, scriptlets = %inj.names.join(", "), "scriptlets injected");
-                    exchange.attach(CaptureSlot::Scriptlets, || inj.names.join(", "));
-                }
-                return Ok(Response::from_parts(parts, full_body(Bytes::from(html))));
-            }
-            return Ok(Response::from_parts(parts, full_body(collected)));
+        let adblock = &self.inner.adblock;
+        let buffer = adblock.reads_body(decision, resp.status().as_u16(), resp.headers());
+        let (mut parts, body) = resp.into_parts();
+        let resp_enc = capture::BodyEncoding::from_headers(&parts.headers);
+
+        if !buffer {
+            // Header-only work — a `$csp` rule — still belongs to Adblock.
+            adblock.filter_response(url, decision, &mut parts, None);
+            let captured = capture::stream_response(exchange, body, resp_enc);
+            return Ok(Response::from_parts(parts, captured.boxed()));
         }
 
-        let (parts, body) = resp.into_parts();
-        let resp_enc = capture::BodyEncoding::from_headers(&parts.headers);
-        let captured = capture::stream_response(exchange, body, resp_enc);
-        Ok(Response::from_parts(parts, captured.boxed()))
+        let collected = body.collect().await?.to_bytes();
+        capture::response_body(&exchange, &collected, resp_enc);
+        let edit = adblock.filter_response(url, decision, &mut parts, Some(&collected));
+        if !edit.scriptlets.is_empty() {
+            let names = edit.scriptlets.join(", ");
+            tracing::info!(%url, scriptlets = %names, "scriptlets injected");
+            exchange.attach(CaptureSlot::Scriptlets, || names.clone());
+        }
+        let out = edit.body.map_or(collected, Bytes::from);
+        Ok(Response::from_parts(parts, full_body(out)))
     }
 }
 
@@ -743,7 +650,6 @@ mod tests {
     use crate::proxy::blackhole::BLACKHOLE_TTL;
     use crate::adblock::api::MemoryListStore;
     use crate::adblock::api::AdblockConfig;
-    use crate::proxy::config::PerformanceConfig;
     use crate::stats::api::LoggingConfig;
     use crate::stats::api::StaticInfo;
     use hyper::StatusCode;
@@ -828,32 +734,35 @@ mod tests {
         }
     }
 
-    fn test_proxy(
-        rules: &[&str],
-        client: Arc<dyn Upstream>,
-        resolver: Arc<dyn Resolver>,
-    ) -> (Proxy, Arc<SharedState>) {
+    /// An Adblock built for these tests. It has no admin endpoint, so no
+    /// live-DOM runtime goes into a page unless the test asks for one with
+    /// `set_admin_endpoint`.
+    fn blocker(rules: &[&str], scriptlet_resources: std::path::PathBuf) -> Arc<AdBlocker> {
         let cfg = AdblockConfig {
             enabled: true,
             custom_rules: rules.iter().map(|s| s.to_string()).collect(),
             data_dir: std::path::PathBuf::from("/nonexistent-for-tests"),
             auto_update_hours: 0,
-            inject_scriptlets: false,
-            scriptlet_resources: std::path::PathBuf::new(),
+            inject_scriptlets: !scriptlet_resources.as_os_str().is_empty(),
+            scriptlet_resources,
         };
-        let (adblock, _curation) =
-            crate::adblock::api::with_store(&cfg, Arc::new(MemoryListStore::new())).unwrap();
-        proxy_with_adblock(adblock, client, resolver, InjectionPolicy::all_on(), "")
+        crate::adblock::api::with_store(&cfg, Arc::new(MemoryListStore::new()))
+            .unwrap()
+            .0
     }
 
-    // `admin` is the admin server's address, which is what decides whether the
-    // live-DOM cosmetic runtime gets injected. Empty means no admin server.
+    fn test_proxy(
+        rules: &[&str],
+        client: Arc<dyn Upstream>,
+        resolver: Arc<dyn Resolver>,
+    ) -> (Proxy, Arc<SharedState>) {
+        proxy_with_adblock(blocker(rules, std::path::PathBuf::new()), client, resolver)
+    }
+
     fn proxy_with_adblock(
         adblock: Arc<AdBlocker>,
         client: Arc<dyn Upstream>,
         resolver: Arc<dyn Resolver>,
-        injection: Arc<InjectionPolicy>,
-        admin: &str,
     ) -> (Proxy, Arc<SharedState>) {
         let state = Arc::new(SharedState::new(
             StaticInfo {
@@ -873,17 +782,7 @@ mod tests {
         let exclusions = Arc::new(ExclusionStore::load(
             std::path::PathBuf::from("/nonexistent-for-tests/excluded-domains.conf"),
         ));
-        let proxy = Proxy::with_seams(
-            PerformanceConfig::default().max_inspect_bytes,
-            adblock,
-            exclusions,
-            injection,
-            ca,
-            state.clone(),
-            client,
-            resolver,
-            admin,
-        );
+        let proxy = Proxy::with_seams(adblock, exclusions, ca, state.clone(), client, resolver);
         (proxy, state)
     }
 
@@ -1222,23 +1121,10 @@ mod tests {
             ],
             b"<html><head></head><body>x</body></html>",
         );
-        let cfg = AdblockConfig {
-            enabled: true,
-            custom_rules: vec!["example.com##.ad-banner".into()],
-            data_dir: std::path::PathBuf::from("/nonexistent-for-tests"),
-            auto_update_hours: 0,
-            inject_scriptlets: false,
-            scriptlet_resources: std::path::PathBuf::new(),
-        };
-        let (adblock, _curation) =
-            crate::adblock::api::with_store(&cfg, Arc::new(MemoryListStore::new())).unwrap();
-        let (proxy, _state) = proxy_with_adblock(
-            adblock,
-            upstream,
-            FixedResolver::to(&["93.184.216.34:80"]),
-            InjectionPolicy::all_on(),
-            "127.0.0.1:8081",
-        );
+        let adblock = blocker(&["example.com##.ad-banner"], std::path::PathBuf::new());
+        adblock.set_admin_endpoint("127.0.0.1:8081");
+        let (proxy, _state) =
+            proxy_with_adblock(adblock, upstream, FixedResolver::to(&["93.184.216.34:80"]));
 
         let req = get("http://example.com/", &[("accept", "text/html")]);
         let resp = proxy.handle_forward(req, false).await.unwrap();
@@ -1285,29 +1171,11 @@ mod tests {
             vec![("content-type", "text/html")],
             b"<html><head></head><body>x</body></html>",
         );
-        let injection = InjectionPolicy::all_on();
-        injection.apply(&crate::proxy::injection::InjectionOverrides {
-            cosmetic: Some(false),
-            scriptlets: None,
-            runtime: None,
-        });
-        let cfg = AdblockConfig {
-            enabled: true,
-            custom_rules: vec!["example.com##.ad-banner".into()],
-            data_dir: std::path::PathBuf::from("/nonexistent-for-tests"),
-            auto_update_hours: 0,
-            inject_scriptlets: false,
-            scriptlet_resources: std::path::PathBuf::new(),
-        };
-        let (adblock, _curation) =
-            crate::adblock::api::with_store(&cfg, Arc::new(MemoryListStore::new())).unwrap();
-        let (proxy, _state) = proxy_with_adblock(
-            adblock,
-            upstream,
-            FixedResolver::to(&["93.184.216.34:80"]),
-            injection,
-            "127.0.0.1:8081",
-        );
+        let adblock = blocker(&["example.com##.ad-banner"], std::path::PathBuf::new());
+        adblock.set_admin_endpoint("127.0.0.1:8081");
+        adblock.set_decisions(br#"{"cosmetic": false}"#).unwrap();
+        let (proxy, _state) =
+            proxy_with_adblock(adblock, upstream, FixedResolver::to(&["93.184.216.34:80"]));
 
         let req = get("http://example.com/", &[("accept", "text/html")]);
         let resp = proxy.handle_forward(req, false).await.unwrap();
@@ -1327,29 +1195,11 @@ mod tests {
             vec![("content-type", "text/html")],
             b"<html><head></head><body><div class=\"ad-banner\">ad</div></body></html>",
         );
-        let injection = InjectionPolicy::all_on();
-        injection.apply(&crate::proxy::injection::InjectionOverrides {
-            cosmetic: None,
-            scriptlets: None,
-            runtime: Some(false),
-        });
-        let cfg = AdblockConfig {
-            enabled: true,
-            custom_rules: vec!["example.com##.ad-banner".into()],
-            data_dir: std::path::PathBuf::from("/nonexistent-for-tests"),
-            auto_update_hours: 0,
-            inject_scriptlets: false,
-            scriptlet_resources: std::path::PathBuf::new(),
-        };
-        let (adblock, _curation) =
-            crate::adblock::api::with_store(&cfg, Arc::new(MemoryListStore::new())).unwrap();
-        let (proxy, _state) = proxy_with_adblock(
-            adblock,
-            upstream,
-            FixedResolver::to(&["93.184.216.34:80"]),
-            injection,
-            "127.0.0.1:8081",
-        );
+        let adblock = blocker(&["example.com##.ad-banner"], std::path::PathBuf::new());
+        adblock.set_admin_endpoint("127.0.0.1:8081");
+        adblock.set_decisions(br#"{"runtime": false}"#).unwrap();
+        let (proxy, _state) =
+            proxy_with_adblock(adblock, upstream, FixedResolver::to(&["93.184.216.34:80"]));
 
         let req = get("http://example.com/", &[("accept", "text/html")]);
         let resp = proxy.handle_forward(req, false).await.unwrap();
@@ -1404,16 +1254,7 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let cfg = AdblockConfig {
-            enabled: true,
-            custom_rules: vec!["example.com##+js(sptest)".into()],
-            data_dir: std::path::PathBuf::from("/nonexistent-for-tests"),
-            auto_update_hours: 0,
-            inject_scriptlets: true,
-            scriptlet_resources: res_path,
-        };
-        let (adblock, _curation) =
-            crate::adblock::api::with_store(&cfg, Arc::new(MemoryListStore::new())).unwrap();
+        let adblock = blocker(&["example.com##+js(sptest)"], res_path);
         let upstream = CannedUpstream::new(
             StatusCode::OK,
             vec![
@@ -1423,13 +1264,8 @@ mod tests {
             ],
             b"<html><head></head><body>x</body></html>",
         );
-        let (proxy, state) = proxy_with_adblock(
-            adblock,
-            upstream,
-            FixedResolver::to(&["93.184.216.34:80"]),
-            InjectionPolicy::all_on(),
-            "",
-        );
+        let (proxy, state) =
+            proxy_with_adblock(adblock, upstream, FixedResolver::to(&["93.184.216.34:80"]));
 
         let mut obs = state.observe();
         let req = get("http://example.com/", &[("accept", "text/html")]);

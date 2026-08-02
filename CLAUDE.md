@@ -13,5 +13,6 @@ Modules: `adblock/`, `proxy/`, `dns/`, `stats/`, `webapp/`.
 - No shared utils, no shared config, no shared state. Duplicate code instead.
 - No top-level code implements functionality — root only wires modules together.
 - `webapp/` implements nothing. It instantiates modules and calls their APIs. It never validates input; the owning module validates and returns success/error.
-
+- `proxy/` never changes a request or a response. No URL rewriting, no filtering headers, no HTML edits, no script or style injection, no stand-in bodies. It passes each request and each response to the `adblock/` API and forwards exactly what comes back. Setting hop-by-hop headers, `Host`, and TLS termination is the proxy's own job and is fine.
+- `adblock/` applies every rule and makes every change to a request or response body or URL. The switches for those changes (`$redirect`, `$removeparam`, `$csp`, cosmetic filtering, scriptlets) live in `adblock/`, not in the caller.
 Before adding code, ask: which module owns this? Put it there. Full rationale: @docs/ARCHITECTURE.md

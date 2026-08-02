@@ -1,7 +1,21 @@
-//! HTML rewriting: injects cosmetic-filter CSS and scriptlet JS, and extracts
-//! classes/ids for cosmetic filtering.
+//! Rewriting a page on its way through: splicing in cosmetic CSS and scriptlet
+//! JS, and reading back the class and id names a page carries.
+//!
+//! This lives in Adblock because every edit here is a filter rule being
+//! applied. The caller hands over the bytes it received and forwards the bytes
+//! it gets back; it never edits a page itself.
 
 const COSMETIC_RUNTIME: &str = include_str!("cosmetic_runtime.js");
+
+/// Pages bigger than this are forwarded untouched. Splicing costs a full copy
+/// of the page, and a page carrying ads is never this big.
+pub(crate) const MAX_EDIT_BYTES: usize = 4 * 1024 * 1024;
+
+/// The response headers an inline script of ours cannot run under.
+pub(crate) const CSP_HEADERS: [&str; 2] = [
+    "content-security-policy",
+    "content-security-policy-report-only",
+];
 
 /// The live-DOM cosmetic script, pointed at the admin server's cosmetic
 /// endpoint. `None` when there is no admin server to ask, in which case pages
@@ -30,6 +44,21 @@ fn endpoint(host: &str, port: &str) -> String {
         "__COSMETIC_ENDPOINT__",
         &format!("http://{host}:{port}/api/cosmetic"),
     )
+}
+
+/// Whether a response is one we can rewrite at all: a successful, uncompressed
+/// HTML page. Anything else is forwarded as it arrived.
+pub(crate) fn response_is_editable(status: u16, headers: &hyper::HeaderMap) -> bool {
+    let is_html = headers
+        .get(hyper::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .eq_ignore_ascii_case("text/html");
+    (200..300).contains(&status) && is_html && !headers.contains_key(hyper::header::CONTENT_ENCODING)
 }
 
 /// Splice the CSS and scriptlets into a served page.
@@ -126,6 +155,19 @@ pub(crate) fn html_classes_and_ids(html: &str) -> (Vec<String>, Vec<String>) {
         }
     }
     (classes.into_iter().collect(), ids.into_iter().collect())
+}
+
+/// Rebuild a request URI from the cleaned absolute URL a `$removeparam` rule
+/// produced, keeping the form the client used: absolute-form for a plain proxy
+/// request, origin-form inside a MITM'd connection. Returns `None` when the
+/// cleaned URL cannot be parsed, so the request forwards unchanged.
+pub(crate) fn rewrite_uri(original: &hyper::Uri, clean: &str) -> Option<hyper::Uri> {
+    let clean: hyper::Uri = clean.parse().ok()?;
+    if original.authority().is_some() {
+        Some(clean)
+    } else {
+        clean.path_and_query()?.as_str().parse().ok()
+    }
 }
 
 #[cfg(test)]
@@ -226,7 +268,7 @@ mod tests {
             eprintln!("node not installed; skipping the runtime syntax check");
             return;
         }
-        let path = std::env::temp_dir().join(format!("proxy-js-check-{}.js", std::process::id()));
+        let path = std::env::temp_dir().join(format!("adblock-js-check-{}.js", std::process::id()));
         std::fs::write(&path, cosmetic_runtime("127.0.0.1:8081").unwrap()).unwrap();
         let out = std::process::Command::new("node").arg("--check").arg(&path).output().unwrap();
         assert!(
@@ -242,5 +284,46 @@ mod tests {
         let out = inject_into_html(b"<html><head></head></html>", "", "hook()").unwrap();
         let s = String::from_utf8(out).unwrap();
         assert!(s.contains("}catch(e){}document.currentScript.remove()</script>"), "{s}");
+    }
+
+    fn headers(pairs: &[(&str, &str)]) -> hyper::HeaderMap {
+        let mut h = hyper::HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(
+                hyper::header::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                v.parse().unwrap(),
+            );
+        }
+        h
+    }
+
+    #[test]
+    fn editable_only_for_successful_uncompressed_html() {
+        assert!(response_is_editable(200, &headers(&[("content-type", "text/html; charset=utf-8")])));
+        assert!(!response_is_editable(
+            200,
+            &headers(&[("content-type", "text/html"), ("content-encoding", "gzip")])
+        ));
+        assert!(!response_is_editable(200, &headers(&[("content-type", "application/json")])));
+        assert!(!response_is_editable(404, &headers(&[("content-type", "text/html")])));
+    }
+
+    #[test]
+    fn removeparam_rewrite_keeps_the_form_the_client_used() {
+        let absolute: hyper::Uri = "http://e.com/x?a=1&utm_source=ad".parse().unwrap();
+        assert_eq!(
+            rewrite_uri(&absolute, "http://e.com/x?a=1").unwrap(),
+            "http://e.com/x?a=1",
+            "an absolute-form request stays absolute"
+        );
+
+        let origin: hyper::Uri = "/x?a=1&utm_source=ad".parse().unwrap();
+        assert_eq!(
+            rewrite_uri(&origin, "https://e.com/x?a=1").unwrap(),
+            "/x?a=1",
+            "inside a MITM'd connection only the path and query go on the wire"
+        );
+
+        assert!(rewrite_uri(&origin, "not a url").is_none(), "unparseable leaves the URI alone");
     }
 }

@@ -55,12 +55,24 @@ fn network_rule_blocks_host() {
     assert!(!b.check("https://cdn.example.org/x.js", "", "script").blocked);
 }
 
+/// Adblock rewrites the page itself: the caller hands over the bytes it
+/// received and forwards the bytes it gets back.
 #[test]
-fn cosmetic_rule_produces_hide_css() {
+fn cosmetic_rule_is_spliced_into_the_page() {
     let b = blocker(&["example.com##.ad-banner"]);
-    let css = b.cosmetic_css("https://example.com/", &[], &[]);
-    assert!(css.contains(".ad-banner"), "css was: {css}");
-    assert!(css.contains("display:none"));
+    let page = b"<html><head></head><body>x</body></html>";
+
+    let filtered = |url: &str| -> String {
+        let decision = b.check(url, url, "document");
+        assert!(decision.wants_body, "a page is a page Adblock wants to read");
+        let mut parts = hyper::Response::builder().status(200).body(()).unwrap().into_parts().0;
+        let edit = b.filter_response(url, &decision, &mut parts, Some(page));
+        String::from_utf8(edit.body.unwrap_or_else(|| page.to_vec())).unwrap()
+    };
+
+    let html = filtered("https://example.com/");
+    assert!(html.contains(".ad-banner"), "page was: {html}");
+    assert!(html.contains("display:none"));
     // A different site shouldn't get this site-specific rule.
-    assert!(!b.cosmetic_css("https://other.test/", &[], &[]).contains(".ad-banner"));
+    assert!(!filtered("https://other.test/").contains(".ad-banner"));
 }

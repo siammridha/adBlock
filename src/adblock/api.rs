@@ -16,5 +16,5 @@ pub use super::settings::DecisionSettings;
 pub use super::updater::{ScriptletUpdater, UBO_TARBALL_PAGE};
 pub use super::{
     from_config, with_store, AdBlocker, AdblockConfig, BlockAttribution, BlockDecision,
-    ListCuration, ListEntry, MemoryListStore, Redirect,
+    ListCuration, ListEntry, MemoryListStore, Redirect, ResponseEdit,
 };

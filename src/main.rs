@@ -11,8 +11,8 @@ use std::time::Instant;
 use adBlock::adblock::api::{spawn_blocklist_updater, BlocklistFetcher, ScriptletUpdater};
 use adBlock::dns::api::{DnsConfig, DnsRuntime, DnsService};
 use adBlock::proxy::api::{
-    CertAuthority, CertStore, EgressPolicy, ExclusionStore, HttpClient, InjectionPolicy, Proxy,
-    ProxyBaseConfig, ProxyRuntime,
+    CertAuthority, CertStore, EgressPolicy, ExclusionStore, HttpClient, Proxy, ProxyBaseConfig,
+    ProxyRuntime,
 };
 use adBlock::stats::api::{LoggingConfig, SharedState, StaticInfo};
 use adBlock::web;
@@ -59,6 +59,9 @@ async fn main() -> Result<()> {
     // Each module owns and creates its own data directories; the entry point
     // only hands each one its base config and wires the results together.
     let (adblock, curation) = adBlock::adblock::api::from_config(&adblock_cfg)?;
+    // Where a filtered page sends the questions it has after it was served.
+    // Wiring, like the address itself: adblock only embeds what it is handed.
+    adblock.set_admin_endpoint(&admin_listen);
 
     // The active CA (from the certificates tab) wins over the config CA; when
     // nothing is selected, active_paths() returns the config paths. Switching is
@@ -99,7 +102,6 @@ async fn main() -> Result<()> {
         state.clone(),
     )?;
     let egress = EgressPolicy::load(proxy_base.server.settings_path(), dns.clone());
-    let injection = InjectionPolicy::load(proxy_base.server.settings_path());
 
     // Each module owns its outbound networking: the proxy's pooled client
     // dials through the egress policy, adblock fetches lists with its own
@@ -117,17 +119,12 @@ async fn main() -> Result<()> {
     let fetcher = Arc::new(BlocklistFetcher::new(curation.clone(), fetch_client));
 
     let proxy = Proxy::new(
-        proxy_base.performance.max_inspect_bytes,
         adblock.clone(),
         exclusions.clone(),
-        injection.clone(),
         ca,
         state.clone(),
         client,
         egress.clone(),
-        // Where the live-DOM cosmetic script sends its questions. Wiring, like
-        // the address itself: the proxy only embeds what the root hands it.
-        &admin_listen,
     );
     // Each service owns its lifecycle behind its settings interface. On first
     // run each writes its own settings file from built-in defaults; an existing
@@ -159,7 +156,6 @@ async fn main() -> Result<()> {
             proxy_runtime.clone(),
             dns_runtime.clone(),
             egress.clone(),
-            injection.clone(),
             certs.clone(),
         );
         tokio::spawn(async move {

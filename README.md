@@ -49,11 +49,11 @@ An intercepting HTTP/HTTPS proxy in Rust that blocks ads and trackers:
    client ─────► │  proxy                                      │
    (browser,     │   ├─ CONNECT ─► host rule? ─► drop / MITM    │
     OS proxy)    │   │                 └─ terminate TLS (ca)    │
-                 │   ├─ adblock (network decision)              │
+                 │   ├─ adblock (what happens to this request?) │
                  │   ├─ dns     (resolve the target host)       │
-                 │   └─ response:                               │
-                 │        ├─ HTML ─► inject cosmetic CSS + JS   │
-                 │        └─ else ─► stream through             │
+                 │   └─ response ─► adblock ─► forward as-is    │
+                 │        (adblock rewrites the page; the       │
+                 │         proxy never edits one itself)        │
                  └─────────────────────────────────────────────┘
                                      │
                                      ▼  re-originated TLS (webpki + extra roots)
@@ -69,8 +69,8 @@ allowed dependency edges, and how they are enforced are in
 
 | Module    | Owns                                                                                |
 |-----------|-------------------------------------------------------------------------------------|
-| `adblock` | Filter engine and block decisions (including `$redirect` bodies, `$removeparam` URLs and `$csp` directives), cosmetic CSS and procedural rules, the uBO scriptlet library, blocklist storage/fetching/auto-update, custom filters, the rule tester. |
-| `proxy`   | The accept loop, plain-HTTP forwarding, CONNECT/MITM, the signing CA and managed cert store, MITM exclusions, its pooled upstream HTTP client, egress policy (resolver-only, IPv6), injection toggles. |
+| `adblock` | Filter engine and block decisions (including `$redirect` bodies, `$removeparam` URLs and `$csp` directives), rewriting the pages that pass through (cosmetic CSS, procedural rules, scriptlets, the live-DOM runtime), the uBO scriptlet library, blocklist storage/fetching/auto-update, custom filters, the rule tester. |
+| `proxy`   | The accept loop, plain-HTTP forwarding, CONNECT/MITM, the signing CA and managed cert store, MITM exclusions, its pooled upstream HTTP client, egress policy (resolver-only, IPv6). It changes no request and no response: every one goes past the adblock API and whatever comes back is what it forwards. |
 | `dns`     | The DNS listener, cache, upstream pool (UDP/TCP/DoT/DoH) and health, rewrites, ECH stripping and probing. |
 | `stats`   | Counters, the rolling 24 h window, the event log, the request/query logs and their rotating files on disk, body capture storage and decoding, retention. |
 | `web`     | Nothing of its own. It instantiates the modules, calls their APIs, and renders the dashboard + JSON API on `admin_listen`. |
@@ -95,10 +95,10 @@ cargo build --release
 > | File (under `data/settings/`) | Owner | Holds |
 > |---|---|---|
 > | `proxy-server.json`       | proxy | proxy listener: `enabled`, `listen` |
-> | `proxy-settings.json`     | proxy | egress (`resolver_only`, `disable_ipv6`) and injection (`cosmetic`, `scriptlets`, `runtime`) |
+> | `proxy-settings.json`     | proxy | egress (`resolver_only`, `disable_ipv6`) |
 > | `excluded-domains.conf`   | proxy | domains tunneled blind, one per line (`!` prefix = switched off) |
 > | `active-ca.json`          | proxy | which managed CA signs leaves |
-> | `adblock.json`            | adblock | what a decision may carry: `redirect`, `removeparam`, `csp` |
+> | `adblock.json`            | adblock | which rules adblock may act on: `redirect`, `removeparam`, `csp`, `cosmetic`, `scriptlets`, `runtime` |
 > | `dns-server.json`         | dns   | DNS listener: `enabled`, `listen` |
 > | `dns-settings.json`       | dns   | upstreams, mode, bootstrap, cache size, TTL bounds, ECH |
 > | `dns-rewrites.conf`       | dns   | local DNS records (`!` prefix = switched off) |
@@ -217,11 +217,12 @@ With `admin_listen` set (default `127.0.0.1:8081`), open
 - **Custom filters** — the hand-maintained rule list.
 - **Blocklists** — view/add/edit/delete lists, and refresh them from source.
 - **Excluded** — domains tunneled blind, no MITM.
-- **Settings** (proxy) — resolver-only egress, IPv6 off, and the cosmetic-CSS,
-  scriptlet, and live-DOM runtime injection switches.
-- **Settings** (adblocker) — whether a block decision may serve a `$redirect`
-  stand-in body, whether `$removeparam` strips tracking parameters, and whether
-  `$csp` directives are added to the page.
+- **Settings** (proxy) — resolver-only egress and IPv6 off.
+- **Settings** (adblocker) — which rules adblock may act on: whether a block
+  decision may serve a `$redirect` stand-in body, whether `$removeparam` strips
+  tracking parameters, whether `$csp` directives are added to the page, and the
+  cosmetic-CSS, scriptlet, and live-DOM runtime switches for what goes into a
+  page.
 - **Scriptlets** — the loaded uBO scriptlet library (searchable), plus a live
   feed of which scriptlets fired into which pages.
 - **Rule tester** — check any URL against the current rules without sending
@@ -251,15 +252,15 @@ JSON API (all on `admin_listen`):
 | `/api/scriptlets/update` | POST     | refresh the scriptlet library from uBO master  |
 | `/api/blocklists`        | GET/POST | list / add-append-replace-delete / enable-disable |
 | `/api/blocklist?name=`   | GET      | one list's raw rule text (for editing)         |
-| `/api/adblock`           | GET      | adblock settings: `redirect`, `removeparam`, `csp` |
-| `/api/adblock/config`    | POST     | set `redirect`, `removeparam`, `csp`           |
+| `/api/adblock`           | GET      | adblock settings: `redirect`, `removeparam`, `csp`, `cosmetic`, `scriptlets`, `runtime` |
+| `/api/adblock/config`    | POST     | set any of those six switches                  |
 | `/api/check`             | POST     | test a URL against rules (`{url,type?,source?}`)|
 | `/api/cosmetic`          | POST     | generic cosmetic CSS for class/id names a live page grew (`{url,classes,ids}`); CORS-open, called by the injected runtime, not the dashboard |
 | `/api/exclusions`        | GET/POST | domains that bypass MITM (add / delete / enable / disable) |
 | `/api/server`            | GET      | proxy + DNS listener status (enabled / listen / running) |
 | `/api/server/config`     | POST     | start/stop or rebind the proxy & DNS listeners live (persisted) |
-| `/api/proxy`             | GET      | proxy settings: egress + injection             |
-| `/api/proxy/config`      | POST     | set `resolver_only`, `disable_ipv6`, `cosmetic`, `scriptlets`, `runtime` |
+| `/api/proxy`             | GET      | proxy settings: egress policy                  |
+| `/api/proxy/config`      | POST     | set `resolver_only`, `disable_ipv6`            |
 | `/api/dns`               | GET      | resolver status: upstreams + health, cache, settings |
 | `/api/dns/flush`         | POST     | clear the DNS response cache                   |
 | `/api/dns/test`          | POST     | test a domain against the DNS filter (`{domain}`) |
@@ -306,11 +307,11 @@ changes nothing and exposes no controls. Every other endpoint stays same-origin.
   bar. (uBO redirects the browser instead, which also fixes the address bar but
   turns a misfiring rule into a redirect loop.)
 - All three have a switch in the adblocker **Settings** tab, on by default.
-  They are adblock's own, not the proxy's: the proxy asks one thing —
-  "blocked?" — and adblock volunteers the stand-in body, the cleaned URL and the
-  CSP directives inside the answer, so adblock is what decides whether to offer
-  them. Off, a `$redirect` rule blocks plainly, a `$removeparam` rule leaves the
-  URL alone, and a `$csp` rule adds no header.
+  They are adblock's own, not the proxy's: the proxy hands over the request and
+  the response and forwards what adblock makes of them, so it never asks for a
+  rule to be applied and has nothing to switch off. Off, a `$redirect` rule
+  blocks plainly, a `$removeparam` rule leaves the URL alone, and a `$csp` rule
+  adds no header.
 - **Beacons are matched twice.** A `navigator.sendBeacon()` call is a POST with
   `Sec-Fetch-Mode: no-cors` and `Sec-Fetch-Dest: empty` — byte-for-byte what a
   no-cors `fetch()` sends, with no header separating them (uBO is simply told
@@ -318,8 +319,8 @@ changes nothing and exposes no controls. Every other endpoint stays same-origin.
   the fetch it appears to be, and if nothing matched, asked about once more as a
   `ping`, so `$ping` rules apply without `$xhr` rules losing anything. The
   tradeoff: a genuine no-cors `fetch` POST can also be caught by a `$ping` rule.
-- **Cosmetic (`##`) rules** apply only to uncompressed HTML. The proxy requests
-  `Accept-Encoding: identity` for document loads so it can inject the hide-CSS;
+- **Cosmetic (`##`) rules** apply only to uncompressed HTML. Adblock puts
+  `Accept-Encoding: identity` on document loads so it can read the page back;
   compressed HTML streams through unmodified. Text *encoding* is not a
   constraint — splicing happens on raw bytes, so a windows-1252 or Shift_JIS
   page, or one with a single bad byte, is filtered like any other.
@@ -354,18 +355,18 @@ a stylesheet cannot express, and **action rules** (`:remove()`,
 an element invisible, it cannot take it out of the document, and some
 anti-adblock code checks for presence rather than visibility.
 
-Both need a live page, so adblock hands back a small evaluator
-(`src/adblock/procedural_runtime.js`) with the page's own rules already in it
-and the proxy injects it — like the cosmetic CSS and the scriptlets, the proxy
-never reads what it is injecting. What a rule means is adblock's to decide.
-The evaluator walks each rule's operator chain against the real DOM, applies
+Both need a live page, so adblock puts a small evaluator
+(`src/adblock/procedural_runtime.js`) into the page with the page's own rules
+already in it — like the cosmetic CSS and the scriptlets, this happens inside
+adblock and the proxy only forwards the result. What a rule means is adblock's
+to decide. The evaluator walks each rule's operator chain against the real DOM, applies
 the action, and re-runs on
 a debounced `MutationObserver` for content that arrives later. Every action
 checks the page's current state before changing anything, so a pass with
 nothing to do makes no edit — which is both what stops its own edits from
 waking it in a loop, and what lets it re-apply a rule the page has undone.
-Unlike the class/id lookup below it asks the proxy nothing, so it works in
-every browser.
+Unlike the class/id lookup below it asks the admin server nothing, so it works
+in every browser.
 
 The engine is built with its `css-validation` feature on so it classifies these
 correctly — without it the engine treats them as plain CSS and they end up
@@ -376,14 +377,14 @@ injection.
 ### Generic rules and pages that build themselves
 
 Generic rules (`##.adsbox`, matching anywhere) number in the hundreds of
-thousands, so they can't all be sent. Instead the proxy scans the served HTML
+thousands, so they can't all be sent. Instead adblock scans the served HTML
 for class and id names and sends only the generic rules that match one.
 
 That works on a page that arrives as finished HTML. It fails on a page that
 arrives nearly empty and builds itself in JavaScript, which is most large sites
 now — by the time the ad container exists, the one chance to look has passed.
 
-So the proxy also injects a small script that watches for new elements, batches
+So adblock also puts in a small script that watches for new elements, batches
 up any class or id name it hasn't asked about, posts them to `/api/cosmetic` on
 the admin server, and applies the CSS that comes back. Names are deduplicated,
 sent at most 500 per request, and the whole thing stops after 20 rounds so a
@@ -393,7 +394,7 @@ Two things to know about it:
 
 - It has its own switch, **Live-DOM runtime**, next to the cosmetic-CSS one and
   on by default — it costs a script tag and a request per page, so it is worth
-  turning off separately from the CSS. It is injected only when that switch is
+  turning off separately from the CSS. It goes in only when that switch is
   on *and* the admin server is running (`PROXY_ADMIN_LISTEN` non-empty). The
   endpoint URL is built from the configured admin address, with a wildcard bind
   treated as loopback — so a browser on a *different machine* than the proxy
@@ -412,10 +413,10 @@ snippets invoked by `##+js(name, args…)` filter rules (e.g.
 it needs code running in the page.
 
 It's **on by default**. Because it strips Content-Security-Policy site-wide, it
-has its own switch in the dashboard's proxy **Settings** tab, next to the
+has its own switch in the dashboard's adblocker **Settings** tab, next to the
 cosmetic-CSS and live-DOM runtime switches; all three persist to
-`data/settings/proxy-settings.json`. What gets injected is a proxy decision; the
-rules themselves come from adblock.
+`data/settings/adblock.json`. Both the rules and the decision to apply them are
+adblock's; the proxy only forwards the page that comes back.
 
 Adblock loads the library from `data/scriptlets/scriptlets.json` — a JSON array
 of `adblock::resources::Resource` objects (the adblock-rust format). A

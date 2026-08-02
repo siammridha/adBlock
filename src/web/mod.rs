@@ -19,7 +19,6 @@ use crate::dns::api::DnsRuntime;
 use crate::dns::api::DnsService;
 use crate::proxy::api::ProxyRuntime;
 use crate::proxy::api::EgressPolicy;
-use crate::proxy::api::InjectionPolicy;
 use crate::proxy::api::CertStore;
 use crate::proxy::api::ExclusionStore;
 use crate::adblock::api::BlocklistFetcher;
@@ -88,7 +87,6 @@ pub struct Admin {
     proxy_runtime: Arc<ProxyRuntime>,
     dns_runtime: Arc<DnsRuntime>,
     egress: Arc<EgressPolicy>,
-    injection: Arc<InjectionPolicy>,
     certs: Arc<CertStore>,
 }
 
@@ -104,7 +102,6 @@ impl Admin {
         proxy_runtime: Arc<ProxyRuntime>,
         dns_runtime: Arc<DnsRuntime>,
         egress: Arc<EgressPolicy>,
-        injection: Arc<InjectionPolicy>,
         certs: Arc<CertStore>,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -117,7 +114,6 @@ impl Admin {
             proxy_runtime,
             dns_runtime,
             egress,
-            injection,
             certs,
         })
     }
@@ -177,7 +173,7 @@ impl Admin {
                 json_ok(server::server_status_json(&self.proxy_runtime, &self.dns_runtime).await)
             }
             (&Method::GET, "/api/proxy") => {
-                json_ok(proxy_settings_json(&self.egress, &self.injection))
+                json_ok(proxy_settings_json(&self.egress))
             }
             (&Method::GET, "/api/dns") => {
                 json_ok(dns_json(&self.state, &self.dns_runtime.service()))
@@ -216,7 +212,7 @@ impl Admin {
                 edit_server_config(&self.proxy_runtime, &self.dns_runtime, body).await
             }
             "/api/proxy/config" => {
-                edit_proxy_config(&self.state, &self.egress, &self.injection, body)
+                edit_proxy_config(&self.state, &self.egress, body)
             }
             "/api/certs" => certs::edit_certs(&self.certs, &self.state, body),
             "/api/blocklists" => self.add_blocklist(body).await,
@@ -365,7 +361,6 @@ mod tests {
             proxy_runtime,
             dns_runtime,
             egress,
-            crate::proxy::api::InjectionPolicy::all_on(),
             certs,
         )
     }

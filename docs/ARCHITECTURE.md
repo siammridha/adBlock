@@ -66,20 +66,52 @@ The module that owns a piece of data is the module that decides whether it is va
 Callers submit raw input and receive success or a structured error. Callers never
 pre-validate.
 
+### 6. The Proxy moves bytes. It never edits them.
+
+The Proxy does not change a request or a response in any way. It does not rewrite
+URLs, add or drop headers for filtering reasons, edit HTML, inject scripts or styles,
+or swap a body for a stand-in. Every one of those is applying a filter rule, and
+applying filter rules is Adblock's job.
+
+The Proxy hands the request to Adblock and hands the response to Adblock, and it
+forwards whatever comes back. If a request or response needs to be different, Adblock
+returns the different version. The Proxy has no opinion about why.
+
+This means the switches that decide whether a rewrite happens — `$redirect`,
+`$removeparam`, `$csp`, cosmetic filtering, scriptlet injection, and anything added
+later — all belong to Adblock. The Proxy does not ask "should I inject?", because the
+Proxy never injects.
+
+Headers the Proxy sets to do its own job — hop-by-hop headers, connection handling,
+`Host` for the upstream request, TLS termination — are not filtering and are fine.
+The line is simple: if the reason for the change is a filter rule, Adblock makes it.
+
 ---
 
 ## Adblock
 
-**Exposes to Proxy and DNS:** an API to ask whether a given domain or path should be
-blocked, and to retrieve cosmetic filtering rules. A block decision carries what
-to do about it as well as the verdict: a stand-in body to serve instead
-(`$redirect`), or a cleaned URL to forward (`$removeparam`). Adblock decodes
-both; the caller only picks the response. The switches for those two also belong
-to Adblock, not to the caller: the caller asks one thing — is this blocked? — and
-gets them back inside the answer without asking, so Adblock is what decides
-whether to offer them. Compare cosmetic rules and scriptlets, which the Proxy
-asks for deliberately and only when its own injection switches are on — those
-switches are the Proxy's.
+**Exposes to Proxy and DNS:** three things — ask what happens to a request, hand
+over the request, hand over the response.
+
+Asking answers one question: what happens to this request? Blocked, or not. A block
+carries the stand-in body to serve instead (`$redirect`), which Adblock has already
+decoded; the caller only serves it.
+
+Handing over the request lets Adblock make it into the request that goes upstream —
+the `$removeparam` cleaned URL, and asking for a body it can read. The caller does
+not rewrite anything; it sends what it gets back.
+
+Handing over the response works the same way: Adblock returns the response to send
+on. That is where cosmetic rules, scriptlets, the live-DOM runtime and `$csp` headers
+are applied — inside Adblock, on the way through. The caller does not ask for rules
+and does not apply them. It passes bytes in and forwards the bytes that come out.
+Adblock also answers whether it needs a response body at all, so the caller knows
+whether to buffer it or stream it.
+
+Because the callers never apply anything, every switch that turns a rewrite on or off
+lives here: `$redirect`, `$removeparam`, `$csp`, cosmetic filtering, scriptlet
+injection, the live-DOM runtime. Adblock decides whether to make a change; the caller
+never decides whether to ask for one.
 
 **Exposes to the Web App:** APIs for custom filter management, the rule tester,
 blocklist management, and its own settings.
@@ -90,6 +122,8 @@ blocklist management, and its own settings.
 
 - Fetching blocklists, scriptlets, and any other remote resources
 - Parsing and compiling filter rules
+- Applying rules to requests and responses: URL cleaning, stand-in bodies, HTML
+  editing, script and style injection, filtering-related headers
 - Custom filter storage and management
 - The rule tester
 - Its own settings and their persistence
@@ -106,8 +140,12 @@ is invalid. The Web App renders that response.
 **Exposes to the Web App:** APIs to read and update excluded hosts, proxy settings,
 and certificate state.
 
-**Calls:** the Adblock API for block decisions and cosmetic rules; the DNS API to
-resolve hostnames; the Stats API to report traffic and blocking events.
+**Calls:** the Adblock API for request decisions and for response rewriting; the DNS
+API to resolve hostnames; the Stats API to report traffic and blocking events.
+
+The Proxy changes nothing itself. It carries bytes between the client and the upstream
+server, and it runs every request and every response past Adblock on the way. Whatever
+Adblock returns is what the Proxy sends. See core principle 6.
 
 Proxy resolves through the DNS module rather than implementing its own resolver, so
 that rewrites, upstream configuration, and DNS-level blocking apply consistently to
@@ -116,6 +154,7 @@ reach into DNS internals, and DNS never calls back into Proxy.
 
 **Owns internally:**
 
+- Connection handling, TLS termination, and forwarding
 - The excluded-hosts list and its persistence
 - Certificate generation, storage, and rotation — Proxy is currently the only module
   that needs TLS for HTTPS, and certificate handling stays here even if that changes
@@ -177,7 +216,7 @@ owns it.
 ```
 Web App  ──────►  Adblock, Proxy, DNS, Stats
 
-Proxy    ──────►  Adblock (block decisions)
+Proxy    ──────►  Adblock (request decisions, response rewriting)
 DNS      ──────►  Adblock (block decisions)
 
 Proxy    ──────►  DNS     (hostname resolution)
@@ -219,5 +258,8 @@ Before merging, confirm:
 - [ ] No new shared utility, helper, or settings object used by more than one module.
 - [ ] No use of another module's internals — only its exposed API.
 - [ ] Validation lives with the module that owns the data, not the caller.
+- [ ] The Proxy does not edit any request or response. No URL rewriting, no header
+      changes for filtering, no HTML editing, no injection, no stand-in bodies.
+      Adblock returns the changed version; the Proxy forwards it.
 - [ ] The Web App changes are limited to API calls and rendering.
 - [ ] Any new network access, storage, or settings live inside the owning module.

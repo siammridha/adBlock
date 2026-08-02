@@ -46,9 +46,8 @@ impl ServerConfig {
         self.settings_dir().join("excluded-domains.conf")
     }
 
-    /// The proxy's persisted settings: egress policy (resolver-only/IPv6)
-    /// and page injection (cosmetic CSS, scriptlets). One file, one group of
-    /// keys per settings interface.
+    /// The proxy's persisted settings: the egress policy (resolver-only,
+    /// IPv6).
     pub fn settings_path(&self) -> PathBuf {
         self.settings_dir().join("proxy-settings.json")
     }
@@ -67,7 +66,6 @@ pub struct TlsConfig {
 
 #[derive(Debug, Clone)]
 pub struct PerformanceConfig {
-    pub max_inspect_bytes: usize,
     pub upstream_timeout_ms: u64,
 }
 
@@ -93,10 +91,7 @@ impl Default for TlsConfig {
 
 impl Default for PerformanceConfig {
     fn default() -> Self {
-        Self {
-            max_inspect_bytes: 4 * 1024 * 1024,
-            upstream_timeout_ms: 15_000,
-        }
+        Self { upstream_timeout_ms: 15_000 }
     }
 }
 

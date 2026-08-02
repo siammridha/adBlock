@@ -1,9 +1,8 @@
-//! Pure decision logic for a request: where it goes, whether it is blocked,
-//! and whether the response gets inspected or injected.
+//! Pure routing logic for a request: where it goes, and what to call it when
+//! asking Adblock about it. Nothing here changes a request or a response —
+//! that is Adblock's, and the proxy only forwards what Adblock hands back.
 
-use hyper::{HeaderMap, Request, StatusCode};
-
-use super::html::{html_classes_and_ids, inject_into_html};
+use hyper::Request;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -15,7 +14,6 @@ pub(crate) struct RequestPlan {
     pub method: String,
     pub source: String,
     pub req_type: String,
-    pub injection_target: bool,
     /// This request has the exact shape of a `navigator.sendBeacon()` call,
     /// which on the wire is indistinguishable from a no-cors `fetch()`. The
     /// caller should ask a second time as a `ping` before letting it through.
@@ -25,7 +23,6 @@ pub(crate) struct RequestPlan {
 pub(crate) fn plan_request<B>(
     req: &Request<B>,
     secure: bool,
-    adblock_enabled: bool,
 ) -> std::result::Result<RequestPlan, BoxError> {
     let t = target_of(req, secure)?;
     let url = t.url();
@@ -46,7 +43,6 @@ pub(crate) fn plan_request<B>(
     if source.is_empty() && req_type == "document" {
         source = url.clone();
     }
-    let injection_target = adblock_enabled && is_injectable_type(&req_type);
     let maybe_beacon = req_type != "ping" && is_beacon_shaped(req);
     Ok(RequestPlan {
         scheme: t.scheme,
@@ -56,7 +52,6 @@ pub(crate) fn plan_request<B>(
         method: req.method().to_string(),
         source,
         req_type,
-        injection_target,
         maybe_beacon,
     })
 }
@@ -70,83 +65,6 @@ fn is_beacon_shaped<B>(req: &Request<B>) -> bool {
     req.method() == hyper::Method::POST
         && header_is(req, hyper::header::HeaderName::from_static("sec-fetch-mode"), "no-cors")
         && header_is(req, hyper::header::HeaderName::from_static("sec-fetch-dest"), "empty")
-}
-
-/// Rebuild a request URI from the cleaned absolute URL a `$removeparam` rule
-/// produced, keeping the form the client used: absolute-form for a plain proxy
-/// request, origin-form inside a MITM'd connection. Returns `None` when the
-/// cleaned URL cannot be parsed, so the request forwards unchanged.
-pub(crate) fn rewrite_uri(original: &hyper::Uri, clean: &str) -> Option<hyper::Uri> {
-    let clean: hyper::Uri = clean.parse().ok()?;
-    if original.authority().is_some() {
-        Some(clean)
-    } else {
-        clean.path_and_query()?.as_str().parse().ok()
-    }
-}
-
-pub(crate) fn response_wants_inspection(
-    injection_target: bool,
-    status: StatusCode,
-    headers: &HeaderMap,
-) -> bool {
-    injection_target && response_is_injectable(status, headers)
-}
-
-pub(crate) struct InspectPlan {
-    strip_csp: bool,
-    max_inject_bytes: usize,
-}
-
-impl InspectPlan {
-    fn within_cap(&self, len: usize) -> bool {
-        len <= self.max_inject_bytes
-    }
-
-    pub fn apply(
-        &self,
-        parts: &mut hyper::http::response::Parts,
-        body: &[u8],
-        script: &str,
-        cosmetic: impl FnOnce(&[String], &[String]) -> String,
-    ) -> Option<Vec<u8>> {
-        if !self.within_cap(body.len()) {
-            return None;
-        }
-        // Only the class/id scan needs text, and it can be sloppy about bad
-        // bytes: the names it finds are used to look up rules and never written
-        // back into the page, so a mangled character just means one rule misses.
-        let (classes, ids) = html_classes_and_ids(&String::from_utf8_lossy(body));
-        let css = cosmetic(&classes, &ids);
-        let out = inject_into_html(body, &css, script)?;
-        if self.strip_csp {
-            for h in CSP_HEADERS {
-                parts.headers.remove(h);
-            }
-        }
-        parts.headers.remove(hyper::header::CONTENT_LENGTH);
-        Some(out)
-    }
-}
-
-pub(crate) fn plan_inspection(scriptlets_enabled: bool, max_inspect_bytes: usize) -> InspectPlan {
-    InspectPlan {
-        strip_csp: scriptlets_enabled,
-        max_inject_bytes: max_inspect_bytes.max(4 * 1024 * 1024),
-    }
-}
-
-pub(crate) fn response_is_injectable(status: StatusCode, headers: &HeaderMap) -> bool {
-    let is_html = headers
-        .get(hyper::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .split(';')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .eq_ignore_ascii_case("text/html");
-    status.is_success() && is_html && !headers.contains_key(hyper::header::CONTENT_ENCODING)
 }
 
 fn target_of<B>(
@@ -243,15 +161,6 @@ fn header_is<B>(req: &Request<B>, name: hyper::header::HeaderName, want: &str) -
         .is_some_and(|v| v.trim().eq_ignore_ascii_case(want))
 }
 
-pub(crate) fn is_injectable_type(req_type: &str) -> bool {
-    matches!(req_type, "document" | "subdocument")
-}
-
-pub(crate) const CSP_HEADERS: [&str; 2] = [
-    "content-security-policy",
-    "content-security-policy-report-only",
-];
-
 pub(crate) struct ConnectPlan {
     pub host: String,
     pub url: String,
@@ -280,16 +189,17 @@ impl ConnectPlan {
     }
 }
 
+/// `check` answers with the rule that blocked the host, or `None` to let it
+/// through.
 pub(crate) fn plan_connect(
     authority: &str,
-    check: impl FnOnce(&str) -> crate::adblock::api::BlockDecision,
+    check: impl FnOnce(&str) -> Option<String>,
     exclusion: impl FnOnce(&str) -> Option<String>,
 ) -> ConnectPlan {
     let host = authority.split(':').next().unwrap_or("").to_string();
     let url = format!("https://{host}/");
-    let decision = check(&url);
-    let verdict = if decision.blocked {
-        ConnectVerdict::Deny { blocked_by: decision.attribution.display() }
+    let verdict = if let Some(blocked_by) = check(&url) {
+        ConnectVerdict::Deny { blocked_by }
     } else if let Some(excluded_by) = exclusion(&host) {
         ConnectVerdict::BlindTunnel { excluded_by }
     } else {
@@ -313,41 +223,32 @@ mod tests {
     #[test]
     fn plan_absolute_form_request() {
         let r = req("http://example.com/ads.js", &[("accept", "*/*")]);
-        let p = plan_request(&r, false, true).unwrap();
+        let p = plan_request(&r, false).unwrap();
         assert_eq!(p.url, "http://example.com/ads.js", "default port stays out of the URL");
         assert_eq!(p.host, "example.com");
         assert_eq!(p.port, 80);
         assert_eq!(p.req_type, "other");
-        assert!(!p.injection_target);
     }
 
     #[test]
     fn plan_origin_form_recovers_host_header() {
         let r = req("/page", &[("host", "example.com:8443"), ("accept", "text/html")]);
-        let p = plan_request(&r, true, true).unwrap();
+        let p = plan_request(&r, true).unwrap();
         assert_eq!(p.scheme, "https");
         assert_eq!(p.url, "https://example.com:8443/page");
         assert_eq!(p.req_type, "document");
-        assert!(p.injection_target, "HTML navigation should request identity encoding");
     }
 
     #[test]
     fn plan_origin_form_without_host_fails() {
         let r = req("/page", &[]);
-        assert!(plan_request(&r, false, true).is_err());
-    }
-
-    #[test]
-    fn no_identity_rewrite_when_adblock_disabled() {
-        let r = req("/page", &[("host", "example.com"), ("accept", "text/html")]);
-        let p = plan_request(&r, true, false).unwrap();
-        assert!(!p.injection_target);
+        assert!(plan_request(&r, false).is_err());
     }
 
     #[test]
     fn fetch_classified_from_sec_fetch_and_from_write_method() {
         let r = req("http://e.com/api", &[("sec-fetch-dest", "empty")]);
-        assert_eq!(plan_request(&r, false, true).unwrap().req_type, "fetch");
+        assert_eq!(plan_request(&r, false).unwrap().req_type, "fetch");
 
         let r = Request::builder()
             .method(hyper::Method::POST)
@@ -355,9 +256,8 @@ mod tests {
             .header("accept", "*/*")
             .body(())
             .unwrap();
-        let p = plan_request(&r, false, true).unwrap();
+        let p = plan_request(&r, false).unwrap();
         assert_eq!(p.req_type, "fetch");
-        assert!(!p.injection_target, "fetch is not an injection target");
 
         let r = Request::builder()
             .method(hyper::Method::POST)
@@ -365,44 +265,33 @@ mod tests {
             .header("accept", "text/html,application/xhtml+xml")
             .body(())
             .unwrap();
-        assert_eq!(plan_request(&r, false, true).unwrap().req_type, "document");
+        assert_eq!(plan_request(&r, false).unwrap().req_type, "document");
     }
 
     #[test]
-    fn identity_encoding_requested_for_frames_too() {
+    fn a_frame_is_named_a_subdocument() {
         let r = req("http://e.com/frame", &[("sec-fetch-dest", "iframe")]);
-        let p = plan_request(&r, false, true).unwrap();
-        assert_eq!(p.req_type, "subdocument");
-        assert!(p.injection_target);
-    }
-
-    #[test]
-    fn only_documents_and_frames_are_injectable() {
-        assert!(is_injectable_type("document"));
-        assert!(is_injectable_type("subdocument"));
-        assert!(!is_injectable_type("fetch"));
-        assert!(!is_injectable_type("other"));
-        assert!(!is_injectable_type("script"));
+        assert_eq!(plan_request(&r, false).unwrap().req_type, "subdocument");
     }
 
     #[test]
     fn a_top_level_page_without_a_referer_is_its_own_source() {
         let nav = req("http://e.com/page", &[("sec-fetch-dest", "document")]);
-        assert_eq!(plan_request(&nav, false, true).unwrap().source, "http://e.com/page");
+        assert_eq!(plan_request(&nav, false).unwrap().source, "http://e.com/page");
 
         let referred = req(
             "http://e.com/page",
             &[("sec-fetch-dest", "document"), ("referer", "http://other.test/")],
         );
         assert_eq!(
-            plan_request(&referred, false, true).unwrap().source,
+            plan_request(&referred, false).unwrap().source,
             "http://other.test/",
             "a referer we were given always wins"
         );
 
         let frame = req("http://e.com/f", &[("sec-fetch-dest", "iframe")]);
         assert_eq!(
-            plan_request(&frame, false, true).unwrap().source,
+            plan_request(&frame, false).unwrap().source,
             "",
             "a frame has a parent we cannot see; calling it its own would make it first-party"
         );
@@ -414,7 +303,7 @@ mod tests {
             "http://e.com/socket",
             &[("connection", "Upgrade"), ("upgrade", "websocket")],
         );
-        assert_eq!(plan_request(&ws, false, true).unwrap().req_type, "websocket");
+        assert_eq!(plan_request(&ws, false).unwrap().req_type, "websocket");
 
         // Hyperlink auditing is a POST that would otherwise pass for a fetch.
         let ping = Request::builder()
@@ -424,10 +313,10 @@ mod tests {
             .header("content-type", "text/ping")
             .body(())
             .unwrap();
-        assert_eq!(plan_request(&ping, false, true).unwrap().req_type, "ping");
+        assert_eq!(plan_request(&ping, false).unwrap().req_type, "ping");
 
         let plain = req("http://e.com/api", &[("content-type", "application/json")]);
-        assert_eq!(plan_request(&plain, false, true).unwrap().req_type, "other");
+        assert_eq!(plan_request(&plain, false).unwrap().req_type, "other");
     }
 
     #[test]
@@ -443,7 +332,7 @@ mod tests {
             }
             b.body(()).unwrap()
         };
-        let p = plan_request(&beacon(&[]), false, true).unwrap();
+        let p = plan_request(&beacon(&[]), false).unwrap();
         assert_eq!(p.req_type, "fetch", "it really is a fetch on the wire");
         assert!(p.maybe_beacon, "and it may equally be a sendBeacon call");
 
@@ -455,10 +344,10 @@ mod tests {
             .header("sec-fetch-dest", "empty")
             .body(())
             .unwrap();
-        assert!(!plan_request(&cors, false, true).unwrap().maybe_beacon, "cors is not a beacon");
+        assert!(!plan_request(&cors, false).unwrap().maybe_beacon, "cors is not a beacon");
 
         let get = req("http://e.com/x", &[("sec-fetch-mode", "no-cors"), ("sec-fetch-dest", "empty")]);
-        assert!(!plan_request(&get, false, true).unwrap().maybe_beacon, "a GET is not a beacon");
+        assert!(!plan_request(&get, false).unwrap().maybe_beacon, "a GET is not a beacon");
 
         let img = Request::builder()
             .method(hyper::Method::POST)
@@ -467,14 +356,14 @@ mod tests {
             .header("sec-fetch-dest", "image")
             .body(())
             .unwrap();
-        assert!(!plan_request(&img, false, true).unwrap().maybe_beacon, "typed, so not ambiguous");
+        assert!(!plan_request(&img, false).unwrap().maybe_beacon, "typed, so not ambiguous");
 
         let bare = req("http://e.com/x", &[]);
-        assert!(!plan_request(&bare, false, true).unwrap().maybe_beacon, "no headers, no guessing");
+        assert!(!plan_request(&bare, false).unwrap().maybe_beacon, "no headers, no guessing");
 
         // A real `<a ping>` is already named; it must not be asked about twice.
         let ping = beacon(&[("content-type", "text/ping")]);
-        let p = plan_request(&ping, false, true).unwrap();
+        let p = plan_request(&ping, false).unwrap();
         assert_eq!(p.req_type, "ping");
         assert!(!p.maybe_beacon);
     }
@@ -485,187 +374,8 @@ mod tests {
             "http://e.com/x",
             &[("sec-fetch-dest", "script"), ("accept", "text/html")],
         );
-        let p = plan_request(&r, false, true).unwrap();
+        let p = plan_request(&r, false).unwrap();
         assert_eq!(p.req_type, "script");
-    }
-
-    fn resp_headers(pairs: &[(&str, &str)]) -> HeaderMap {
-        let mut h = HeaderMap::new();
-        for (k, v) in pairs {
-            h.insert(
-                hyper::header::HeaderName::from_bytes(k.as_bytes()).unwrap(),
-                v.parse().unwrap(),
-            );
-        }
-        h
-    }
-
-    #[test]
-    fn injectable_only_for_successful_uncompressed_html() {
-        let html = resp_headers(&[("content-type", "text/html; charset=utf-8")]);
-        assert!(response_is_injectable(StatusCode::OK, &html));
-
-        let gz = resp_headers(&[("content-type", "text/html"), ("content-encoding", "gzip")]);
-        assert!(!response_is_injectable(StatusCode::OK, &gz));
-
-        let json = resp_headers(&[("content-type", "application/json")]);
-        assert!(!response_is_injectable(StatusCode::OK, &json));
-
-        let html2 = resp_headers(&[("content-type", "text/html")]);
-        assert!(!response_is_injectable(StatusCode::NOT_FOUND, &html2));
-    }
-
-    #[test]
-    fn inspection_gate_consumes_the_request_time_verdict() {
-        let html = resp_headers(&[("content-type", "text/html")]);
-        assert!(response_wants_inspection(true, StatusCode::OK, &html));
-        assert!(!response_wants_inspection(false, StatusCode::OK, &html));
-        let gz = resp_headers(&[("content-type", "text/html"), ("content-encoding", "gzip")]);
-        assert!(!response_wants_inspection(true, StatusCode::OK, &gz));
-    }
-
-    #[test]
-    fn one_verdict_drives_both_the_request_rewrite_and_the_response_gate() {
-        let html = resp_headers(&[("content-type", "text/html")]);
-
-        let nav = req("http://e.com/", &[("sec-fetch-dest", "document")]);
-        let p = plan_request(&nav, false, true).unwrap();
-        assert!(p.injection_target);
-        assert!(response_wants_inspection(p.injection_target, StatusCode::OK, &html));
-
-        let xhr = req("http://e.com/api", &[("sec-fetch-dest", "empty")]);
-        let p = plan_request(&xhr, false, true).unwrap();
-        assert!(!p.injection_target);
-        assert!(!response_wants_inspection(p.injection_target, StatusCode::OK, &html));
-    }
-
-    fn parts_with(headers: &[(&str, &str)]) -> hyper::http::response::Parts {
-        let mut b = hyper::Response::builder().status(StatusCode::OK);
-        for (k, v) in headers {
-            b = b.header(*k, *v);
-        }
-        b.body(()).unwrap().into_parts().0
-    }
-
-    #[test]
-    fn nothing_to_inject_passes_body_and_headers_through() {
-        let mut parts = parts_with(&[("content-length", "26")]);
-        let plan = plan_inspection(true, 0);
-        assert!(plan
-            .apply(&mut parts, b"<html><head></head></html>", "", |_, _| String::new())
-            .is_none());
-        assert!(parts.headers.contains_key(hyper::header::CONTENT_LENGTH));
-    }
-
-    #[test]
-    fn apply_feeds_the_pages_classes_and_ids_to_the_cosmetic_source() {
-        let mut parts = parts_with(&[("content-length", "60")]);
-        let out = plan_inspection(false, 0)
-            .apply(
-                &mut parts,
-                b"<html><head></head><body><div class=\"adsbox\" id=\"top\">x</div></body></html>",
-                "",
-                |classes, ids| {
-                    assert_eq!(classes, ["adsbox"]);
-                    assert_eq!(ids, ["top"]);
-                    ".adsbox{display:none !important}\n".into()
-                },
-            )
-            .unwrap();
-        let html = String::from_utf8(out).unwrap();
-        assert!(html.contains(".adsbox{display:none !important}"), "html: {html}");
-        assert!(!parts.headers.contains_key(hyper::header::CONTENT_LENGTH));
-    }
-
-    #[test]
-    fn csp_stripped_only_when_a_script_is_injected() {
-        let body = b"<html><head></head></html>";
-        let mut parts = parts_with(&[("content-security-policy", "script-src 'self'")]);
-        assert!(plan_inspection(false, 0)
-            .apply(&mut parts, body, "", |_, _| ".ad{}".into())
-            .is_some());
-        assert!(parts.headers.contains_key("content-security-policy"), "CSS-only keeps the CSP");
-        let mut parts = parts_with(&[
-            ("content-security-policy", "script-src 'self'"),
-            ("content-security-policy-report-only", "script-src 'self'"),
-        ]);
-        let out = plan_inspection(true, 0)
-            .apply(&mut parts, body, "hook()", |_, _| String::new())
-            .unwrap();
-        assert!(String::from_utf8(out).unwrap().contains("hook()"));
-        for h in CSP_HEADERS {
-            assert!(!parts.headers.contains_key(h), "{h} must be stripped");
-        }
-        let mut parts = parts_with(&[("content-security-policy", "script-src 'self'")]);
-        assert!(plan_inspection(true, 0)
-            .apply(&mut parts, body, "", |_, _| String::new())
-            .is_none());
-        assert!(parts.headers.contains_key("content-security-policy"));
-    }
-
-    #[test]
-    fn inject_cap_never_drops_below_4mib() {
-        let body: &[u8] = b"<html><head></head></html>";
-        for configured in [0, 1, 1024] {
-            let plan = plan_inspection(false, configured);
-            let mut parts = parts_with(&[]);
-            assert!(
-                plan.apply(&mut parts, body, "", |_, _| ".ad{}".into()).is_some(),
-                "cap {configured} must not block a small page"
-            );
-        }
-        let mut big = b"<html><head></head><body>".to_vec();
-        big.resize(4 * 1024 * 1024 + 1, b'x');
-        let mut parts = parts_with(&[]);
-        assert!(plan_inspection(false, 0)
-            .apply(&mut parts, &big, "", |_, _| panic!("oversized body must skip the cosmetic source"))
-            .is_none());
-        let mut parts = parts_with(&[]);
-        assert!(plan_inspection(false, 8 * 1024 * 1024)
-            .apply(&mut parts, &big, "", |_, _| ".ad{}".into())
-            .is_some());
-    }
-
-    fn pass_decision() -> crate::adblock::api::BlockDecision {
-        crate::adblock::api::BlockDecision {
-            blocked: false,
-            attribution: crate::adblock::api::BlockAttribution { rule: None, list: None },
-            redirect: None,
-            rewritten_url: None,
-            csp: None,
-        }
-    }
-
-    fn block_by(rule: &str) -> crate::adblock::api::BlockDecision {
-        crate::adblock::api::BlockDecision {
-            blocked: true,
-            attribution: crate::adblock::api::BlockAttribution {
-                rule: Some(rule.to_string()),
-                list: None,
-            },
-            redirect: None,
-            rewritten_url: None,
-            csp: None,
-        }
-    }
-
-    #[test]
-    fn removeparam_rewrite_keeps_the_form_the_client_used() {
-        let absolute: hyper::Uri = "http://e.com/x?a=1&utm_source=ad".parse().unwrap();
-        assert_eq!(
-            rewrite_uri(&absolute, "http://e.com/x?a=1").unwrap(),
-            "http://e.com/x?a=1",
-            "an absolute-form request stays absolute"
-        );
-
-        let origin: hyper::Uri = "/x?a=1&utm_source=ad".parse().unwrap();
-        assert_eq!(
-            rewrite_uri(&origin, "https://e.com/x?a=1").unwrap(),
-            "/x?a=1",
-            "inside a MITM'd connection only the path and query go on the wire"
-        );
-
-        assert!(rewrite_uri(&origin, "not a url").is_none(), "unparseable leaves the URI alone");
     }
 
     #[test]
@@ -674,7 +384,7 @@ mod tests {
             "example.com:443",
             |url| {
                 assert_eq!(url, "https://example.com/", "filters probe the synthetic URL");
-                pass_decision()
+                None
             },
             |host| {
                 assert_eq!(host, "example.com", "exclusions match on the bare host");
@@ -690,7 +400,7 @@ mod tests {
 
     #[test]
     fn connect_to_a_blocked_host_is_denied_with_attribution() {
-        let plan = plan_connect("ads.example:443", |_| block_by("||ads.example^"), |_| None);
+        let plan = plan_connect("ads.example:443", |_| Some("||ads.example^".to_string()), |_| None);
         match plan.verdict {
             ConnectVerdict::Deny { blocked_by } => assert_eq!(blocked_by, "||ads.example^"),
             _ => panic!("blocked host must be denied"),
@@ -701,7 +411,7 @@ mod tests {
     fn connect_to_an_excluded_host_tunnels_blind_and_names_the_rule() {
         let plan = plan_connect(
             "push.apple.com:443",
-            |_| pass_decision(),
+            |_| None,
             |_| Some("apple.com".to_string()),
         );
         assert!(matches!(&plan.verdict, ConnectVerdict::BlindTunnel { excluded_by } if excluded_by == "apple.com"));
@@ -713,7 +423,7 @@ mod tests {
     fn connect_block_wins_over_exclusion_and_skips_the_match() {
         let plan = plan_connect(
             "ads.example:443",
-            |_| block_by("||ads.example^"),
+            |_| Some("||ads.example^".to_string()),
             |_| panic!("exclusions must not be consulted for a blocked host"),
         );
         assert!(matches!(plan.verdict, ConnectVerdict::Deny { .. }));

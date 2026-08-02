@@ -18,6 +18,7 @@ mod curation;
 pub mod error;
 pub mod fetch;
 pub mod maintenance;
+mod rewrite;
 mod scriptlets;
 pub mod settings;
 mod store;
@@ -33,10 +34,9 @@ use scriptlets::ScriptletLibrary as Scriptlets;
 pub const CUSTOM_LIST: &str = "custom";
 const CUSTOM_SOURCE: &str = "config + ui";
 
-/// The in-page evaluator for procedural cosmetic rules. It lives here rather
-/// than with the injection code because what `:has-text` or `:remove()` means
-/// is a filter-rule question, and the rules are adblock's to interpret — the
-/// caller only injects what comes back from `procedural_injection`.
+/// The in-page evaluator for procedural cosmetic rules. What `:has-text` or
+/// `:remove()` means is a filter-rule question, so the rules and the evaluator
+/// that reads them both belong here.
 const PROCEDURAL_RUNTIME: &str = include_str!("procedural_runtime.js");
 
 /// Loosen rule-tester input into a full URL: the tester accepts bare hosts,
@@ -83,10 +83,14 @@ impl EngineCore {
 
 pub struct AdBlocker {
     core: Arc<EngineCore>,
-    /// Whether a decision may carry a `$redirect` body, a `$removeparam`
-    /// URL, or `$csp` directives. Adblock's own switches: the caller never
-    /// asks for any of them.
+    /// Which rules Adblock may act on: `$redirect`, `$removeparam`, `$csp`,
+    /// and what it puts into a page. Adblock's own switches — the caller hands
+    /// over a request or a response and never asks for a rule to be applied.
     decisions: settings::DecisionPolicy,
+    /// The live-DOM cosmetic script, built once from the admin address the root
+    /// wiring hands over. Unset (or `None`) means no admin server for a page to
+    /// ask, so nothing is injected.
+    runtime: std::sync::OnceLock<Option<String>>,
 }
 
 #[derive(Clone, Debug)]
@@ -119,13 +123,19 @@ pub struct BlockDecision {
     /// serving one for a request that was going to be allowed would break it.
     pub redirect: Option<Redirect>,
     /// The request URL with tracking parameters stripped, from `$removeparam`.
-    /// Only meaningful when the request is not blocked.
-    pub rewritten_url: Option<String>,
+    /// Adblock applies it itself in `filter_request`; it is kept here so that
+    /// call does not have to match the rules again.
+    rewritten_url: Option<String>,
     /// Content-Security-Policy directives a `$csp` rule wants added to this
-    /// page, for the caller to append to the response. Only ever set for a
-    /// document or subdocument request that was not blocked — a blocked page
-    /// has no response to add a header to.
-    pub csp: Option<String>,
+    /// page. Adblock adds them itself in `filter_response`; this is kept in the
+    /// decision so the second call does not have to match the rules again. Only
+    /// ever set for a document or subdocument request that was not blocked — a
+    /// blocked page has no response to add a header to.
+    csp: Option<String>,
+    /// Adblock will want to read this response's body. The caller uses it to
+    /// ask upstream for an unencoded body and to buffer the response instead of
+    /// streaming it; it never decides for itself what happens to the bytes.
+    pub wants_body: bool,
 }
 
 impl BlockDecision {
@@ -136,8 +146,19 @@ impl BlockDecision {
             redirect: None,
             rewritten_url: None,
             csp: None,
+            wants_body: false,
         }
     }
+}
+
+/// What Adblock made of a response. The caller forwards this and nothing else.
+#[derive(Default)]
+pub struct ResponseEdit {
+    /// The page as Adblock rewrote it. `None` when it left the body alone.
+    pub body: Option<Vec<u8>>,
+    /// Scriptlets that went into the page, for the caller's log. Empty unless
+    /// the page was rewritten.
+    pub scriptlets: Vec<String>,
 }
 
 /// A stand-in body for a blocked request: a neutered copy of the real resource
@@ -219,6 +240,7 @@ pub fn with_store(
         Arc::new(AdBlocker {
             core: core.clone(),
             decisions: settings::DecisionPolicy::load(cfg.settings_path()),
+            runtime: std::sync::OnceLock::new(),
         }),
         Arc::new(ListCuration::new(core, store)),
     ))
@@ -233,6 +255,9 @@ impl AdBlocker {
         if !self.core.enabled {
             return BlockDecision::pass();
         }
+        // Only a page the browser renders can be rewritten; a script or an
+        // image has nothing to inject into.
+        let renders_a_page = matches!(request_type, "document" | "subdocument");
         let request_type = filter_request_type(request_type);
         let request = match Request::new(url, source_url, request_type) {
             Ok(r) => r,
@@ -254,7 +279,140 @@ impl AdBlocker {
             csp: (allow.csp && !result.matched)
                 .then(|| engine.get_csp_directives(&request))
                 .flatten(),
+            wants_body: renders_a_page && !result.matched && allow.injects(),
         }
+    }
+
+    /// Where a filtered page sends the questions it has after it was served.
+    /// Root wiring: Adblock embeds the address it is handed, once, at startup.
+    /// Never set means no admin server, so no live-DOM script goes out.
+    pub fn set_admin_endpoint(&self, admin_listen: &str) {
+        let _ = self.runtime.set(rewrite::cosmetic_runtime(admin_listen));
+    }
+
+    /// Apply the request-side rules to the request the caller is about to send:
+    /// the `$removeparam` cleaned URL, and asking upstream for a body Adblock
+    /// can read when it means to read one.
+    pub fn filter_request(
+        &self,
+        decision: &BlockDecision,
+        parts: &mut hyper::http::request::Parts,
+    ) {
+        if decision.wants_body {
+            parts.headers.insert(
+                hyper::header::ACCEPT_ENCODING,
+                hyper::header::HeaderValue::from_static("identity"),
+            );
+        }
+        // The browser is never told, so the parameter stays in its address bar;
+        // only the request the site receives is stripped.
+        if let Some(clean) = &decision.rewritten_url {
+            if let Some(uri) = rewrite::rewrite_uri(&parts.uri, clean) {
+                tracing::debug!(from = %parts.uri, to = %clean, "stripped tracking parameters");
+                parts.uri = uri;
+            }
+        }
+    }
+
+    /// Whether Adblock needs this response's body. The caller buffers the
+    /// response only when the answer is yes, and streams it otherwise.
+    pub fn reads_body(&self, decision: &BlockDecision, status: u16, headers: &hyper::HeaderMap) -> bool {
+        decision.wants_body && rewrite::response_is_editable(status, headers)
+    }
+
+    /// Turn the response the server sent into the response to forward.
+    ///
+    /// `body` is the collected page when the caller was told to buffer it
+    /// (`reads_body`), and `None` otherwise — a streamed response can still
+    /// pick up the header a `$csp` rule asks for.
+    pub fn filter_response(
+        &self,
+        url: &str,
+        decision: &BlockDecision,
+        parts: &mut hyper::http::response::Parts,
+        body: Option<&[u8]>,
+    ) -> ResponseEdit {
+        let edit = body.and_then(|b| self.edit_page(url, parts, b)).unwrap_or_default();
+        // Appended rather than set, because two CSP headers are enforced
+        // together and the site's own policy has to keep applying. This happens
+        // after the page edit on purpose — injecting strips the site's CSP so
+        // our own inline script can run, and adding ours before that would
+        // strip it again.
+        if let Some(csp) = &decision.csp {
+            match hyper::header::HeaderValue::from_str(csp) {
+                Ok(v) => {
+                    tracing::debug!(%url, %csp, "adding content-security-policy");
+                    parts.headers.append(hyper::header::CONTENT_SECURITY_POLICY, v);
+                }
+                Err(e) => tracing::warn!(error = %e, %csp, "unusable $csp directives"),
+            }
+        }
+        edit
+    }
+
+    /// Splice this page's cosmetic CSS, scriptlets and runtime into it.
+    /// `None` when there was nothing to put in, or the page is too big to be
+    /// worth copying.
+    fn edit_page(
+        &self,
+        url: &str,
+        parts: &mut hyper::http::response::Parts,
+        body: &[u8],
+    ) -> Option<ResponseEdit> {
+        if body.len() > rewrite::MAX_EDIT_BYTES {
+            return None;
+        }
+        let on = self.decisions.settings();
+        let scriptlets = on.scriptlets.then(|| self.scriptlet_injection(url)).flatten();
+        // The scan below sees the page only as it was served, so on a page that
+        // builds itself in JavaScript the runtime is the only thing that can ask
+        // about the class and id names appearing later. Its own switch: it costs
+        // a script tag and a request per page, which is worth turning off
+        // separately from the CSS.
+        let runtime = match on.runtime {
+            true => self.runtime.get().and_then(Option::as_deref).unwrap_or(""),
+            false => "",
+        };
+        // Procedural rules — `:has-text`, `:upward`, `:remove()` — are cosmetic
+        // filtering that a stylesheet cannot carry, so they ride the cosmetic
+        // switch and go out with the page rather than being asked for later.
+        let procedural = on
+            .cosmetic
+            .then(|| self.procedural_injection(url))
+            .flatten()
+            .unwrap_or_default();
+        let script = [
+            scriptlets.as_ref().map_or("", |i| i.js.as_str()),
+            procedural.as_str(),
+            runtime,
+        ]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+        // Only the class/id scan needs text, and it can be sloppy about bad
+        // bytes: the names it finds are used to look up rules and never written
+        // back into the page, so a mangled character just means one rule misses.
+        let css = match on.cosmetic {
+            true => {
+                let (classes, ids) = rewrite::html_classes_and_ids(&String::from_utf8_lossy(body));
+                self.cosmetic_css(url, &classes, &ids)
+            }
+            false => String::new(),
+        };
+        let out = rewrite::inject_into_html(body, &css, &script)?;
+        // Any inline script of ours needs the page's CSP out of the way,
+        // scriptlet or runtime alike.
+        if !script.is_empty() {
+            for h in rewrite::CSP_HEADERS {
+                parts.headers.remove(h);
+            }
+        }
+        parts.headers.remove(hyper::header::CONTENT_LENGTH);
+        Some(ResponseEdit {
+            body: Some(out),
+            scriptlets: scriptlets.map(|i| i.names).unwrap_or_default(),
+        })
     }
 
     /// Adblock's own switches, for the settings UI.
@@ -277,7 +435,7 @@ impl AdBlocker {
         self.check(&url, &url, "other")
     }
 
-    pub fn cosmetic_css(&self, url: &str, classes: &[String], ids: &[String]) -> String {
+    fn cosmetic_css(&self, url: &str, classes: &[String], ids: &[String]) -> String {
         if !self.core.enabled {
             return String::new();
         }
@@ -347,15 +505,14 @@ impl AdBlocker {
     /// only hiding it.
     ///
     /// Ready-to-inject JavaScript carrying this page's own rules, like
-    /// `cosmetic_css` and `scriptlet_injection` — the caller injects it and
-    /// never reads it. `None` when the page has no such rules, which is the
-    /// common case.
+    /// `cosmetic_css` and `scriptlet_injection`. `None` when the page has no
+    /// such rules, which is the common case.
     ///
     /// The rules go in as a JSON literal, so `<` is escaped: a rule matching on
     /// `</script>` text would otherwise end the tag it is sitting in. Inside
     /// JSON the character can only appear in a string, where `<` means the
     /// same thing.
-    pub fn procedural_injection(&self, url: &str) -> Option<String> {
+    fn procedural_injection(&self, url: &str) -> Option<String> {
         let rules = self.procedural_actions(url);
         (!rules.is_empty()).then(|| {
             PROCEDURAL_RUNTIME.replace("__PROCEDURAL_FILTERS__", &rules.replace('<', "\\u003c"))
@@ -390,7 +547,7 @@ impl AdBlocker {
         self.core.scriptlets.enabled()
     }
 
-    pub fn scriptlet_injection(&self, url: &str) -> Option<ScriptletInjection> {
+    fn scriptlet_injection(&self, url: &str) -> Option<ScriptletInjection> {
         if !self.core.enabled || !self.scriptlets_enabled() {
             return None;
         }

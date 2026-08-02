@@ -635,36 +635,6 @@
       </div>
     </div>
 
-    <div class="panel">
-      <h2>Page injection</h2>
-      <div style="display:flex;flex-direction:column;gap:14px;max-width:660px">
-        <div>
-          <label class="sw"><input type="checkbox" id="inj-cosmetic"> Cosmetic filtering</label>
-          <p class="hint">Hide leftover ad slots, banners and placeholders by injecting the lists'
-            cosmetic rules as CSS into HTML pages. Rules CSS cannot carry — pick by the text
-            inside an element, delete a node outright — go in as a small evaluator instead. Turn
-            it off if a site's layout breaks; blocking of the requests themselves is
-            unaffected.</p>
-        </div>
-        <div>
-          <label class="sw"><input type="checkbox" id="inj-scriptlets"> Scriptlet injection</label>
-          <p class="hint">Run uBlock Origin's scriptlets on pages that need them, to defeat
-            anti-adblock walls and in-page ad loaders. Which ones fired shows in the
-            <b>Requests</b> log and the <b>Scriptlets</b> tab.</p>
-        </div>
-        <div>
-          <label class="sw"><input type="checkbox" id="inj-runtime"> Live-DOM runtime</label>
-          <p class="hint">Inject a small script so a page can keep asking about elements it
-            builds after it was served — needed on sites that draw themselves in JavaScript.
-            Costs one script tag and one request per page. Turn it off to keep pages untouched
-            after delivery; the cosmetic CSS above still goes in.</p>
-        </div>
-      </div>
-      <div class="actions">
-        <button id="inj-save">Save</button>
-        <span class="hint" id="inj-status"></span>
-      </div>
-    </div>
   </section>
 
   <section class="panel tabpane" id="pane-errors">
@@ -798,6 +768,27 @@
           page as a second <code>Content-Security-Policy</code> header, letting the browser
           block what a URL pattern cannot name. The site's own policy still applies. A rule that
           bans inline scripts also stops scriptlet injection on that page.</p>
+      </div>
+      <div>
+        <label class="sw"><input type="checkbox" id="inj-cosmetic"> Cosmetic filtering</label>
+        <p class="hint">Hide leftover ad slots, banners and placeholders by putting the lists'
+          cosmetic rules into HTML pages as CSS. Rules CSS cannot carry — pick by the text
+          inside an element, delete a node outright — go in as a small evaluator instead. Turn
+          it off if a site's layout breaks; blocking of the requests themselves is
+          unaffected.</p>
+      </div>
+      <div>
+        <label class="sw"><input type="checkbox" id="inj-scriptlets"> Scriptlet injection</label>
+        <p class="hint">Run uBlock Origin's scriptlets on pages that need them, to defeat
+          anti-adblock walls and in-page ad loaders. Which ones fired shows in the
+          <b>Requests</b> log and the <b>Scriptlets</b> tab.</p>
+      </div>
+      <div>
+        <label class="sw"><input type="checkbox" id="inj-runtime"> Live-DOM runtime</label>
+        <p class="hint">Add a small script so a page can keep asking about elements it
+          builds after it was served — needed on sites that draw themselves in JavaScript.
+          Costs one script tag and one request per page. Turn it off to leave pages untouched
+          after delivery; the cosmetic CSS above still goes in.</p>
       </div>
     </div>
     <div class="actions">
@@ -1168,46 +1159,25 @@ $("eg-save").addEventListener("click", async ()=>{
   } catch(e){ say(el, "failed: " + e.message); }
 });
 
-// ---- page injection: cosmetic rules and scriptlets ------------------------
-// Same proxy settings endpoints as the egress panel; each panel sends only its
-// own keys and the proxy leaves the rest alone.
-async function refreshInjectionCfg(){
-  try {
-    const r = await fetch("/api/proxy"); const d = await r.json();
-    $("inj-cosmetic").checked = !!d.cosmetic;
-    $("inj-scriptlets").checked = !!d.scriptlets;
-    $("inj-runtime").checked = !!d.runtime;
-  } catch(e){}
-}
-$("inj-save").addEventListener("click", async ()=>{
-  const el = $("inj-status"); say(el, "saving…");
-  const body = {cosmetic: $("inj-cosmetic").checked, scriptlets: $("inj-scriptlets").checked,
-                runtime: $("inj-runtime").checked};
-  try {
-    const r = await fetch("/api/proxy/config", {method:"POST",
-      headers:{"content-type":"application/json"}, body: JSON.stringify(body)});
-    const d = await r.json();
-    if(!r.ok) throw new Error(d.error || r.status);
-    say(el, "saved ✓ (applied live, persisted)");
-    refreshInjectionCfg();
-  } catch(e){ say(el, "failed: " + e.message); }
-});
-
-// ---- adblock settings: what a block decision may carry ---------------------
-// Adblock's own switches, not the proxy's: the proxy asks "blocked?" and gets
-// these back inside the answer without asking, so adblock owns them.
+// ---- adblock settings: which rules adblock may act on ---------------------
+// Adblock's own switches, not the proxy's. The proxy hands over a request or a
+// response and forwards what comes back, so it has nothing to switch off.
 async function refreshAdblockCfg(){
   try {
     const r = await fetch("/api/adblock"); const d = await r.json();
     $("ab-redirect").checked = !!d.redirect;
     $("ab-removeparam").checked = !!d.removeparam;
     $("ab-csp").checked = !!d.csp;
+    $("inj-cosmetic").checked = !!d.cosmetic;
+    $("inj-scriptlets").checked = !!d.scriptlets;
+    $("inj-runtime").checked = !!d.runtime;
   } catch(e){}
 }
 $("ab-save").addEventListener("click", async ()=>{
   const el = $("ab-status"); say(el, "saving…");
   const body = {redirect: $("ab-redirect").checked, removeparam: $("ab-removeparam").checked,
-                csp: $("ab-csp").checked};
+                csp: $("ab-csp").checked, cosmetic: $("inj-cosmetic").checked,
+                scriptlets: $("inj-scriptlets").checked, runtime: $("inj-runtime").checked};
   try {
     const r = await fetch("/api/adblock/config", {method:"POST",
       headers:{"content-type":"application/json"}, body: JSON.stringify(body)});
@@ -1446,7 +1416,7 @@ function showTab(pane){
   // Fresh service on/off + listen state for the panes that show the controls.
   if(["pane-proxycfg", "pane-dnscfg"].includes(pane)) refreshServer();
   // The proxy egress DNS/ECH policy toggles and the page-filtering toggles.
-  if(pane === "pane-proxycfg"){ refreshProxyCfg(); refreshInjectionCfg(); }
+  if(pane === "pane-proxycfg"){ refreshProxyCfg(); }
   if(pane === "pane-adblockcfg"){ refreshAdblockCfg(); }
   // The managed CA list.
   if(pane === "pane-certs") refreshCerts();
