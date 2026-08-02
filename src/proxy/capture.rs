@@ -1,96 +1,25 @@
-//! Captures request/response bodies (size-capped) so the admin UI can show
-//! them.
+//! Tees request/response bytes off the wire so the record can show them.
 //!
-//! Bodies on the wire are usually compressed (gzip/br/deflate/zstd), so the raw
-//! prefix looks binary. To keep the request path cheap we do **not** decompress
-//! at capture time: an identity body is stored as text, while a compressed body
-//! is stored as a short placeholder plus its raw compressed prefix (base64,
-//! tagged with the encoding). The admin UI decodes that prefix on demand — only
-//! when a request is opened and the "Decompress" button is clicked. Decoding is
-//! owned by the stats module (which owns the stored records); this module only
-//! produces the stored form.
+//! The proxy sees the bytes; Stats decides what is kept and how it is stored.
+//! This module only collects a prefix (Stats says how much) and hands it over
+//! with the `Content-Encoding` it arrived under.
 
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use base64::{engine::general_purpose::STANDARD, Engine as _};
 use bytes::Bytes;
 use hyper::body::{Body, Frame};
 
-use crate::stats::api::{CaptureSlot, Exchange};
+use crate::stats::api::Exchange;
 
-const REQ_BODY_CAP: usize = 16 * 1024;
-const RESP_BODY_CAP: usize = 64 * 1024;
-
-/// The `Content-Encoding` applied to a captured body. `Identity` covers both a
-/// missing header and an unknown/unsupported encoding — those bodies are stored
-/// as-is.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum BodyEncoding {
-    Identity,
-    Gzip,
-    Deflate,
-    Brotli,
-    Zstd,
-}
-
-impl BodyEncoding {
-    pub(crate) fn from_headers(headers: &hyper::HeaderMap) -> Self {
-        let Some(value) = headers
-            .get(hyper::header::CONTENT_ENCODING)
-            .and_then(|v| v.to_str().ok())
-        else {
-            return Self::Identity;
-        };
-        // A comma list stacks encodings; the last one is the outermost (applied
-        // last), which is what our captured bytes are wrapped in.
-        let last = value.split(',').map(str::trim).next_back().unwrap_or("");
-        Self::parse(last)
-    }
-
-    fn parse(name: &str) -> Self {
-        match name.trim().to_ascii_lowercase().as_str() {
-            "gzip" | "x-gzip" => Self::Gzip,
-            "deflate" => Self::Deflate,
-            "br" => Self::Brotli,
-            "zstd" => Self::Zstd,
-            _ => Self::Identity,
-        }
-    }
-
-    /// The token stored alongside the raw prefix and shown in the placeholder.
-    fn label(self) -> &'static str {
-        match self {
-            Self::Identity => "identity",
-            Self::Gzip => "gzip",
-            Self::Deflate => "deflate",
-            Self::Brotli => "br",
-            Self::Zstd => "zstd",
-        }
-    }
-}
-
-pub(crate) fn request_body(ex: &Exchange, bytes: &[u8], enc: BodyEncoding) {
-    attach_body(ex, CaptureSlot::ReqBody, CaptureSlot::ReqBodyRaw, bytes, bytes.len(), REQ_BODY_CAP, enc);
-}
-
-pub(crate) fn response_body(ex: &Exchange, bytes: &[u8], enc: BodyEncoding) {
-    attach_body(ex, CaptureSlot::RespBody, CaptureSlot::RespBodyRaw, bytes, bytes.len(), RESP_BODY_CAP, enc);
-}
-
-pub(crate) fn stream_response<B>(exchange: Exchange, body: B, enc: BodyEncoding) -> CaptureBody<B>
-where
-    B: Body<Data = Bytes> + Unpin,
-{
-    CaptureBody {
-        inner: body,
-        cap: if exchange.is_active() { RESP_BODY_CAP } else { 0 },
-        exchange,
-        enc,
-        buf: Vec::new(),
-        total: 0,
-        flushed: false,
-    }
+/// The `Content-Encoding` a body arrived under, as a plain header value for
+/// Stats to interpret. Empty when the header is absent.
+pub(crate) fn content_encoding(headers: &hyper::HeaderMap) -> String {
+    headers
+        .get(hyper::header::CONTENT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string()
 }
 
 pub(crate) fn headers_text(headers: &hyper::HeaderMap) -> String {
@@ -101,59 +30,27 @@ pub(crate) fn headers_text(headers: &hyper::HeaderMap) -> String {
         .join("\n")
 }
 
-/// Store a captured body. Identity bodies go straight in as text; compressed
-/// bodies store a placeholder for display plus the raw prefix (tagged, base64)
-/// for on-demand decoding.
-fn attach_body(
-    ex: &Exchange,
-    disp: CaptureSlot,
-    raw: CaptureSlot,
-    prefix: &[u8],
-    total: usize,
-    cap: usize,
-    enc: BodyEncoding,
-) {
-    if enc == BodyEncoding::Identity {
-        let kept = &prefix[..prefix.len().min(cap)];
-        ex.attach(disp, || render(prefix, total, cap));
-        // A binary identity body (an image, font, wasm, …) can't be shown inline,
-        // so `render` returns a placeholder. Keep its raw bytes too, tagged
-        // `identity`, so the decode endpoint can hand the real bytes back for a
-        // download / hex view instead of leaving the placeholder a dead end.
-        if kept.contains(&0) {
-            ex.attach_quiet(raw, || encode_raw(BodyEncoding::Identity, kept));
-        }
-        return;
+/// Wrap a streamed response so a prefix of it lands on the record without ever
+/// buffering the whole thing.
+pub(crate) fn stream_response<B>(exchange: Exchange, body: B, enc: String) -> CaptureBody<B>
+where
+    B: Body<Data = Bytes> + Unpin,
+{
+    CaptureBody {
+        cap: exchange.response_body_cap(),
+        inner: body,
+        exchange,
+        enc,
+        buf: Vec::new(),
+        total: 0,
+        flushed: false,
     }
-    let kept = &prefix[..prefix.len().min(cap)];
-    let label = enc.label();
-    ex.attach(disp, || format!("[compressed body — {label}, {total} bytes]"));
-    // The raw prefix can be large; keep it off the live SSE stream and only in
-    // the record/sidecar, where the decode endpoint reads it.
-    ex.attach_quiet(raw, || encode_raw(enc, kept));
-}
-
-/// Pack a compressed prefix as `"<label>\n<base64>"` for the raw capture slot.
-fn encode_raw(enc: BodyEncoding, bytes: &[u8]) -> String {
-    format!("{}\n{}", enc.label(), STANDARD.encode(bytes))
-}
-
-fn render(prefix: &[u8], total: usize, cap: usize) -> String {
-    let slice = &prefix[..prefix.len().min(cap)];
-    if slice.contains(&0) {
-        return format!("[binary body — {total} bytes]");
-    }
-    let mut s = String::from_utf8_lossy(slice).into_owned();
-    if total > cap {
-        s.push_str(&format!("\n… [truncated — {total} bytes total]"));
-    }
-    s
 }
 
 pub(crate) struct CaptureBody<B> {
     inner: B,
     exchange: Exchange,
-    enc: BodyEncoding,
+    enc: String,
     cap: usize,
     buf: Vec<u8>,
     total: usize,
@@ -166,15 +63,7 @@ impl<B> CaptureBody<B> {
             return;
         }
         self.flushed = true;
-        attach_body(
-            &self.exchange,
-            CaptureSlot::RespBody,
-            CaptureSlot::RespBodyRaw,
-            &self.buf,
-            self.total,
-            RESP_BODY_CAP,
-            self.enc,
-        );
+        self.exchange.capture_response_body(&self.buf, self.total, &self.enc);
     }
 }
 
@@ -221,50 +110,6 @@ mod tests {
     use super::*;
     use crate::stats::api::RequestFacts;
 
-    #[test]
-    fn render_passes_text_through_and_notes_truncation() {
-        assert_eq!(render(b"hello", 5, 16), "hello");
-        let out = render(b"abcd", 100, 4);
-        assert!(out.starts_with("abcd"));
-        assert!(out.contains("truncated — 100 bytes total"), "out: {out}");
-    }
-
-    #[test]
-    fn render_replaces_binary_with_placeholder() {
-        assert_eq!(render(&[b'a', 0, b'b'], 3, 16), "[binary body — 3 bytes]");
-    }
-
-    #[test]
-    fn encoding_parses_from_the_content_encoding_header() {
-        let mut h = hyper::HeaderMap::new();
-        assert_eq!(BodyEncoding::from_headers(&h), BodyEncoding::Identity);
-        h.insert(hyper::header::CONTENT_ENCODING, "gzip".parse().unwrap());
-        assert_eq!(BodyEncoding::from_headers(&h), BodyEncoding::Gzip);
-        h.insert(hyper::header::CONTENT_ENCODING, "br".parse().unwrap());
-        assert_eq!(BodyEncoding::from_headers(&h), BodyEncoding::Brotli);
-        // A stack of encodings: the outermost (last) one wins.
-        h.insert(hyper::header::CONTENT_ENCODING, "gzip, br".parse().unwrap());
-        assert_eq!(BodyEncoding::from_headers(&h), BodyEncoding::Brotli);
-        // Unknown encodings fall back to identity (stored as-is).
-        h.insert(hyper::header::CONTENT_ENCODING, "snappy".parse().unwrap());
-        assert_eq!(BodyEncoding::from_headers(&h), BodyEncoding::Identity);
-    }
-
-    #[test]
-    fn compressed_bytes_render_as_binary_and_pack_a_tagged_prefix() {
-        use flate2::{write::GzEncoder, Compression};
-        use std::io::Write;
-        let mut enc = GzEncoder::new(Vec::new(), Compression::default());
-        enc.write_all(b"function ad(){ return 42; }").unwrap();
-        let gz = enc.finish().unwrap();
-        // The gzip bytes contain nulls — the plain renderer hides them.
-        assert_eq!(render(&gz, gz.len(), RESP_BODY_CAP), format!("[binary body — {} bytes]", gz.len()));
-        // Packed as a raw capture slot, the prefix is tagged with the encoding so
-        // stats can decode it later.
-        let raw = encode_raw(BodyEncoding::Gzip, &gz);
-        assert!(raw.starts_with("gzip\n"), "raw: {raw}");
-    }
-
     fn state() -> std::sync::Arc<crate::stats::api::SharedState> {
         std::sync::Arc::new(bare_state())
     }
@@ -301,8 +146,8 @@ mod tests {
             200,
             false,
         );
-        request_body(&ex, b"req", BodyEncoding::Identity);
-        response_body(&ex, b"resp", BodyEncoding::Identity);
+        ex.capture_request_body(b"req", 3, "");
+        ex.capture_response_body(b"resp", 4, "");
         let recs = obs.records();
         assert_eq!(recs[0].req_body, "req");
         assert_eq!(recs[0].resp_body, "resp");
@@ -328,14 +173,13 @@ mod tests {
             200,
             false,
         );
-        response_body(&ex, &gz, BodyEncoding::Gzip);
+        ex.capture_response_body(&gz, gz.len(), "gzip");
         drop(ex); // flush the detail line
         state.flush_logs();
 
         let seq = state.request_page(None, 10)[0].seq;
         let detail = state.request_detail(seq);
         assert!(detail.resp_body.starts_with("[compressed body — gzip,"), "body: {}", detail.resp_body);
-        assert!(!detail.resp_body_raw.is_empty(), "raw prefix should be captured");
         // Stats owns the decode; the proxy-produced prefix decodes through it.
         let crate::stats::api::BodyDecode::Text(text) = state.decode_captured_body(seq, "resp") else {
             panic!("expected a decodable body");
@@ -360,14 +204,13 @@ mod tests {
             200,
             false,
         );
-        response_body(&ex, png, BodyEncoding::Identity);
+        ex.capture_response_body(png, png.len(), "");
         drop(ex);
         state.flush_logs();
 
         let seq = state.request_page(None, 10)[0].seq;
         let detail = state.request_detail(seq);
         assert!(detail.resp_body.starts_with("[binary body —"), "body: {}", detail.resp_body);
-        assert!(!detail.resp_body_raw.is_empty(), "raw bytes should be captured for a binary identity body");
         let crate::stats::api::BodyDecode::Binary(bytes) = state.decode_captured_body(seq, "resp") else {
             panic!("expected binary bytes back, not text/placeholder");
         };
@@ -388,14 +231,17 @@ mod tests {
             200,
             false,
         );
-        response_body(&ex, b"<html>plain</html>", BodyEncoding::Identity);
+        ex.capture_response_body(b"<html>plain</html>", 18, "");
         drop(ex);
         state.flush_logs();
 
         let seq = state.request_page(None, 10)[0].seq;
         let detail = state.request_detail(seq);
         assert_eq!(detail.resp_body, "<html>plain</html>");
-        assert!(detail.resp_body_raw.is_empty(), "a text identity body needs no raw prefix");
+        assert!(
+            matches!(state.decode_captured_body(seq, "resp"), crate::stats::api::BodyDecode::NoData),
+            "a text identity body keeps no raw prefix to decode"
+        );
     }
 
     #[tokio::test]
@@ -408,7 +254,7 @@ mod tests {
             200,
             false,
         );
-        let wrapped = stream_response(ex, Full::new(Bytes::from_static(b"console.log(1)")), BodyEncoding::Identity);
+        let wrapped = stream_response(ex, Full::new(Bytes::from_static(b"console.log(1)")), String::new());
         let body = wrapped.collect().await.unwrap().to_bytes();
         assert_eq!(&body[..], b"console.log(1)");
         assert_eq!(obs.records()[0].resp_body, "console.log(1)");
@@ -433,7 +279,7 @@ mod tests {
             200,
             false,
         );
-        let wrapped = stream_response(ex, Full::new(Bytes::copy_from_slice(&gz)), BodyEncoding::Gzip);
+        let wrapped = stream_response(ex, Full::new(Bytes::copy_from_slice(&gz)), "gzip".to_string());
         let _ = wrapped.collect().await.unwrap().to_bytes();
         state.flush_logs();
 
@@ -455,7 +301,7 @@ mod tests {
             200,
             false,
         );
-        let wrapped = stream_response(ex, Full::new(Bytes::from_static(b"data")), BodyEncoding::Identity);
+        let wrapped = stream_response(ex, Full::new(Bytes::from_static(b"data")), String::new());
         assert_eq!(wrapped.cap, 0, "no prefix budget without a live record");
         let body = wrapped.collect().await.unwrap().to_bytes();
         assert_eq!(&body[..], b"data");

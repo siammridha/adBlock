@@ -29,6 +29,12 @@ impl ListCuration {
         self.core.read(|lists| lists.to_vec())
     }
 
+    /// One list by name, or `None` if there is no such list. Adblock owns the
+    /// collection, so looking a list up in it is Adblock's job.
+    pub fn list(&self, name: &str) -> Option<ListEntry> {
+        self.core.read(|lists| lists.iter().find(|l| l.name == name).cloned())
+    }
+
     pub fn stale_url_lists(&self, max_age: std::time::Duration) -> Vec<(String, String)> {
         self.core.read(|lists| {
             lists

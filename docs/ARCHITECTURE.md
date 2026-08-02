@@ -98,6 +98,12 @@ Asking answers one question: what happens to this request? Blocked, or not. A bl
 carries the stand-in body to serve instead (`$redirect`), which Adblock has already
 decoded; the caller only serves it.
 
+The caller hands over the request as it arrived and does not describe it. What kind
+of resource this is, which page it came from, whether it might be a beacon — filter
+rules match on all three (`$script`, `$image`, `$domain=`, `$1p`/`$3p`, `$ping`), so
+Adblock reads them off the request itself. It names the resource type in its answer,
+for the caller to log.
+
 Handing over the request lets Adblock make it into the request that goes upstream —
 the `$removeparam` cleaned URL, and asking for a body it can read. The caller does
 not rewrite anything; it sends what it gets back.
@@ -123,6 +129,7 @@ blocklist management, and its own settings.
 
 - Fetching blocklists, scriptlets, and any other remote resources
 - Parsing and compiling filter rules
+- Reading a request's resource type and source page off the wire
 - Applying rules to requests and responses: URL cleaning, stand-in bodies, HTML
   editing, script and style injection, filtering-related headers
 - Custom filter storage and management
@@ -189,7 +196,10 @@ including retention settings and clearing data.
 **Owns internally:**
 
 - All log data and log files
-- Storage format, rotation, and retention
+- Storage format, rotation, and retention — including the stored form of a
+  captured body: how much of it is kept, how one that cannot be shown inline is
+  described, and how it is packed to be decoded later. A caller hands over the
+  bytes it saw and the encoding they arrived under, and nothing else
 - Aggregation and querying
 - Its own settings and their persistence
 

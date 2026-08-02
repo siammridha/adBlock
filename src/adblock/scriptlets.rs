@@ -70,6 +70,17 @@ impl ScriptletLibrary {
         &self.path
     }
 
+    /// When the resource file was last written, in epoch milliseconds. `None`
+    /// when there is no file yet. Adblock owns the file, so Adblock reads it —
+    /// callers never go to disk on its behalf.
+    pub fn updated_ms(&self) -> Option<u64> {
+        std::fs::metadata(&self.path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+    }
+
     pub fn reload_from_disk(&self) -> Result<usize> {
         let resources = load_resources(&self.path)?;
         if resources.is_empty() {

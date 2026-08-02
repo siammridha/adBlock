@@ -612,6 +612,20 @@
     </div>
 
     <div class="panel">
+      <h2>Ad blocking</h2>
+      <div class="svcctl" id="adblock-ctl" style="margin-bottom:0">
+        <label class="sw"><input type="checkbox" id="ab-enabled"> Enabled</label>
+        <button id="abe-save">Save</button>
+        <span class="hint" id="abe-status"></span>
+      </div>
+      <p class="hint">The master switch for filtering. Off, nothing is matched and every
+        request goes through untouched — no blocking, no stand-in bodies, no cosmetic rules
+        or scriptlets — while the proxy keeps running and logging. Applied live and
+        persisted. Which rules apply when it is on is set on the
+        <b>Adblock → Settings</b> tab.</p>
+    </div>
+
+    <div class="panel">
       <h2>Name resolution &amp; privacy</h2>
       <div style="display:flex;flex-direction:column;gap:14px;max-width:660px">
         <div>
@@ -1177,6 +1191,28 @@ $("eg-save").addEventListener("click", async ()=>{
   } catch(e){ say(el, "failed: " + e.message); }
 });
 
+// ---- adblock master switch, shown with the proxy settings -----------------
+// Adblock's switch, not the proxy's: it rides the same /api/adblock settings as
+// the rest, and posting only this key leaves the others alone.
+async function refreshAdblockEnabled(){
+  try {
+    const r = await fetch("/api/adblock"); const d = await r.json();
+    $("ab-enabled").checked = !!d.enabled;
+  } catch(e){}
+}
+$("abe-save").addEventListener("click", async ()=>{
+  const el = $("abe-status"); say(el, "saving…");
+  try {
+    const r = await fetch("/api/adblock/config", {method:"POST",
+      headers:{"content-type":"application/json"},
+      body: JSON.stringify({enabled: $("ab-enabled").checked})});
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.error || r.status);
+    say(el, "saved ✓ (applied live, persisted)");
+    refreshAdblockEnabled();
+  } catch(e){ say(el, "failed: " + e.message); }
+});
+
 // ---- adblock settings: which rules adblock may act on ---------------------
 // Adblock's own switches, not the proxy's. The proxy hands over a request or a
 // response and forwards what comes back, so it has nothing to switch off.
@@ -1454,7 +1490,7 @@ function showTab(pane){
   // Fresh service on/off + listen state for the panes that show the controls.
   if(["pane-proxycfg", "pane-dnscfg"].includes(pane)) refreshServer();
   // The proxy egress DNS/ECH policy toggles and the page-filtering toggles.
-  if(pane === "pane-proxycfg"){ refreshProxyCfg(); }
+  if(pane === "pane-proxycfg"){ refreshProxyCfg(); refreshAdblockEnabled(); }
   if(pane === "pane-adblockcfg"){ refreshAdblockCfg(); }
   // The rule-type tester's own on/off switch.
   if(pane === "pane-setup") refreshTester();
@@ -1791,11 +1827,17 @@ function rqSync(){
   $("rq-empty").style.display = rqAll.length ? "none" : "";
 }
 function rqPaused(){ return !rqVL.atTop(); }
+// Buffered rows the current search would show. Everything stays in rqPending —
+// clearing the search brings the rest back — but the chip only offers what the
+// search matches, so it never promises rows the filtered view will hide.
+function rqPendingShown(){
+  return rqQuery ? rqPending.filter(r => rqHay(r).includes(rqQuery)).length : rqPending.length;
+}
 function rqChip(){
-  const c = $("rq-new");
-  c.style.display = rqPending.length ? "" : "none";
+  const c = $("rq-new"), n = rqPendingShown();
+  c.style.display = n ? "" : "none";
   c.className = "chip new";
-  c.textContent = rqPending.length + " new ↑";
+  c.textContent = n + " new ↑";
 }
 // Add a record unless its seq is already known. `end` appends (older history);
 // otherwise it prepends (newer, live).
@@ -2171,11 +2213,11 @@ $("rq-new").addEventListener("click", rqFlush);
 $("rq-search").addEventListener("input", e=>{
   $("rq-sx").style.display = e.target.value ? "" : "none";
   rqQuery = e.target.value.trim().toLowerCase();
-  rqSync();
+  rqSync(); rqChip();
 });
 $("rq-sx").addEventListener("click", ()=>{
   $("rq-search").value = ""; $("rq-sx").style.display = "none";
-  rqQuery = ""; rqSync();
+  rqQuery = ""; rqSync(); rqChip();
 });
 $("rq-reload").addEventListener("click", ()=>{
   rqAll = []; rqBySeq.clear(); rqOldest = null; rqDone = false; rqPending = [];
@@ -2199,11 +2241,15 @@ function dqSync(){
   $("dq-empty").style.display = dqAll.length ? "none" : "";
 }
 function dqPaused(){ return !dqVL.atTop(); }
+// See rqPendingShown: the chip counts only what the active search would show.
+function dqPendingShown(){
+  return dqQuery ? dqPending.filter(d => dqHay(d).includes(dqQuery)).length : dqPending.length;
+}
 function dqChip(){
-  const c = $("dq-new");
-  c.style.display = dqPending.length ? "" : "none";
+  const c = $("dq-new"), n = dqPendingShown();
+  c.style.display = n ? "" : "none";
   c.className = "chip new";
-  c.textContent = dqPending.length + " new ↑";
+  c.textContent = n + " new ↑";
 }
 function dqAdd(d, end){
   if(dqBySeq.has(d.seq)) return false;
@@ -2310,11 +2356,11 @@ $("dq-new").addEventListener("click", dqFlush);
 $("dq-search").addEventListener("input", e=>{
   $("dq-sx").style.display = e.target.value ? "" : "none";
   dqQuery = e.target.value.trim().toLowerCase();
-  dqSync();
+  dqSync(); dqChip();
 });
 $("dq-sx").addEventListener("click", ()=>{
   $("dq-search").value = ""; $("dq-sx").style.display = "none"; dqQuery = "";
-  dqSync();
+  dqSync(); dqChip();
 });
 $("dq-reload").addEventListener("click", ()=>{
   dqAll = []; dqBySeq.clear(); dqOldest = null; dqDone = false; dqPending = [];

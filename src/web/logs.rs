@@ -47,13 +47,7 @@ pub(super) fn request_detail(state: &SharedState, query: &str) -> AdminResponse 
             json!({ "error": "missing seq" }),
         );
     };
-    // The raw compressed prefixes can be large; they're for the decode endpoint
-    // only, so strip them from the detail response. The display bodies carry a
-    // `[compressed body — …]` placeholder that tells the UI a decode is offered.
-    let mut detail = state.request_detail(seq);
-    detail.req_body_raw.clear();
-    detail.resp_body_raw.clear();
-    json_ok(serde_json::to_value(detail).unwrap_or_default())
+    json_ok(serde_json::to_value(state.request_detail(seq)).unwrap_or_default())
 }
 
 /// Decode one captured body on demand. `slot` is `req` or `resp`. Returns the

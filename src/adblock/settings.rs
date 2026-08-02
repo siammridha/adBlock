@@ -1,12 +1,14 @@
 //! Which rules Adblock is allowed to act on, and where that choice is kept.
 //!
-//! Three switches for what a block decision may carry: serving a `$redirect`
+//! One master switch: with it off, Adblock matches nothing and every request
+//! passes, which is what the dashboard's "Ad blocking" toggle turns. Then three
+//! switches for what a block decision may carry: serving a `$redirect`
 //! stand-in body in place of a blocked resource, reporting the `$removeparam`
 //! cleaned URL, and adding the `$csp` directives to a page. Three more for what
 //! Adblock puts into a page it rewrites: cosmetic CSS, uBO scriptlets, and the
 //! live-DOM runtime.
 //!
-//! All six belong to Adblock rather than the caller. The caller hands over a
+//! All seven belong to Adblock rather than the caller. The caller hands over a
 //! request or a response and takes back what Adblock made of it; it never asks
 //! for a rule to be applied, so it has nothing to switch off.
 //!
@@ -22,6 +24,7 @@ use serde::{Deserialize, Serialize};
 /// valid; only present, well-typed flags are picked up.
 #[derive(Debug, Default, Clone, Copy, Deserialize, Serialize)]
 pub struct DecisionOverrides {
+    pub enabled: Option<bool>,
     pub redirect: Option<bool>,
     pub removeparam: Option<bool>,
     pub csp: Option<bool>,
@@ -38,6 +41,7 @@ impl DecisionOverrides {
         }
         let flag = |key: &str| -> Option<bool> { v.get(key).and_then(serde_json::Value::as_bool) };
         Ok(Self {
+            enabled: flag("enabled"),
             redirect: flag("redirect"),
             removeparam: flag("removeparam"),
             csp: flag("csp"),
@@ -50,6 +54,8 @@ impl DecisionOverrides {
 
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct DecisionSettings {
+    /// Whether Adblock does anything at all. Off, every request passes.
+    pub enabled: bool,
     pub redirect: bool,
     pub removeparam: bool,
     pub csp: bool,
@@ -67,6 +73,7 @@ impl DecisionSettings {
 }
 
 pub struct DecisionPolicy {
+    enabled: AtomicBool,
     redirect: AtomicBool,
     removeparam: AtomicBool,
     csp: AtomicBool,
@@ -85,6 +92,7 @@ impl DecisionPolicy {
             .and_then(|t| serde_json::from_str(&t).ok())
             .unwrap_or_default();
         let policy = Self {
+            enabled: AtomicBool::new(saved.enabled.unwrap_or(true)),
             redirect: AtomicBool::new(saved.redirect.unwrap_or(true)),
             removeparam: AtomicBool::new(saved.removeparam.unwrap_or(true)),
             csp: AtomicBool::new(saved.csp.unwrap_or(true)),
@@ -111,6 +119,7 @@ impl DecisionPolicy {
 
     pub fn settings(&self) -> DecisionSettings {
         DecisionSettings {
+            enabled: self.enabled.load(Ordering::Relaxed),
             redirect: self.redirect.load(Ordering::Relaxed),
             removeparam: self.removeparam.load(Ordering::Relaxed),
             csp: self.csp.load(Ordering::Relaxed),
@@ -124,6 +133,7 @@ impl DecisionPolicy {
     /// switches are read per decision and per page, nothing is rebuilt.
     pub fn apply(&self, upd: &DecisionOverrides) -> DecisionSettings {
         for (flag, cell) in [
+            (upd.enabled, &self.enabled),
             (upd.redirect, &self.redirect),
             (upd.removeparam, &self.removeparam),
             (upd.csp, &self.csp),
@@ -149,6 +159,7 @@ impl DecisionPolicy {
         write(
             &self.path,
             &DecisionOverrides {
+                enabled: Some(snap.enabled),
                 redirect: Some(snap.redirect),
                 removeparam: Some(snap.removeparam),
                 csp: Some(snap.csp),
@@ -173,8 +184,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_master_switch_turns_off_and_survives_a_reload() {
+        let path = std::env::temp_dir()
+            .join(format!("adblock-enabled-test-{}", std::process::id()))
+            .join("adblock.json");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        let policy = DecisionPolicy::load(path.clone());
+        assert!(policy.settings().enabled, "blocking is on by default");
+
+        let off = DecisionOverrides { enabled: Some(false), ..Default::default() };
+        assert!(!policy.apply(&off).enabled);
+        assert!(policy.settings().redirect, "the other switches are left alone");
+        assert!(!DecisionPolicy::load(path.clone()).settings().enabled, "and it is remembered");
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
     fn parse_picks_up_only_present_flags() {
         let o = DecisionOverrides::parse(br#"{"redirect":false,"cosmetic":false}"#).unwrap();
+        assert_eq!(o.enabled, None, "the master switch is left alone too");
         assert_eq!(o.redirect, Some(false));
         assert_eq!(o.cosmetic, Some(false));
         assert_eq!(o.removeparam, None, "an absent key leaves that switch alone");

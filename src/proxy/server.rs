@@ -12,7 +12,7 @@ use bytes::Bytes;
 use http_body_util::{combinators::BoxBody, BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
-use hyper::{Method, Request, Response, StatusCode};
+use hyper::{Method, Request, Response};
 use hyper_util::rt::TokioIo;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
@@ -27,8 +27,10 @@ use crate::proxy::ca::CertAuthority;
 use crate::proxy::{capture, pipeline};
 use crate::stats::api::{CaptureSlot, EventKind, Exchange, RequestFacts, SharedState};
 
-fn request_facts(plan: &pipeline::RequestPlan) -> RequestFacts<'_> {
-    RequestFacts { method: &plan.method, req_type: &plan.req_type, url: &plan.url, host: &plan.host }
+/// What the record shows for this request. The resource type is Adblock's
+/// name for it, carried on the decision — the proxy only reports it.
+fn request_facts<'a>(plan: &'a pipeline::RequestPlan, req_type: &'a str) -> RequestFacts<'a> {
+    RequestFacts { method: &plan.method, req_type, url: &plan.url, host: &plan.host }
 }
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -229,7 +231,7 @@ impl Proxy {
         by: &str,
         req_hdrs: &str,
         req_body: &[u8],
-        enc: capture::BodyEncoding,
+        enc: &str,
     ) {
         let state = &self.inner.state;
         state.count_block(Metric::Blocked, host);
@@ -239,18 +241,9 @@ impl Proxy {
         }
         let exchange = state.record_blocked(facts, by);
         if !req_body.is_empty() {
-            capture::request_body(&exchange, req_body, enc);
+            exchange.capture_request_body(req_body, req_body.len(), enc);
         }
         exchange.attach(CaptureSlot::ReqHeaders, || req_hdrs.to_string());
-    }
-
-    /// Tell a host-level block from a path-level block. A rule that blocks the
-    /// whole host (e.g. `||ads.example^`) also matches the host's root document;
-    /// a rule that only blocks a specific resource does not. Re-checking the root
-    /// URL is how we distinguish the two.
-    fn host_blocked(&self, plan: &pipeline::RequestPlan) -> bool {
-        let root = format!("{}://{}/", plan.scheme, plan.host);
-        self.inner.adblock.check(&root, "", "document").blocked
     }
 
     async fn handle_connect(
@@ -266,8 +259,8 @@ impl Proxy {
 
         let plan = pipeline::plan_connect(
             &authority,
-            |url| {
-                let decision = self.inner.adblock.check(url, "", "document");
+            |host| {
+                let decision = self.inner.adblock.check_host("https", host);
                 decision.blocked.then(|| decision.attribution.display())
             },
             |host| self.inner.exclusions.matching(host),
@@ -282,14 +275,7 @@ impl Proxy {
             // A CONNECT block happens before any request body exists, but the
             // CONNECT request's headers are available — capture what we have.
             let hdrs = capture::headers_text(req.headers());
-            self.record_block(
-                facts,
-                &plan.host,
-                blocked_by,
-                &hdrs,
-                &[],
-                capture::BodyEncoding::Identity,
-            );
+            self.record_block(facts, &plan.host, blocked_by, &hdrs, &[], "");
             return Err(Box::new(BlockedDropped));
         }
 
@@ -404,24 +390,9 @@ impl Proxy {
 
         let plan = pipeline::plan_request(&req, secure)?;
 
-        let mut decision = self
-            .inner
-            .adblock
-            .check(&plan.url, &plan.source, &plan.req_type);
-
-        // A `navigator.sendBeacon()` call arrives as an ordinary no-cors POST,
-        // so it was matched above as a `fetch`. Most `$ping` rules name only
-        // that type, and would miss it. Ask a second time as a `ping` — but
-        // only for a request already shaped like a beacon, and only when
-        // nothing matched it the first way, so an ordinary fetch keeps its own
-        // verdict and the extra lookup stays off the common path.
-        if !decision.blocked && plan.maybe_beacon {
-            let as_beacon = self.inner.adblock.check(&plan.url, &plan.source, "ping");
-            if as_beacon.blocked {
-                tracing::debug!(url = %plan.url, "matched as a beacon, not a fetch");
-                decision = as_beacon;
-            }
-        }
+        // Adblock reads the request as it arrived and answers what happens to
+        // it, including what kind of resource it decided this is.
+        let decision = self.inner.adblock.check_request(&plan.url, &req);
 
         // Collect the request up front so blocked and forwarded requests capture
         // their headers and body through the same path. A block happens before
@@ -431,39 +402,45 @@ impl Proxy {
         let req_bytes = body.collect().await.map_err(Into::into)?.to_bytes();
         parts.headers.remove(hyper::header::TRANSFER_ENCODING);
         parts.headers.remove(hyper::header::CONTENT_LENGTH);
-        let req_enc = capture::BodyEncoding::from_headers(&parts.headers);
+        let req_enc = capture::content_encoding(&parts.headers);
         let req_hdrs = capture::headers_text(&parts.headers);
 
         if decision.blocked {
             let by = decision.attribution.display();
-            self.record_block(request_facts(&plan), &plan.host, &by, &req_hdrs, &req_bytes, req_enc);
-            // A `$redirect` rule hands us a stand-in body for the blocked
-            // resource. Serving it keeps the page's own code working, which an
-            // empty 403 does not.
-            if let Some(redirect) = decision.redirect {
-                tracing::debug!(url = %plan.url, mime = %redirect.mime, "serving redirect resource");
-                return Ok(redirect_response(redirect));
+            self.record_block(
+                request_facts(&plan, &decision.req_type),
+                &plan.host,
+                &by,
+                &req_hdrs,
+                &req_bytes,
+                &req_enc,
+            );
+            // Dropping the connection or answering on it is the proxy's call,
+            // and it only drops when the whole host is blocked and Adblock has
+            // no stand-in to serve: a path-level block gets an answer so the
+            // other requests sharing this connection keep working.
+            let stand_in = decision.redirect.is_some();
+            if !stand_in && self.inner.adblock.check_host(&plan.scheme, &plan.host).blocked {
+                return Err(Box::new(BlockedDropped));
             }
-            // Only drop the connection when the whole host is blocked. A
-            // path-level block gets a synthetic response so the other requests
-            // sharing this connection keep working.
-            return if self.host_blocked(&plan) {
-                Err(Box::new(BlockedDropped))
-            } else {
-                Ok(synthetic_blocked_response())
-            };
+            if stand_in {
+                tracing::debug!(url = %plan.url, "serving redirect resource");
+            }
+            // What a block looks like is Adblock's; the proxy only sends it.
+            let blocked = self.inner.adblock.blocked_response(decision);
+            return Ok(blocked.map(|b| full_body(Bytes::from(b))));
         }
 
         if self.inner.blackhole.is_blackholed(&plan.host, plan.port).await {
             // A blackholed host resolves to nowhere, so the whole host is
             // effectively blocked: drop the connection.
             self.record_block(
-                request_facts(&plan),
+                request_facts(&plan, &decision.req_type),
                 &plan.host,
                 "DNS blackhole",
                 &req_hdrs,
                 &req_bytes,
-                req_enc,
+                &req_enc,
             );
             return Err(Box::new(BlockedDropped));
         }
@@ -488,18 +465,22 @@ impl Proxy {
                 state.count(Metric::Errors, &plan.host);
                 let cause = format!("upstream {}: {}", plan.host, error_chain(e.as_ref()));
                 tracing::warn!(url = %plan.url, error = %cause, "upstream send failed");
-                let exchange = state.record_failed(request_facts(&plan), &cause);
+                let exchange =
+                    state.record_failed(request_facts(&plan, &decision.req_type), &cause);
                 if !req_bytes.is_empty() {
-                    capture::request_body(&exchange, &req_bytes, req_enc);
+                    exchange.capture_request_body(&req_bytes, req_bytes.len(), &req_enc);
                 }
                 exchange.attach(CaptureSlot::ReqHeaders, || req_hdrs);
                 return Err(e);
             }
         };
-        let exchange =
-            state.record_forwarded(request_facts(&plan), upstream.status().as_u16(), ech);
+        let exchange = state.record_forwarded(
+            request_facts(&plan, &decision.req_type),
+            upstream.status().as_u16(),
+            ech,
+        );
         if !req_bytes.is_empty() {
-            capture::request_body(&exchange, &req_bytes, req_enc);
+            exchange.capture_request_body(&req_bytes, req_bytes.len(), &req_enc);
         }
         exchange.attach(CaptureSlot::ReqHeaders, || req_hdrs);
         exchange.attach(CaptureSlot::RespHeaders, || {
@@ -526,7 +507,7 @@ impl Proxy {
         let adblock = &self.inner.adblock;
         let buffer = adblock.reads_body(decision, resp.status().as_u16(), resp.headers());
         let (mut parts, body) = resp.into_parts();
-        let resp_enc = capture::BodyEncoding::from_headers(&parts.headers);
+        let resp_enc = capture::content_encoding(&parts.headers);
 
         if !buffer {
             // Header-only work — a `$csp` rule — still belongs to Adblock.
@@ -536,7 +517,7 @@ impl Proxy {
         }
 
         let collected = body.collect().await?.to_bytes();
-        capture::response_body(&exchange, &collected, resp_enc);
+        exchange.capture_response_body(&collected, collected.len(), &resp_enc);
         let edit = adblock.filter_response(url, decision, &mut parts, Some(&collected));
         if !edit.scriptlets.is_empty() {
             let names = edit.scriptlets.join(", ");
@@ -554,27 +535,6 @@ fn empty_body() -> ResBody {
 
 fn full_body(bytes: Bytes) -> ResBody {
     Full::new(bytes).map_err(|e| match e {}).boxed()
-}
-
-/// Serve a `$redirect` stand-in as a normal 200. The mime comes from the
-/// resource file, so a malformed one falls back to the plain block response
-/// rather than failing the request.
-fn redirect_response(redirect: crate::adblock::api::Redirect) -> Response<ResBody> {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(hyper::header::CONTENT_TYPE, redirect.mime)
-        .body(full_body(Bytes::from(redirect.body)))
-        .unwrap_or_else(|_| synthetic_blocked_response())
-}
-
-/// The response returned for a path-level block. A `403 Forbidden` with an empty
-/// body tells the client the resource was blocked without tearing down the
-/// connection, so its other in-flight requests survive.
-fn synthetic_blocked_response() -> Response<ResBody> {
-    Response::builder()
-        .status(StatusCode::FORBIDDEN)
-        .body(empty_body())
-        .expect("static blocked response is always valid")
 }
 
 fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {

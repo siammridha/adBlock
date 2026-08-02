@@ -99,7 +99,7 @@ cargo build --release
 > | `proxy-settings.json`     | proxy | egress (`resolver_only`, `disable_ipv6`) |
 > | `excluded-domains.conf`   | proxy | domains tunneled blind, one per line (`!` prefix = switched off) |
 > | `active-ca.json`          | proxy | which managed CA signs leaves |
-> | `adblock.json`            | adblock | which rules adblock may act on: `redirect`, `removeparam`, `csp`, `cosmetic`, `scriptlets`, `runtime` |
+> | `adblock.json`            | adblock | whether adblock filters at all (`enabled`), and which rules it may act on: `redirect`, `removeparam`, `csp`, `cosmetic`, `scriptlets`, `runtime` |
 > | `dns-server.json`         | dns   | DNS listener: `enabled`, `listen` |
 > | `dns-settings.json`       | dns   | upstreams, mode, bootstrap, cache size, TTL bounds, ECH |
 > | `dns-rewrites.conf`       | dns   | local DNS records (`!` prefix = switched off) |
@@ -253,8 +253,8 @@ JSON API (all on `admin_listen`):
 | `/api/scriptlets/update` | POST     | refresh the scriptlet library from uBO master  |
 | `/api/blocklists`        | GET/POST | list / add-append-replace-delete / enable-disable |
 | `/api/blocklist?name=`   | GET      | one list's raw rule text (for editing)         |
-| `/api/adblock`           | GET      | adblock settings: `redirect`, `removeparam`, `csp`, `cosmetic`, `scriptlets`, `runtime` |
-| `/api/adblock/config`    | POST     | set any of those six switches                  |
+| `/api/adblock`           | GET      | adblock settings: `enabled`, `redirect`, `removeparam`, `csp`, `cosmetic`, `scriptlets`, `runtime` |
+| `/api/adblock/config`    | POST     | set any of those seven switches                |
 | `/api/check`             | POST     | test a URL against rules (`{url,type?,source?}`)|
 | `/api/cosmetic`          | POST     | generic cosmetic CSS for class/id names a live page grew (`{url,classes,ids}`); CORS-open, called by the injected runtime, not the dashboard |
 | `/api/exclusions`        | GET/POST | domains that bypass MITM (add / delete / enable / disable) |
@@ -313,6 +313,12 @@ changes nothing and exposes no controls. Every other endpoint stays same-origin.
   rule to be applied and has nothing to switch off. Off, a `$redirect` rule
   blocks plainly, a `$removeparam` rule leaves the URL alone, and a `$csp` rule
   adds no header.
+- **A master switch turns all of it off**, on the **Proxy → Settings** tab under
+  **Ad blocking** — that is where you go to stop filtering for a moment. Off,
+  nothing is matched: no blocking, no stand-in bodies, no cosmetic rules and no
+  scriptlets, while the proxy keeps running, forwarding and logging. It is
+  adblock's switch like the rest and persists to the same file; it sits with the
+  proxy settings only because that is where it is looked for.
 - **Beacons are matched twice.** A `navigator.sendBeacon()` call is a POST with
   `Sec-Fetch-Mode: no-cors` and `Sec-Fetch-Dest: empty` — byte-for-byte what a
   no-cors `fetch()` sends, with no header separating them (uBO is simply told

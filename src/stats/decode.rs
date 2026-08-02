@@ -4,8 +4,7 @@
 //! prefix back into readable text. A compressed body is stored as
 //! `"<label>\n<base64>"` (the label names the `Content-Encoding`); this module
 //! decodes that back to text on demand — only when the admin UI opens a request
-//! and asks for it. The proxy produces the stored form; stats consumes it, and
-//! each keeps its own copy of the wire format (no shared helper).
+//! and asks for it. [`capture`](super::capture) writes that form; this reads it.
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 

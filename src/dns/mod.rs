@@ -282,8 +282,17 @@ impl DnsService {
         Ok(msg)
     }
 
-    pub fn cache(&self) -> &DnsCache {
+    #[cfg(test)]
+    fn cache(&self) -> &DnsCache {
         &self.cache
+    }
+
+    /// Empty the cache and answer how many entries went. DNS owns the cache, so
+    /// it also writes the log line that records the flush.
+    pub fn flush_cache(&self) -> usize {
+        let cleared = self.cache.clear();
+        self.state.log_event(EventKind::Info, format!("dns cache flushed ({cleared} entries)"));
+        cleared
     }
 
     pub fn rewrites(&self) -> &RewriteStore {

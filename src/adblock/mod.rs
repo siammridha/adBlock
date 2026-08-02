@@ -12,6 +12,7 @@ use adblock::Engine;
 use error::Result;
 
 pub mod api;
+mod classify;
 pub mod commands;
 pub mod config;
 mod curation;
@@ -136,6 +137,9 @@ pub struct BlockDecision {
     /// ask upstream for an unencoded body and to buffer the response instead of
     /// streaming it; it never decides for itself what happens to the bytes.
     pub wants_body: bool,
+    /// The `$type` this request was matched as. Adblock names it; the caller
+    /// only reports it.
+    pub req_type: String,
 }
 
 impl BlockDecision {
@@ -147,6 +151,7 @@ impl BlockDecision {
             rewritten_url: None,
             csp: None,
             wants_body: false,
+            req_type: String::new(),
         }
     }
 }
@@ -247,12 +252,52 @@ pub fn with_store(
 }
 
 impl AdBlocker {
+    /// Whether Adblock does anything at all: the config switch it was built
+    /// with, and the master switch the dashboard turns. Off, nothing matches
+    /// and no page is touched.
     pub fn enabled(&self) -> bool {
-        self.core.enabled
+        self.core.enabled && self.decisions.settings().enabled
+    }
+
+    /// What happens to this request, as it arrived. Adblock reads the resource
+    /// type and the page it came from off the request itself — both are things
+    /// filter rules match on, so neither is the caller's to decide.
+    pub fn check_request<B>(&self, url: &str, req: &hyper::Request<B>) -> BlockDecision {
+        let req_type = classify::request_type(req);
+        let source = classify::source_url(req, url, &req_type);
+        let decision = self.check(url, &source, &req_type);
+        // A `navigator.sendBeacon()` call arrives as an ordinary no-cors POST,
+        // so it was matched above as a `fetch`. Most `$ping` rules name only
+        // that type, and would miss it. Ask a second time as a `ping` — but
+        // only for a request already shaped like a beacon, and only when
+        // nothing matched it the first way, so an ordinary fetch keeps its own
+        // verdict and the extra lookup stays off the common path.
+        if !decision.blocked && req_type != "ping" && classify::is_beacon_shaped(req) {
+            let as_beacon = self.check(url, &source, "ping");
+            if as_beacon.blocked {
+                tracing::debug!(%url, "matched as a beacon, not a fetch");
+                return as_beacon;
+            }
+        }
+        decision
+    }
+
+    /// Whether a rule blocks the host outright — one like `||ads.example^`,
+    /// which also matches the host's root document. A rule that only blocks a
+    /// specific resource does not.
+    pub fn check_host(&self, scheme: &str, host: &str) -> BlockDecision {
+        self.check(&format!("{scheme}://{host}/"), "", "document")
     }
 
     pub fn check(&self, url: &str, source_url: &str, request_type: &str) -> BlockDecision {
-        if !self.core.enabled {
+        BlockDecision {
+            req_type: request_type.to_string(),
+            ..self.match_request(url, source_url, request_type)
+        }
+    }
+
+    fn match_request(&self, url: &str, source_url: &str, request_type: &str) -> BlockDecision {
+        if !self.enabled() {
             return BlockDecision::pass();
         }
         // Only a page the browser renders can be rewritten; a script or an
@@ -280,7 +325,31 @@ impl AdBlocker {
                 .then(|| engine.get_csp_directives(&request))
                 .flatten(),
             wants_body: renders_a_page && !result.matched && allow.injects(),
+            // Filled in by `check`, which is the only way in here.
+            req_type: String::new(),
         }
+    }
+
+    /// The response a blocked request gets. A `$redirect` rule supplies a
+    /// stand-in body — a neutered copy of the real resource — so the page's own
+    /// code keeps running; without one, a block is an empty `403`. What a block
+    /// looks like is a filtering decision, so it is made here and the caller
+    /// only sends it.
+    pub fn blocked_response(&self, decision: BlockDecision) -> hyper::Response<Vec<u8>> {
+        let forbidden = || {
+            hyper::Response::builder()
+                .status(hyper::StatusCode::FORBIDDEN)
+                .body(Vec::new())
+                .expect("static blocked response is always valid")
+        };
+        let Some(redirect) = decision.redirect else { return forbidden() };
+        // The mime comes from the resource file, so a malformed one falls back
+        // to the plain block rather than failing the request.
+        hyper::Response::builder()
+            .status(hyper::StatusCode::OK)
+            .header(hyper::header::CONTENT_TYPE, redirect.mime)
+            .body(redirect.body)
+            .unwrap_or_else(|_| forbidden())
     }
 
     /// Where a filtered page sends the questions it has after it was served.
@@ -436,7 +505,7 @@ impl AdBlocker {
     }
 
     fn cosmetic_css(&self, url: &str, classes: &[String], ids: &[String]) -> String {
-        if !self.core.enabled {
+        if !self.enabled() {
             return String::new();
         }
         let engine = self.core.engine.read().expect("engine lock").clone();
@@ -483,7 +552,7 @@ impl AdBlocker {
     /// the `:style()` unbreak rules — already went out with the page itself, so
     /// repeating it on every question would just re-send the whole stylesheet.
     pub fn cosmetic_css_for_names(&self, url: &str, classes: &[String], ids: &[String]) -> String {
-        if !self.core.enabled || (classes.is_empty() && ids.is_empty()) {
+        if !self.enabled() || (classes.is_empty() && ids.is_empty()) {
             return String::new();
         }
         let engine = self.core.engine.read().expect("engine lock").clone();
@@ -523,7 +592,7 @@ impl AdBlocker {
     /// that do reduce to CSS went out with `cosmetic_css` instead, so nothing
     /// is applied twice.
     fn procedural_actions(&self, url: &str) -> String {
-        if !self.core.enabled {
+        if !self.enabled() {
             return String::new();
         }
         let engine = self.core.engine.read().expect("engine lock").clone();
@@ -548,7 +617,7 @@ impl AdBlocker {
     }
 
     fn scriptlet_injection(&self, url: &str) -> Option<ScriptletInjection> {
-        if !self.core.enabled || !self.scriptlets_enabled() {
+        if !self.enabled() || !self.scriptlets_enabled() {
             return None;
         }
         let engine = self.core.engine.read().expect("engine lock").clone();
@@ -690,6 +759,24 @@ mod tests {
             "image",
         );
         assert!(d.blocked);
+    }
+
+    #[test]
+    fn the_master_switch_stops_every_kind_of_filtering() {
+        let (b, _) = blocker_with(&["||ads.example.com^", "example.com##.ad-slot"]);
+        let url = "https://ads.example.com/banner.png";
+        assert!(b.check(url, "", "image").blocked);
+        assert!(!b.cosmetic_css("https://example.com/", &["ad-slot".into()], &[]).is_empty());
+
+        b.set_decisions(br#"{"enabled":false}"#).unwrap();
+        assert!(!b.enabled());
+        assert!(!b.check(url, "", "image").blocked, "nothing matches with blocking off");
+        assert!(!b.check_host("https", "ads.example.com").blocked);
+        assert!(!b.check_dns("ads.example.com").blocked);
+        assert!(b.cosmetic_css("https://example.com/", &["ad-slot".into()], &[]).is_empty());
+
+        b.set_decisions(br#"{"enabled":true}"#).unwrap();
+        assert!(b.check(url, "", "image").blocked, "and it comes back on");
     }
 
     #[test]

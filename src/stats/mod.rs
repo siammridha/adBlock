@@ -14,6 +14,7 @@ use crate::stats::persist::OverrideStore;
 use history::{History, Metric};
 
 pub mod api;
+mod capture;
 pub mod config;
 mod decode;
 mod errors;
@@ -473,7 +474,20 @@ impl SharedState {
 
     /// The captured headers/bodies/scriptlets for one request, fetched on
     /// demand. Returns an empty detail (only the seq) when nothing was captured.
+    ///
+    /// The raw compressed prefixes are left out: they are large, and the only
+    /// thing that reads them is [`decode_captured_body`](Self::decode_captured_body).
+    /// The display bodies carry a `[compressed body — …]` placeholder instead,
+    /// which is what tells a caller a decode is on offer.
     pub fn request_detail(&self, seq: u64) -> RequestDetail {
+        RequestDetail {
+            req_body_raw: String::new(),
+            resp_body_raw: String::new(),
+            ..self.stored_detail(seq)
+        }
+    }
+
+    fn stored_detail(&self, seq: u64) -> RequestDetail {
         let found = self.request_detail.as_ref().and_then(|log| {
             log.find(|l| line_seq(l) == Some(seq))
                 .and_then(|l| serde_json::from_str(&l).ok())
@@ -485,7 +499,7 @@ impl SharedState {
     /// owns the stored capture, so it owns turning the raw compressed prefix
     /// back into text; the web app renders whatever variant comes back.
     pub fn decode_captured_body(&self, seq: u64, slot: &str) -> BodyDecode {
-        let detail = self.request_detail(seq);
+        let detail = self.stored_detail(seq);
         let raw = match slot {
             "req" => detail.req_body_raw,
             "resp" => detail.resp_body_raw,
@@ -530,8 +544,66 @@ impl Exchange {
     /// Whether captured artifacts should be collected at all — true when the
     /// record is live (a dashboard is watching) or being persisted for later
     /// on-demand fetch. An inert exchange has none of either.
-    pub(crate) fn is_active(&self) -> bool {
+    fn is_active(&self) -> bool {
         self.captures.is_some()
+    }
+
+    /// How many bytes of a response body this exchange wants kept. Zero when
+    /// nothing is being captured, so a caller streaming a body knows to hold
+    /// none of it. The size limit is Stats' to set — it is what ends up in the
+    /// record.
+    pub fn response_body_cap(&self) -> usize {
+        match self.is_active() {
+            true => capture::RESP_BODY_CAP,
+            false => 0,
+        }
+    }
+
+    /// Store the request body. `prefix` is what the caller kept of a
+    /// `total`-byte body, as it arrived under `content_encoding` (the raw header
+    /// value, empty when there was none). Stats decides how it is stored.
+    pub fn capture_request_body(&self, prefix: &[u8], total: usize, content_encoding: &str) {
+        self.capture_body(
+            CaptureSlot::ReqBody,
+            CaptureSlot::ReqBodyRaw,
+            prefix,
+            total,
+            capture::REQ_BODY_CAP,
+            content_encoding,
+        );
+    }
+
+    /// Store the response body. See [`capture_request_body`](Self::capture_request_body).
+    pub fn capture_response_body(&self, prefix: &[u8], total: usize, content_encoding: &str) {
+        self.capture_body(
+            CaptureSlot::RespBody,
+            CaptureSlot::RespBodyRaw,
+            prefix,
+            total,
+            capture::RESP_BODY_CAP,
+            content_encoding,
+        );
+    }
+
+    fn capture_body(
+        &self,
+        disp: CaptureSlot,
+        raw: CaptureSlot,
+        prefix: &[u8],
+        total: usize,
+        cap: usize,
+        content_encoding: &str,
+    ) {
+        if !self.is_active() {
+            return;
+        }
+        let (body, packed) = capture::stored(prefix, total, cap, content_encoding);
+        self.attach(disp, || body);
+        // The raw prefix can be large; keep it off the live SSE stream and only
+        // in the record (and so the sidecar), where the decode endpoint reads it.
+        if let Some(packed) = packed {
+            self.attach_quiet(raw, || packed);
+        }
     }
 
     pub fn attach(&self, slot: CaptureSlot, text: impl FnOnce() -> String) {

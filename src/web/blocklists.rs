@@ -43,11 +43,7 @@ pub(super) fn scriptlets_json(curation: &ListCuration) -> Value {
                     "injectable": s.injectable, "bytes": s.bytes })
         })
         .collect();
-    let updated_ms = std::fs::metadata(scriptlets.path())
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_millis() as u64);
+    let updated_ms = scriptlets.updated_ms();
     json!({
         "enabled": scriptlets.enabled(),
         "loaded": library.len(),
@@ -86,7 +82,7 @@ pub(super) fn blocklist_text_json(curation: &ListCuration, query: &str) -> Value
     let name = parse_query(query, "name")
         .map(percent_decode)
         .unwrap_or_default();
-    match curation.lists().into_iter().find(|l| l.name == name) {
+    match curation.list(&name) {
         Some(l) => json!({
             "name": l.name,
             "source": l.source,

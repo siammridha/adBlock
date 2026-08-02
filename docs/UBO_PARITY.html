@@ -322,9 +322,10 @@ block goes with it.</p>
 </table>
 </div>
 
-<p>These all come from one place: <code>guess_request_type</code> in <code>pipeline.rs</code> reads
-<code>sec-fetch-dest</code>, falling back to <code>x-requested-with</code>, then to
-<code>accept</code>.</p>
+<p>These all come from one place: <code>request_type</code> in <code>adblock/classify.rs</code>
+reads <code>sec-fetch-dest</code>, falling back to <code>x-requested-with</code>, then to
+<code>accept</code>. Naming a request is a filtering decision, so adblock does it, not the
+proxy that hands the request over.</p>
 
 <p><code>$websocket</code> and <code>$ping</code> arrive with no usable
 <code>sec-fetch-dest</code>, so each is read from the header that does name it:
@@ -340,8 +341,8 @@ them. uBO is not cleverer here; it is simply handed a resource type by the brows
 
 <p>Labelling every such POST a <code>ping</code> would be a bad trade — the lists hold 971
 <code>$xhr</code> rules against 70 <code>$ping</code> ones, so it would lose far more than it
-gained. Instead the proxy matches the request as the fetch it appears to be, and <em>if nothing
-matched</em>, asks once more as a <code>ping</code>. Both sets of rules apply, the extra lookup
+gained. Instead adblock matches the request as the fetch it appears to be, and <em>if nothing
+matched</em>, asks its own engine once more as a <code>ping</code>. Both sets of rules apply, the extra lookup
 only happens on requests already shaped like a beacon, and a second look can only ever add a
 block.</p>
 

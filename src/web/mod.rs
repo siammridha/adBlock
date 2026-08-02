@@ -240,14 +240,9 @@ impl Admin {
             "/api/tester/config" => self.set_tester_enabled(body),
             "/api/check" => check_rule(&self.adblock, body),
             "/api/cosmetic" => cosmetic_for_page(&self.adblock, body),
-            "/api/dns/flush" => self.with_dns(|dns| {
-                let cleared = dns.cache().clear();
-                self.state.log_event(
-                    crate::stats::api::EventKind::Info,
-                    format!("dns cache flushed ({cleared} entries)"),
-                );
-                json_ok(json!({"ok": true, "cleared": cleared}))
-            }),
+            "/api/dns/flush" => {
+                self.with_dns(|dns| json_ok(json!({"ok": true, "cleared": dns.flush_cache()})))
+            }
             "/api/dns/test" => check_dns_rule(&self.adblock, body),
             "/api/dns/rewrites" => self.with_dns(|dns| edit_rewrites(&self.state, &dns, body)),
             "/api/dns/config" => self.with_dns(|dns| edit_dns_config(&self.state, &dns, body)),
@@ -552,6 +547,13 @@ mod tests {
 
         let v = body_json(admin.route(get("/api/adblock")).await).await;
         assert_eq!((&v["redirect"], &v["removeparam"]), (&json!(true), &json!(true)));
+        assert_eq!(v["enabled"], true, "the master switch is reported with the rest");
+
+        // The switch the proxy-settings tab posts, on its own.
+        let resp = admin.route(post("/api/adblock/config", r#"{"enabled":false}"#)).await;
+        let v = body_json(resp).await;
+        assert_eq!((&v["enabled"], &v["redirect"]), (&json!(false), &json!(true)));
+        let _ = admin.route(post("/api/adblock/config", r#"{"enabled":true}"#)).await;
 
         let resp = admin.route(post("/api/adblock/config", r#"{"redirect":false}"#)).await;
         assert_eq!(resp.status(), StatusCode::OK);
