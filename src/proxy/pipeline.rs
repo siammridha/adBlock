@@ -140,10 +140,16 @@ fn guess_request_type<B>(req: &Request<B>) -> String {
         .get(hyper::header::ACCEPT)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if accept.contains("image/") {
-        "image".to_string()
-    } else if accept.contains("text/html") {
+    // `text/html` first, and it has to stay first. Both Chrome and Firefox list
+    // `image/avif,image/webp` in the `Accept` of a top-level navigation, so
+    // testing for an image before HTML calls every page an image — and a page
+    // read as an image is never handed to Adblock for cosmetic rules,
+    // scriptlets or `$csp`. An image request never asks for `text/html`, so
+    // this order costs the image case nothing.
+    if accept.contains("text/html") {
         "document".to_string()
+    } else if accept.contains("image/") {
+        "image".to_string()
     } else if !matches!(req.method(), &hyper::Method::GET | &hyper::Method::HEAD) {
         "fetch".to_string()
     } else {
@@ -237,6 +243,25 @@ mod tests {
         assert_eq!(p.scheme, "https");
         assert_eq!(p.url, "https://example.com:8443/page");
         assert_eq!(p.req_type, "document");
+    }
+
+    /// Browsers only send `sec-fetch-dest` to a trustworthy origin, so on a
+    /// plain-http page the `Accept` fallback is all there is — and a real
+    /// navigation `Accept` names images too.
+    #[test]
+    fn a_real_navigation_accept_is_a_document_not_an_image() {
+        for accept in [
+            // Chrome
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            // Firefox
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        ] {
+            let r = req("http://e.com/", &[("accept", accept)]);
+            assert_eq!(plan_request(&r, false).unwrap().req_type, "document", "{accept}");
+        }
+        // and an <img> still reads as one
+        let r = req("http://e.com/x.gif", &[("accept", "image/avif,image/webp,*/*;q=0.8")]);
+        assert_eq!(plan_request(&r, false).unwrap().req_type, "image");
     }
 
     #[test]
