@@ -266,7 +266,7 @@ by <code>server.rs</code>. Cosmetic CSS in <code>cosmetic_css()</code>, injected
 lists use being present — the 78th is <code>sptest</code>, this repository's own test rule in
 <code>custom.txt</code>, so uBO coverage is complete. Both procedural families come out of
 <code>procedural_injection()</code> as a finished evaluator
-(<code>src/adblock/procedural_runtime.js</code>) that runs them in the page. Both exception
+(<code>src/adblock/injected/procedural_runtime.js</code>) that runs them in the page. Both exception
 families are resolved inside the engine before we see anything.</p>
 
 <p>Three proxy switches decide what actually goes into a page, in
@@ -585,7 +585,7 @@ lists.</p>
 <code>cosmetic_css()</code> keeps calling <code>as_css()</code> and emits everything that reduces
 to a stylesheet, and <code>procedural_injection()</code> takes the rest — the ones
 <code>as_css()</code> answers <code>None</code> for — and embeds that JSON in
-<code>src/adblock/procedural_runtime.js</code>. The proxy injects the finished script without
+<code>src/adblock/injected/procedural_runtime.js</code>. The proxy injects the finished script without
 reading it, so nothing is applied twice and no rule is dropped.</p>
 
 <p>The evaluator walks each rule's chain against the live DOM: the first entry is a plain CSS
@@ -667,39 +667,39 @@ blocked and what is not.</p>
 
 <p><strong>Applying a rule to the live DOM needs no channel.</strong> Which procedural rules a page
 gets is decided by its hostname, which the proxy knows as it serves the page. So the rules go into
-the page with the page, and <code>src/adblock/procedural_runtime.js</code> evaluates them there.
+the page with the page, and <code>src/adblock/injected/procedural_runtime.js</code> evaluates them there.
 Nothing is asked of the proxy, nothing crosses an origin, and it works in every browser.</p>
 
 <p><strong>Asking which generic rule matches a name that appeared later does.</strong> There are
 hundreds of thousands of generic rules; they cannot all be sent, so the page has to ask.
-<code>src/proxy/cosmetic_runtime.js</code> watches the page with a
-<code>MutationObserver</code>, collects new class and id names, and asks the proxy what matches.</p>
+<code>src/adblock/injected/cosmetic_runtime.js</code> watches the page with a
+<code>MutationObserver</code>, collects new class and id names, and asks what matches.</p>
 
-<p>That second one does not work in Safari or Firefox.</p>
+<p>That second one used to fail in Safari and Firefox.</p>
 
 <pre><code>[blocked] The page at https://www.youtube.com/... requested insecure content
 from http://127.0.0.1:8081/api/cosmetic. This content was blocked.</code></pre>
 
-<p>The runtime is injected into the page, so its request carries the page's origin. An
+<p>The runtime is injected into the page, so its request carried the page's origin. An
 <code>https://</code> page making a plain <code>http://</code> request is mixed content. Chromium
-allows it because it treats <code>127.0.0.1</code> as trustworthy. WebKit and Gecko do not.
-<code>cosmetic_runtime.js:61</code> swallows the failure in an empty <code>catch</code>, which is
+allowed it because it treats <code>127.0.0.1</code> as trustworthy. WebKit and Gecko do not.
+<code>cosmetic_runtime.js</code> swallows a failed lookup in an empty <code>catch</code>, which is
 why it went unnoticed.</p>
 
-<p>So on Safari and Firefox today you get the static scan of the served HTML, the scriptlets, the
-site-specific cosmetic rules and the procedural rules — but no <em>generic</em> rule for a class
-name that appeared after the page was served. On a page that builds itself in JavaScript, that is
-a real hole, just a narrower one than it looked.</p>
+<p><strong>Fixed.</strong> The page now asks its own address —
+<code>https://that-site.example/__abx/cosmetic</code> — and Adblock recognises the path and answers
+it as the request passes through, instead of letting it go upstream. Same origin, so no mixed
+content and no CORS, and it works from whichever machine is browsing rather than only the one the
+proxy runs on. <code>src/adblock/routes.rs</code> holds the reserved prefix and the table of
+endpoints under it; matching happens before any filter rule is consulted, so no list can shadow one
+and none of these questions ever reaches the site. The detector weights for the picture blur travel
+the same way.</p>
 
 <div class="note">
-<p><strong>This is why <code>extension/</code> exists</strong> — but it is no longer the only way
-out. A background script's request leaves the extension's own origin, so mixed content does not
-apply, and it is the only route to <code>$popup</code>. For the generic lookup alone there is a
-smaller fix: the proxy already terminates TLS with its own CA, so it can answer the cosmetic
-endpoint on an <code>https://</code> origin the page is allowed to call. Same-scheme, no mixed
-content, no extension to install, and it works in every browser at once. Not built yet; it is item
-5 on the work list.</p>
-<p>The procedural evaluator did not wait for either of them, because it never needed to ask
+<p><strong>This is why <code>extension/</code> exists</strong> — and the generic lookup is no
+longer one of the reasons. A background script's request leaves the extension's own origin, so
+mixed content does not apply, and it is still the only route to <code>$popup</code>.</p>
+<p>The procedural evaluator never waited for any of this, because it never needed to ask
 anything.</p>
 </div>
 
@@ -804,7 +804,7 @@ option stays dropped either way, so counting it under both would flatter every r
 <tr><td>6</td><td><s>Procedural evaluator</s> <span class="tag full">done</span></td><td class="num">1,145</td><td>~270 lines JS</td>
     <td><strong>No Rust parsing work, and no extension either.</strong> The crate returns these on
     <code>procedural_actions</code>; <code>as_css()</code> now sorts them into the stylesheet and
-    the JSON, and <code>src/adblock/procedural_runtime.js</code> goes out with the page's own
+    the JSON, and <code>src/adblock/injected/procedural_runtime.js</code> goes out with the page's own
     rules in it. All 9 procedural operators, the plain selector they hang off, and all 4
     actions.</td></tr>
 <tr><td>7</td><td>HTML filtering (<code>##^</code>)</td><td class="num">122</td><td>~200 lines</td>

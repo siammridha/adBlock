@@ -21,20 +21,6 @@ pub(super) fn json_ok(v: Value) -> AdminResponse {
     json_status(StatusCode::OK, v)
 }
 
-/// Like `json_ok`, but readable from a filtered page. Only the cosmetic
-/// endpoint uses this: the page asking sits on someone else's domain, so
-/// without the header the browser hands it an opaque response. The rest of the
-/// admin API stays same-origin.
-pub(super) fn json_cors(status: StatusCode, v: Value) -> AdminResponse {
-    Response::builder()
-        .status(status)
-        .header("content-type", "application/json")
-        .header("cache-control", "no-store")
-        .header("access-control-allow-origin", "*")
-        .body(Full::new(Bytes::from(v.to_string())).boxed())
-        .unwrap()
-}
-
 pub(super) fn json_status(status: StatusCode, v: Value) -> AdminResponse {
     Response::builder()
         .status(status)

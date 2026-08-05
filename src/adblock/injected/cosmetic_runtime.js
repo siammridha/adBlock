@@ -6,10 +6,13 @@
 // page adds afterwards, reports the names it has not asked about yet, and
 // applies whatever CSS comes back.
 //
-// __COSMETIC_ENDPOINT__ is replaced with the admin server's cosmetic endpoint
-// before this is injected.
+// The endpoint is on the page's own origin: the request goes back through the
+// proxy like any other, and Adblock recognises the path and answers it itself.
+// Same origin means no CORS and no mixed content, and it works from whichever
+// machine is browsing. __ROUTE_PREFIX__ is replaced with the path Adblock
+// reserves before this is injected.
 (function () {
-  var endpoint = "__COSMETIC_ENDPOINT__";
+  var endpoint = location.origin + "__ROUTE_PREFIX__cosmetic";
   var BATCH_MS = 100;
   var MAX_NAMES = 500; // per request
   var MAX_ROUNDS = 20; // a page that rewrites itself forever stops here

@@ -1,8 +1,12 @@
 - When reporting back to me from now on explain things in plain, simple language. Use short sentences and everyday words. Avoid unnecessary detail, buzzwords, overly formal language, metaphors, analogies, and figures of speech. Be direct, clear, and literal.
 
-- Ensure all changes are clean—don't leave behind dangling code, unused variables, or stale configuration.
+- Do not add Co-Authored-By trailers on this repo.
+- Use task management skills to impliment features.
+- Ensure all changes are clean, don't leave behind dangling code, unused variables, or stale configuration.
 - Before making any commit, make sure to update all relevant documentation so it accurately reflects the current changes.
-- When a question is asked just answer the question so that I can make an informative decission. Do not start planing and exicuting
+- When a question is asked just answer the question so that I can make an informative decission. Do not start planing and exicuting.
+- Write brief comments only when they add context that isn't obvious from the code itself. Don't use comments to describe what the code does.
+- Treat everything I report seeing as accurate. Never question or contradict my observations. Instead, do everything you can to accurately explain what I saw, including any plausible technical or UI behavior that could account for it.
 
 ## Architecture boundaries (non-negotiable)
 

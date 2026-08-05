@@ -60,10 +60,6 @@ async fn main() -> Result<()> {
     // Each module owns and creates its own data directories; the entry point
     // only hands each one its base config and wires the results together.
     let (adblock, curation) = adBlock::adblock::api::from_config(&adblock_cfg)?;
-    // Where a filtered page sends the questions it has after it was served.
-    // Wiring, like the address itself: adblock only embeds what it is handed.
-    adblock.set_admin_endpoint(&admin_listen);
-
     // The active CA (from the certificates tab) wins over the config CA; when
     // nothing is selected, active_paths() returns the config paths. Switching is
     // applied here at startup, so a change takes effect on the next run.

@@ -91,12 +91,21 @@ The line is simple: if the reason for the change is a filter rule, Adblock makes
 
 ## Adblock
 
-**Exposes to Proxy and DNS:** three things — ask what happens to a request, hand
-over the request, hand over the response.
+**Exposes to Proxy and DNS:** four things — ask what happens to a request, ask
+whether the answer is Adblock's own, hand over the request, hand over the response.
 
 Asking answers one question: what happens to this request? Blocked, or not. A block
 carries the stand-in body to serve instead (`$redirect`), which Adblock has already
 decoded; the caller only serves it.
+
+Some requests are Adblock talking to itself. The scripts it puts into a page have
+questions it has to answer afterwards — which generic cosmetic rules a name it just
+grew selects, where the picture detector's weights are — and those go to the page's
+own address, so they arrive at the caller like any other request. Adblock recognises
+its own paths, off the URL, before any rule is consulted, and answers them. The
+caller asks once, hands over the request body it has already collected, and forwards
+what comes back without going upstream. It does not know which paths are Adblock's,
+and it never decides to intercept one.
 
 The caller hands over the request as it arrived and does not describe it. What kind
 of resource this is, which page it came from, whether it might be a beacon — filter
@@ -134,6 +143,8 @@ blocklist management, and its own settings.
   editing, script and style injection, filtering-related headers
 - Custom filter storage and management
 - The rule tester
+- Its own page-facing endpoints: which paths are reserved, what each one answers,
+  and validating whatever a page sends to one
 - Its own settings and their persistence
 
 **Validation example.** When the Web App submits a new custom rule, the Web App does

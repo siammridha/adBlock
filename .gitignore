@@ -1,10 +1,12 @@
 /target
-Cargo.lock
-ca-cert.pem
-ca-key.pem
-lists/
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
 data/
 models/
 .DS_Store
 .claude/
 vendor/
+docs/HARAMBLUR_FRAME_PIPELINE.md

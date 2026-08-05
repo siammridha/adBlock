@@ -21,6 +21,7 @@ pub mod error;
 pub mod fetch;
 pub mod maintenance;
 mod rewrite;
+mod routes;
 mod scriptlets;
 pub mod settings;
 mod store;
@@ -39,7 +40,7 @@ const CUSTOM_SOURCE: &str = "config + ui";
 /// The in-page evaluator for procedural cosmetic rules. What `:has-text` or
 /// `:remove()` means is a filter-rule question, so the rules and the evaluator
 /// that reads them both belong here.
-const PROCEDURAL_RUNTIME: &str = include_str!("procedural_runtime.js");
+const PROCEDURAL_RUNTIME: &str = include_str!("injected/procedural_runtime.js");
 
 /// Loosen rule-tester input into a full URL: the tester accepts bare hosts,
 /// protocol-relative URLs, and bare paths. Owned by adblock because the rule
@@ -95,10 +96,10 @@ pub struct AdBlocker {
     /// and what it puts into a page. Adblock's own switches — the caller hands
     /// over a request or a response and never asks for a rule to be applied.
     decisions: settings::DecisionPolicy,
-    /// The live-DOM cosmetic script, built once from the admin address the root
-    /// wiring hands over. Unset (or `None`) means no admin server for a page to
-    /// ask, so nothing is injected.
-    runtime: std::sync::OnceLock<Option<String>>,
+    /// Where the picture detector's weights live. Adblock's own directory,
+    /// because there is no CDN for this model — it is HaramBlur's, unpacked
+    /// from the extension.
+    blur_model_dir: std::path::PathBuf,
 }
 
 #[derive(Clone, Debug)]
@@ -147,6 +148,10 @@ pub struct BlockDecision {
     /// The `$type` this request was matched as. Adblock names it; the caller
     /// only reports it.
     pub req_type: String,
+    /// One of Adblock's own page-facing endpoints, matched off the URL before
+    /// any rule was consulted. The caller hands the request body back to
+    /// `own_response` and forwards the answer.
+    route: Option<(routes::Handler, String)>,
 }
 
 impl BlockDecision {
@@ -159,6 +164,7 @@ impl BlockDecision {
             csp: None,
             wants_body: false,
             req_type: String::new(),
+            route: None,
         }
     }
 }
@@ -269,7 +275,7 @@ pub fn with_store(
         Arc::new(AdBlocker {
             core: core.clone(),
             decisions: settings::DecisionPolicy::load(cfg.settings_path()),
-            runtime: std::sync::OnceLock::new(),
+            blur_model_dir: cfg.blur_model_dir(),
         }),
         Arc::new(ListCuration::new(core, store)),
     ))
@@ -287,6 +293,15 @@ impl AdBlocker {
     /// type and the page it came from off the request itself — both are things
     /// filter rules match on, so neither is the caller's to decide.
     pub fn check_request<B>(&self, url: &str, req: &hyper::Request<B>) -> BlockDecision {
+        // Adblock's own endpoints are recognised before anything else looks at
+        // the request, so no filter list can shadow one and none of them ever
+        // reaches the site.
+        if let Some((handler, rest)) = routes::match_url(url) {
+            return BlockDecision {
+                route: Some((handler, rest.to_string())),
+                ..BlockDecision::pass()
+            };
+        }
         let req_type = classify::request_type(req);
         let source = classify::source_url(req, url, &req_type);
         let decision = self.check(url, &source, &req_type);
@@ -351,6 +366,7 @@ impl AdBlocker {
             wants_body: renders_a_page && !result.matched && allow.injects(),
             // Filled in by `check`, which is the only way in here.
             req_type: String::new(),
+            route: None,
         }
     }
 
@@ -376,11 +392,56 @@ impl AdBlocker {
             .unwrap_or_else(|_| forbidden())
     }
 
-    /// Where a filtered page sends the questions it has after it was served.
-    /// Root wiring: Adblock embeds the address it is handed, once, at startup.
-    /// Never set means no admin server, so no live-DOM script goes out.
-    pub fn set_admin_endpoint(&self, admin_listen: &str) {
-        let _ = self.runtime.set(rewrite::cosmetic_runtime(admin_listen));
+    /// The answer to one of Adblock's own page-facing endpoints, or `None` for
+    /// an ordinary request. The caller asks once, with the request body it has
+    /// already collected, and forwards whatever comes back without going
+    /// upstream — the same shape as a block with a stand-in body, decided off
+    /// the path instead of off a rule.
+    pub fn own_response(
+        &self,
+        decision: &BlockDecision,
+        body: &[u8],
+    ) -> Option<hyper::Response<Vec<u8>>> {
+        let (handler, rest) = decision.route.as_ref()?;
+        // A reserved path Adblock cannot answer is still Adblock's, so it is
+        // refused here rather than passed on to the site.
+        let Some(served) = handler(self, rest, body) else {
+            return Some(
+                hyper::Response::builder()
+                    .status(hyper::StatusCode::NOT_FOUND)
+                    .body(Vec::new())
+                    .expect("static not-found response is always valid"),
+            );
+        };
+        Some(
+            hyper::Response::builder()
+                .status(hyper::StatusCode::OK)
+                .header(hyper::header::CONTENT_TYPE, served.mime)
+                .header(hyper::header::CACHE_CONTROL, served.cache)
+                .body(served.body)
+                .expect("a route's own headers are always valid"),
+        )
+    }
+
+    /// One file of the picture detector's model, for a filtered page to fetch.
+    /// `None` if the name is not one of the model's files or the file is not
+    /// there — a fresh checkout has no model until one is put in
+    /// `<data>/blur-model/`, and the runtime reports that as a detector that
+    /// would not load.
+    ///
+    /// The name comes off the URL of a request from a page, so it is checked
+    /// here: only the manifest and the weight shards beside it are reachable,
+    /// and a name carrying a path of its own reads nothing.
+    fn blur_model_file(&self, name: &str) -> Option<(Vec<u8>, &'static str)> {
+        let mime = match name {
+            "model.json" => "application/json",
+            n if n.ends_with(".bin") => "application/octet-stream",
+            _ => return None,
+        };
+        if name.contains(['/', '\\']) || name.starts_with('.') {
+            return None;
+        }
+        std::fs::read(self.blur_model_dir.join(name)).ok().map(|b| (b, mime))
     }
 
     /// Apply the request-side rules to the request the caller is about to send:
@@ -472,7 +533,7 @@ impl AdBlocker {
         // a script tag and a request per page, which is worth turning off
         // separately from the CSS.
         let runtime = match on.runtime {
-            true => self.runtime.get().and_then(Option::as_deref).unwrap_or(""),
+            true => rewrite::COSMETIC_RUNTIME_JS.as_str(),
             false => "",
         };
         // Procedural rules — `:has-text`, `:upward`, `:remove()` — are cosmetic
@@ -591,7 +652,7 @@ impl AdBlocker {
     /// the page's names — the hostname-specific rules, the custom generic ones,
     /// the `:style()` unbreak rules — already went out with the page itself, so
     /// repeating it on every question would just re-send the whole stylesheet.
-    pub fn cosmetic_css_for_names(&self, url: &str, classes: &[String], ids: &[String]) -> String {
+    fn cosmetic_css_for_names(&self, url: &str, classes: &[String], ids: &[String]) -> String {
         if !self.enabled() || (classes.is_empty() && ids.is_empty()) {
             return String::new();
         }
@@ -1361,6 +1422,42 @@ mod tests {
         }
     }
 
+    /// The model files are served to whichever page asked, so the name in the
+    /// URL decides which file is read. Only the manifest and the shards beside
+    /// it are reachable, and a name carrying a path of its own reads nothing.
+    #[test]
+    fn only_the_model_files_are_readable_by_name() {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "sp-blur-model-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(dir.join("blur-model")).unwrap();
+        std::fs::write(dir.join("blur-model").join("model.json"), b"{}").unwrap();
+        std::fs::write(dir.join("blur-model").join("w.bin"), b"weights").unwrap();
+        std::fs::write(dir.join("secret.txt"), b"not yours").unwrap();
+
+        let mut c = cfg(&[]);
+        c.data_dir = dir.clone();
+        let (b, _) = with_store(&c, Arc::new(MemoryListStore::new())).unwrap();
+
+        assert_eq!(b.blur_model_file("model.json").unwrap().1, "application/json");
+        assert_eq!(b.blur_model_file("w.bin").unwrap().0, b"weights");
+        for bad in [
+            "../secret.txt",
+            "../../etc/passwd",
+            "..\\secret.txt",
+            ".hidden.bin",
+            "secret.txt",
+            "",
+            "missing.bin",
+        ] {
+            assert!(b.blur_model_file(bad).is_none(), "{bad} must not be readable");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The blur is one feature made of two edits — a script into the page and a
     /// permission onto the picture responses — and both hang off one switch.
     #[test]
@@ -1375,7 +1472,6 @@ mod tests {
         }
         let page = b"<html><head></head><body><img src=x></body></html>";
         let (b, _) = blocker_with(&[]);
-
         for (setting, want) in [(r#"{"blur":false}"#, false), (r#"{"blur":true}"#, true)] {
             b.set_decisions(setting.as_bytes()).unwrap();
 

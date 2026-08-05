@@ -256,7 +256,6 @@ JSON API (all on `admin_listen`):
 | `/api/adblock`           | GET      | adblock settings: `enabled`, `redirect`, `removeparam`, `csp`, `cosmetic`, `scriptlets`, `runtime` |
 | `/api/adblock/config`    | POST     | set any of those seven switches                |
 | `/api/check`             | POST     | test a URL against rules (`{url,type?,source?}`)|
-| `/api/cosmetic`          | POST     | generic cosmetic CSS for class/id names a live page grew (`{url,classes,ids}`); CORS-open, called by the injected runtime, not the dashboard |
 | `/api/exclusions`        | GET/POST | domains that bypass MITM (add / delete / enable / disable) |
 | `/api/server`            | GET      | proxy + DNS listener status (enabled / listen / running) |
 | `/api/server/config`     | POST     | start/stop or rebind the proxy & DNS listeners live (persisted) |
@@ -274,12 +273,49 @@ JSON API (all on `admin_listen`):
 | `/ca-cert.pem`           | GET      | download the active CA                         |
 
 Bind it to `127.0.0.1` only (the default) — it exposes controls. Set
-`PROXY_ADMIN_LISTEN=""` to disable it entirely (which also turns off the
-live-DOM cosmetic runtime, since it has nothing left to ask).
+`PROXY_ADMIN_LISTEN=""` to disable it entirely.
 
-`/api/cosmetic` is the one endpoint that answers cross-origin, because the page
-calling it sits on someone else's domain. It only reads filter rules — it
-changes nothing and exposes no controls. Every other endpoint stays same-origin.
+Every endpoint here is same-origin, for the dashboard only. The questions a
+filtered page asks do not come here at all: they go to the page's own address,
+under a path adblock reserves, and adblock answers them as the request passes
+through the proxy. See [Adblock's own endpoints](#adblocks-own-endpoints).
+
+---
+
+## Adblock's own endpoints
+
+The scripts adblock puts into a page have questions it has to answer after the
+page was served. They ask the page's own address, under a reserved path:
+
+| Path                          | Method | What it answers                                        |
+| ----------------------------- | ------ | ------------------------------------------------------ |
+| `/__abx/cosmetic`             | POST   | generic cosmetic CSS for class/id names a live page grew (`{url,classes,ids}`) |
+| `/__abx/blur-model/<file>`    | GET    | one file of the picture detector's model (`model.json`, `*.bin`) |
+
+So on `https://example.com` the runtime fetches
+`https://example.com/__abx/cosmetic`. The request goes back through the proxy
+like any other, adblock recognises the path and answers it, and it never reaches
+the site.
+
+Why not the admin server, which is where these used to live:
+
+- **Safari and Firefox refused it.** An `https://` page fetching
+  `http://127.0.0.1:8081` is mixed content. Chromium allows it as a special case
+  for loopback; the others do not.
+- **CORS.** A cross-origin answer needs `access-control-allow-origin`. A
+  same-origin one needs nothing.
+- **Other machines.** The old URL was built from the configured admin address,
+  so a phone or laptop using the proxy asked *its own* loopback and found
+  nothing. The page's own address is right for whoever is browsing.
+
+Matching happens before any filter rule is consulted, so no blocklist can shadow
+one of these, and no `$redirect` can stand in for it. It happens whether adblock
+is switched on or off too: a page served while it was on can still ask
+afterwards, and that question carries the page's own class and id names, so it
+must not reach the site.
+
+`src/adblock/routes.rs` holds the prefix and the table. Adding an endpoint is a
+line in `ROUTES` and the function it names; the proxy does not change.
 
 ---
 
@@ -363,7 +399,7 @@ an element invisible, it cannot take it out of the document, and some
 anti-adblock code checks for presence rather than visibility.
 
 Both need a live page, so adblock puts a small evaluator
-(`src/adblock/procedural_runtime.js`) into the page with the page's own rules
+(`src/adblock/injected/procedural_runtime.js`) into the page with the page's own rules
 already in it — like the cosmetic CSS and the scriptlets, this happens inside
 adblock and the proxy only forwards the result. What a rule means is adblock's
 to decide. The evaluator walks each rule's operator chain against the real DOM, applies
@@ -392,8 +428,8 @@ arrives nearly empty and builds itself in JavaScript, which is most large sites
 now — by the time the ad container exists, the one chance to look has passed.
 
 So adblock also puts in a small script that watches for new elements, batches
-up any class or id name it hasn't asked about, posts them to `/api/cosmetic` on
-the admin server, and applies the CSS that comes back. Names are deduplicated,
+up any class or id name it hasn't asked about, posts them to `/__abx/cosmetic`
+on the page's own address, and applies the CSS that comes back. Names are deduplicated,
 sent at most 500 per request, and the whole thing stops after 20 rounds so a
 page that rewrites itself forever can't ask forever.
 
@@ -401,11 +437,7 @@ Two things to know about it:
 
 - It has its own switch, **Live-DOM runtime**, next to the cosmetic-CSS one and
   on by default — it costs a script tag and a request per page, so it is worth
-  turning off separately from the CSS. It goes in only when that switch is
-  on *and* the admin server is running (`PROXY_ADMIN_LISTEN` non-empty). The
-  endpoint URL is built from the configured admin address, with a wildcard bind
-  treated as loopback — so a browser on a *different machine* than the proxy
-  can't reach it, and only the one-shot scan applies there.
+  turning off separately from the CSS.
 - Because it is an inline script, it strips CSP on the pages it goes into, the
   same way scriptlet injection does. That means CSP can now be stripped with
   scriptlet injection switched off.

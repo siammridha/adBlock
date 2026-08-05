@@ -5,14 +5,14 @@ use std::sync::Arc;
 use hyper::StatusCode;
 use serde_json::{json, Value};
 
-use crate::adblock::api::{BlocklistCommand, CosmeticQuery, RuleTest};
+use crate::adblock::api::{BlocklistCommand, RuleTest};
 use crate::adblock::api::{ScriptletUpdater, UBO_TARBALL_PAGE};
 use crate::adblock::api::{AdBlocker, ListCuration, ListEntry};
 use crate::adblock::api::Result;
 use crate::adblock::api::{event_list_change, event_scriptlets, RefreshError};
 use crate::stats::api::{EventKind, SharedState};
 
-use super::respond::{command, json_cors, json_ok, json_status, parse_query, percent_decode};
+use super::respond::{command, json_ok, json_status, parse_query, percent_decode};
 use super::{Admin, AdminResponse};
 
 pub(super) async fn update_scriptlets(
@@ -132,8 +132,7 @@ pub(super) fn edit_adblock_config(
             "adblock: redirect={} removeparam={} csp={}; \
              page injection: cosmetic={} scriptlets={} runtime={}; \
              blur={} (men={} women={} images={} videos={} regions={} gray={} on_load={} \
-             hover_images={} hover_videos={} marks={} amount={} strictness={} \
-             resize={} img_size={} video_size={} skip_small={} min_size={} model={})",
+             hover_images={} hover_videos={} marks={} amount={} strictness={})",
             s.redirect,
             s.removeparam,
             s.csp,
@@ -152,28 +151,10 @@ pub(super) fn edit_adblock_config(
             s.blur_hover_videos,
             s.blur_marks,
             s.blur_amount,
-            s.blur_strictness,
-            s.blur_resize,
-            s.blur_img_size,
-            s.blur_video_size,
-            s.blur_skip_small,
-            s.blur_min_size,
-            s.blur_model.id()
+            s.blur_strictness
         ),
     );
     json_ok(adblock_settings_json(adblock))
-}
-
-/// Answer a filtered page asking about class and id names it grew after it was
-/// served. The page sends raw bytes; Adblock decides what is valid and what the
-/// answer is, and this only renders it.
-pub(super) fn cosmetic_for_page(adblock: &AdBlocker, body: &[u8]) -> AdminResponse {
-    let q = match CosmeticQuery::parse(body) {
-        Ok(q) => q,
-        Err(e) => return json_cors(StatusCode::BAD_REQUEST, json!({ "error": e })),
-    };
-    let css = adblock.cosmetic_css_for_names(&q.url, &q.classes, &q.ids);
-    json_cors(StatusCode::OK, json!({ "css": css }))
 }
 
 impl Admin {

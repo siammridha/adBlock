@@ -10,16 +10,15 @@
 //! one for one: its own switch, a switch each for blurring men and blurring
 //! women, a switch each for looking at images and at videos, a switch for
 //! covering only the people rather than the whole picture, a switch for draining
-//! the colour out along with the blur, a switch for blurring media on load until
-//! a verdict arrives, a switch each for lifting the blur while the pointer is
-//! over an image and over a video, how hard to blur and how sure the detector
+//! the colour out along with the blur, a switch for which way media is held back
+//! until a verdict arrives, a switch each for lifting the blur while the pointer
+//! is over an image and over a video, how hard to blur and how sure the detector
 //! has to be.
 //!
-//! Then the ones that are ours rather than HaramBlur's: what size a picture is
-//! shrunk to before it is looked at — with a switch to not shrink it at all — a
-//! size below which a picture is not worth looking at, with its own switch,
-//! whether to mark up what was checked, and which of the runtime's detectors to
-//! load.
+//! One switch here is ours rather than HaramBlur's: whether to show what the
+//! detector did. There is no setting for which detector to load, because there is
+//! — HaramBlur's own. Comparing it against the other pipeline is done by
+//! switching branches, not by a picker.
 //!
 //! All of them belong to Adblock rather than the caller. The caller hands over a
 //! request or a response and takes back what Adblock made of it; it never asks
@@ -29,50 +28,9 @@
 //! saving rewrites it whole.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use serde::{Deserialize, Serialize};
-
-/// Which detector the blur runtime loads. A closed list, because each name is a
-/// worker the runtime already carries — a name that is not one of these is not a
-/// model that could be fetched, it is a typo.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum BlurModel {
-    /// The Human library on its own: faces, with man or woman and an age.
-    Human,
-    /// Human finds the faces; a FairFace model reads man or woman off each one.
-    HumanFairface,
-    /// The same, with rizvandwiki's model in place of FairFace. Same size and
-    /// same shape; they disagree about roughly one face in fifteen.
-    HumanRizvandwiki,
-    /// YOLOS finds whole people; a PETA model reads man or woman off each one.
-    /// The only one that answers without needing to see a face.
-    PeoplePeta,
-}
-
-impl BlurModel {
-    const ALL: [Self; 4] =
-        [Self::Human, Self::HumanFairface, Self::HumanRizvandwiki, Self::PeoplePeta];
-
-    /// The name the runtime matches on, and the name stored in the settings file.
-    pub fn id(self) -> &'static str {
-        match self {
-            Self::Human => "human",
-            Self::HumanFairface => "human-fairface",
-            Self::HumanRizvandwiki => "human-rizvandwiki",
-            Self::PeoplePeta => "people-peta",
-        }
-    }
-
-    fn from_id(id: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|m| m.id() == id)
-    }
-
-    fn names() -> String {
-        Self::ALL.map(Self::id).join(", ")
-    }
-}
 
 /// A settings update. Callers hand over raw bytes and Adblock decides what is
 /// valid; only present, well-typed flags are picked up.
@@ -96,21 +54,11 @@ pub struct DecisionOverrides {
     pub blur_hover_images: Option<bool>,
     pub blur_hover_videos: Option<bool>,
     pub blur_marks: Option<bool>,
-    pub blur_resize: Option<bool>,
-    pub blur_skip_small: Option<bool>,
     /// Blur radius in CSS pixels, 10–50 — HaramBlur's own range.
     pub blur_amount: Option<u8>,
     /// How eager the detector is, 10–100 — HaramBlur's 0.1–1 as a percentage.
     /// Higher blurs on weaker evidence.
     pub blur_strictness: Option<u8>,
-    /// Longest side an image is shrunk to before the detector sees it, 32–4096.
-    pub blur_img_size: Option<u16>,
-    /// The same for a video frame, 32–4096.
-    pub blur_video_size: Option<u16>,
-    /// A picture with a side under this many pixels is never looked at, 1–4096.
-    pub blur_min_size: Option<u16>,
-    /// Which detector to load.
-    pub blur_model: Option<BlurModel>,
 }
 
 impl DecisionOverrides {
@@ -151,24 +99,8 @@ impl DecisionOverrides {
             blur_hover_images: flag("blur_hover_images"),
             blur_hover_videos: flag("blur_hover_videos"),
             blur_marks: flag("blur_marks"),
-            blur_resize: flag("blur_resize"),
-            blur_skip_small: flag("blur_skip_small"),
             blur_amount: number("blur_amount", 10, 50)?.map(|n| n as u8),
             blur_strictness: number("blur_strictness", 10, 100)?.map(|n| n as u8),
-            blur_img_size: number("blur_img_size", 32, 4096)?.map(|n| n as u16),
-            blur_video_size: number("blur_video_size", 32, 4096)?.map(|n| n as u16),
-            blur_min_size: number("blur_min_size", 1, 4096)?.map(|n| n as u16),
-            // Same rule as the numbers: absent leaves it alone, present has to
-            // name a model that exists. A misspelt name quietly falling back to
-            // the default would look like the model being ignored.
-            blur_model: match v.get("blur_model") {
-                None | Some(serde_json::Value::Null) => None,
-                Some(m) => Some(
-                    m.as_str()
-                        .and_then(BlurModel::from_id)
-                        .ok_or_else(|| format!("blur_model must be one of: {}", BlurModel::names()))?,
-                ),
-            },
         })
     }
 }
@@ -188,7 +120,9 @@ pub struct DecisionSettings {
     pub blur: bool,
     /// Blur the people the detector reads as men.
     pub blur_men: bool,
-    /// Blur the people the detector reads as women.
+    /// Blur the people the detector reads as women or as girls. The detector
+    /// splits those two by how old the body looks, which is not what this
+    /// switch is asking about, so both go with it.
     pub blur_women: bool,
     /// Look at still images at all. Off, no image is ever sent to the detector.
     pub blur_images: bool,
@@ -199,9 +133,9 @@ pub struct DecisionSettings {
     pub blur_regions: bool,
     /// Drain the colour out of what is blurred, as well as blurring it.
     pub blur_gray: bool,
-    /// Blur every image and video from the moment it is seen, and lift the blur
-    /// when the detector has nothing to hide there. Nothing is briefly readable
-    /// before the verdict lands; the cost is a page that starts out obscured.
+    /// Which way a picture is held back until the detector has looked at it.
+    /// Nothing is ever shown before a verdict either way, however long that
+    /// takes; this picks blurred over hidden. HaramBlur's `blurryStartMode`.
     pub blur_on_load: bool,
     /// Lift the blur off an image while the pointer is over it.
     pub blur_hover_images: bool,
@@ -210,26 +144,8 @@ pub struct DecisionSettings {
     /// Outline every picture with what the detector made of it, and say so in
     /// its tooltip. For seeing that the thing runs at all.
     pub blur_marks: bool,
-    /// Shrink a picture to fit the sizes below before the detector sees it. Off,
-    /// every picture goes through at its own size: slower, and the detector may
-    /// do better or worse on it.
-    pub blur_resize: bool,
-    /// Skip a picture too small to hold a face worth hiding. Icons, avatars,
-    /// spacers and tracking pixels are most of what a page carries, and each one
-    /// costs a run of the detector.
-    pub blur_skip_small: bool,
     pub blur_amount: u8,
     pub blur_strictness: u8,
-    /// Longest side an image is shrunk to. Bigger finds smaller faces and costs
-    /// more time. Ignored while `blur_resize` is off.
-    pub blur_img_size: u16,
-    /// The same for a video frame.
-    pub blur_video_size: u16,
-    /// The size that counts as too small: a picture with either side under this
-    /// many of its own pixels is skipped. Ignored while `blur_skip_small` is off.
-    pub blur_min_size: u16,
-    /// Which detector the runtime loads.
-    pub blur_model: BlurModel,
 }
 
 impl DecisionSettings {
@@ -267,16 +183,8 @@ pub struct DecisionPolicy {
     blur_hover_images: AtomicBool,
     blur_hover_videos: AtomicBool,
     blur_marks: AtomicBool,
-    blur_resize: AtomicBool,
-    blur_skip_small: AtomicBool,
     blur_amount: AtomicU8,
     blur_strictness: AtomicU8,
-    blur_img_size: AtomicU16,
-    blur_video_size: AtomicU16,
-    blur_min_size: AtomicU16,
-    /// Held as the model's position in `BlurModel::ALL`, because that is what an
-    /// atomic can carry. Nothing outside this file sees the number.
-    blur_model: AtomicU8,
     path: PathBuf,
 }
 
@@ -310,17 +218,8 @@ impl DecisionPolicy {
             blur_hover_images: AtomicBool::new(saved.blur_hover_images.unwrap_or(false)),
             blur_hover_videos: AtomicBool::new(saved.blur_hover_videos.unwrap_or(false)),
             blur_marks: AtomicBool::new(saved.blur_marks.unwrap_or(false)),
-            blur_resize: AtomicBool::new(saved.blur_resize.unwrap_or(true)),
-            blur_skip_small: AtomicBool::new(saved.blur_skip_small.unwrap_or(true)),
             blur_amount: AtomicU8::new(saved.blur_amount.unwrap_or(25).clamp(10, 50)),
             blur_strictness: AtomicU8::new(saved.blur_strictness.unwrap_or(40).clamp(10, 100)),
-            // The sizes HaramBlur feeds its detector, as a longest side.
-            blur_img_size: AtomicU16::new(saved.blur_img_size.unwrap_or(400).clamp(32, 4096)),
-            blur_video_size: AtomicU16::new(saved.blur_video_size.unwrap_or(427).clamp(32, 4096)),
-            // Under 32 pixels a side there is no face for the detector to find,
-            // only a spacer, a bullet or a tracking pixel.
-            blur_min_size: AtomicU16::new(saved.blur_min_size.unwrap_or(32).clamp(1, 4096)),
-            blur_model: AtomicU8::new(index_of(saved.blur_model.unwrap_or(BlurModel::Human))),
             path,
         };
         // Seed the file a fresh install does not have yet, so every switch is
@@ -359,14 +258,8 @@ impl DecisionPolicy {
             blur_hover_images: self.blur_hover_images.load(Ordering::Relaxed),
             blur_hover_videos: self.blur_hover_videos.load(Ordering::Relaxed),
             blur_marks: self.blur_marks.load(Ordering::Relaxed),
-            blur_resize: self.blur_resize.load(Ordering::Relaxed),
-            blur_skip_small: self.blur_skip_small.load(Ordering::Relaxed),
             blur_amount: self.blur_amount.load(Ordering::Relaxed),
             blur_strictness: self.blur_strictness.load(Ordering::Relaxed),
-            blur_img_size: self.blur_img_size.load(Ordering::Relaxed),
-            blur_video_size: self.blur_video_size.load(Ordering::Relaxed),
-            blur_min_size: self.blur_min_size.load(Ordering::Relaxed),
-            blur_model: BlurModel::ALL[self.blur_model.load(Ordering::Relaxed) as usize],
         }
     }
 
@@ -392,8 +285,6 @@ impl DecisionPolicy {
             (upd.blur_hover_images, &self.blur_hover_images),
             (upd.blur_hover_videos, &self.blur_hover_videos),
             (upd.blur_marks, &self.blur_marks),
-            (upd.blur_resize, &self.blur_resize),
-            (upd.blur_skip_small, &self.blur_skip_small),
         ] {
             if let Some(v) = flag {
                 cell.store(v, Ordering::Relaxed);
@@ -405,18 +296,6 @@ impl DecisionPolicy {
             if let Some(v) = num {
                 cell.store(v, Ordering::Relaxed);
             }
-        }
-        for (num, cell) in [
-            (upd.blur_img_size, &self.blur_img_size),
-            (upd.blur_video_size, &self.blur_video_size),
-            (upd.blur_min_size, &self.blur_min_size),
-        ] {
-            if let Some(v) = num {
-                cell.store(v, Ordering::Relaxed);
-            }
-        }
-        if let Some(m) = upd.blur_model {
-            self.blur_model.store(index_of(m), Ordering::Relaxed);
         }
         if let Err(e) = self.persist() {
             tracing::warn!(error = %e, "persisting adblock settings");
@@ -450,21 +329,11 @@ impl DecisionPolicy {
                 blur_hover_images: Some(snap.blur_hover_images),
                 blur_hover_videos: Some(snap.blur_hover_videos),
                 blur_marks: Some(snap.blur_marks),
-                blur_resize: Some(snap.blur_resize),
-                blur_skip_small: Some(snap.blur_skip_small),
                 blur_amount: Some(snap.blur_amount),
                 blur_strictness: Some(snap.blur_strictness),
-                blur_img_size: Some(snap.blur_img_size),
-                blur_video_size: Some(snap.blur_video_size),
-                blur_min_size: Some(snap.blur_min_size),
-                blur_model: Some(snap.blur_model),
             },
         )
     }
-}
-
-fn index_of(m: BlurModel) -> u8 {
-    BlurModel::ALL.iter().position(|c| *c == m).unwrap_or(0) as u8
 }
 
 fn write(path: &Path, saved: &DecisionOverrides) -> std::result::Result<(), String> {
@@ -527,10 +396,6 @@ mod tests {
             &br#"{"blur_strictness":101}"#[..],
             &br#"{"blur_amount":"20"}"#[..],
             &br#"{"blur_amount":-1}"#[..],
-            &br#"{"blur_img_size":16}"#[..],
-            &br#"{"blur_video_size":5000}"#[..],
-            &br#"{"blur_min_size":0}"#[..],
-            &br#"{"blur_min_size":5000}"#[..],
         ] {
             assert!(DecisionOverrides::parse(bad).is_err(), "{}", String::from_utf8_lossy(bad));
         }
@@ -551,10 +416,6 @@ mod tests {
         assert!(!s.blur_on_load, "nothing is blurred before it has been looked at");
         assert!(!s.blur_hover_images && !s.blur_hover_videos, "hover does not lift it");
         assert_eq!((s.blur_amount, s.blur_strictness), (25, 40));
-        assert!(s.blur_resize, "shrinking first is the normal path");
-        assert_eq!((s.blur_img_size, s.blur_video_size), (400, 427));
-        assert!(s.blur_skip_small, "an icon cannot hold a face and costs a run of the detector");
-        assert_eq!(s.blur_min_size, 32);
 
         let snap = policy.apply(&DecisionOverrides {
             cosmetic: Some(false),

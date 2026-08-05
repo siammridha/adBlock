@@ -5,8 +5,9 @@
 //! applied. The caller hands over the bytes it received and forwards the bytes
 //! it gets back; it never edits a page itself.
 
-const COSMETIC_RUNTIME: &str = include_str!("cosmetic_runtime.js");
-const BLUR_RUNTIME: &str = include_str!("blur_runtime.js");
+const COSMETIC_RUNTIME: &str = include_str!("injected/cosmetic_runtime.js");
+const BLUR_RUNTIME: &str = include_str!("injected/blur_runtime.js");
+const BLUR_OVERLAY: &str = include_str!("injected/blur_overlay.js");
 
 /// Pages bigger than this are forwarded untouched. Splicing costs a full copy
 /// of the page, and a page carrying ads is never this big.
@@ -18,40 +19,24 @@ pub(crate) const CSP_HEADERS: [&str; 2] = [
     "content-security-policy-report-only",
 ];
 
-/// The live-DOM cosmetic script, pointed at the admin server's cosmetic
-/// endpoint. `None` when there is no admin server to ask, in which case pages
-/// keep the one-shot scan and nothing else.
-///
-/// ponytail: the endpoint is built from the configured admin address, so a
-/// browser on another machine cannot reach it — a wildcard bind becomes
-/// loopback here. Serve the endpoint through the proxy itself if remote
-/// clients ever need it.
-pub(crate) fn cosmetic_runtime(admin_listen: &str) -> Option<String> {
-    let addr = admin_listen.trim();
-    if addr.is_empty() {
-        return None;
-    }
-    let port = addr.rsplit(':').next().filter(|p| !p.is_empty())?;
-    let host = match addr.rsplit_once(':').map(|(h, _)| h.trim_matches(['[', ']'])) {
-        Some("0.0.0.0") | Some("::") | Some("") | None => "127.0.0.1",
-        Some(h) if h.contains(':') => return Some(endpoint(&format!("[{h}]"), port)),
-        Some(h) => h,
-    };
-    Some(endpoint(host, port))
-}
-
-fn endpoint(host: &str, port: &str) -> String {
-    COSMETIC_RUNTIME.replace(
-        "__COSMETIC_ENDPOINT__",
-        &format!("http://{host}:{port}/api/cosmetic"),
-    )
-}
+/// The live-DOM cosmetic script. Nothing in it varies from page to page — it
+/// asks the page's own origin — so it is built once.
+pub(crate) static COSMETIC_RUNTIME_JS: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| {
+        COSMETIC_RUNTIME.replace("__ROUTE_PREFIX__", super::routes::PREFIX)
+    });
 
 /// The picture-blurring script, carrying the settings it was built with. Built
 /// per page rather than once, because the settings can change between pages and
 /// this is a few string replacements on a few kilobytes.
+///
+/// The debugging overlay — the outlines, the boxes and the corner panel — is a
+/// file of its own and is spliced in only when `blur_marks` asks for it, so a
+/// page that is not being debugged is never sent it.
 pub(crate) fn blur_runtime(on: &super::settings::DecisionSettings) -> String {
     BLUR_RUNTIME
+        .replace("__BLUR_OVERLAY__", if on.blur_marks { BLUR_OVERLAY } else { "" })
+        .replace("__ROUTE_PREFIX__", super::routes::PREFIX)
         .replace("__BLUR_AMOUNT__", &on.blur_amount.to_string())
         .replace("__BLUR_STRICTNESS__", &on.blur_strictness.to_string())
         .replace("__BLUR_MEN__", if on.blur_men { "true" } else { "false" })
@@ -64,12 +49,6 @@ pub(crate) fn blur_runtime(on: &super::settings::DecisionSettings) -> String {
         .replace("__BLUR_HOVER_IMAGES__", if on.blur_hover_images { "true" } else { "false" })
         .replace("__BLUR_HOVER_VIDEOS__", if on.blur_hover_videos { "true" } else { "false" })
         .replace("__BLUR_MARKS__", if on.blur_marks { "true" } else { "false" })
-        .replace("__BLUR_RESIZE__", if on.blur_resize { "true" } else { "false" })
-        .replace("__BLUR_IMG_SIZE__", &on.blur_img_size.to_string())
-        .replace("__BLUR_VIDEO_SIZE__", &on.blur_video_size.to_string())
-        .replace("__BLUR_SKIP_SMALL__", if on.blur_skip_small { "true" } else { "false" })
-        .replace("__BLUR_MIN_SIZE__", &on.blur_min_size.to_string())
-        .replace("__BLUR_MODEL__", on.blur_model.id())
 }
 
 /// Let a page read a picture's pixels back.
@@ -300,17 +279,14 @@ mod tests {
         assert!(out.windows(2).any(|w| w == [0xff, 0xfe]), "the original bytes must survive");
     }
 
+    /// The page asks its own address, so the answer reaches it whatever machine
+    /// it is on and whether or not the page is HTTPS.
     #[test]
-    fn the_runtime_points_at_the_admin_endpoint() {
-        assert!(cosmetic_runtime("").is_none(), "no admin server, no runtime");
-        let js = cosmetic_runtime("127.0.0.1:8081").unwrap();
-        assert!(js.contains("\"http://127.0.0.1:8081/api/cosmetic\""), "{js}");
-        assert!(!js.contains("__COSMETIC_ENDPOINT__"), "placeholder must be replaced");
-        assert!(
-            cosmetic_runtime("0.0.0.0:8081").unwrap().contains("http://127.0.0.1:8081/"),
-            "a wildcard bind is not reachable from a page; use loopback"
-        );
-        assert!(cosmetic_runtime("[::1]:8081").unwrap().contains("http://[::1]:8081/"));
+    fn the_runtime_asks_the_pages_own_origin() {
+        let js = COSMETIC_RUNTIME_JS.as_str();
+        assert!(js.contains("location.origin + \"/__abx/cosmetic\""), "{js}");
+        assert!(!js.contains("__ROUTE_PREFIX__"), "placeholder must be replaced");
+        assert!(!js.contains("127.0.0.1"), "and nothing may point at the admin server");
     }
 
     /// The runtime ships as text and only ever runs in a browser, so a syntax
@@ -323,7 +299,7 @@ mod tests {
             return;
         }
         let path = std::env::temp_dir().join(format!("adblock-js-check-{}.js", std::process::id()));
-        std::fs::write(&path, cosmetic_runtime("127.0.0.1:8081").unwrap()).unwrap();
+        std::fs::write(&path, COSMETIC_RUNTIME_JS.as_str()).unwrap();
         let out = std::process::Command::new("node").arg("--check").arg(&path).output().unwrap();
         assert!(
             out.status.success(),
@@ -338,7 +314,6 @@ mod tests {
         strictness: u8,
         videos: bool,
         regions: bool,
-        resize: bool,
     ) -> super::super::settings::DecisionSettings {
         super::super::settings::DecisionSettings {
             enabled: true,
@@ -359,20 +334,14 @@ mod tests {
             blur_hover_images: true,
             blur_hover_videos: false,
             blur_marks: true,
-            blur_resize: resize,
             blur_amount: amount,
             blur_strictness: strictness,
-            blur_img_size: 400,
-            blur_video_size: 427,
-            blur_skip_small: true,
-            blur_min_size: 32,
-            blur_model: super::super::settings::BlurModel::Human,
         }
     }
 
     #[test]
     fn the_blur_runtime_carries_its_settings() {
-        let js = blur_runtime(&blur_settings(40, 75, false, true, true));
+        let js = blur_runtime(&blur_settings(40, 75, false, true));
         assert!(js.contains("var AMOUNT = 40;"), "{js}");
         assert!(js.contains("var STRICTNESS = 75;"), "strictness goes in as written");
         assert!(js.contains("var MEN = true;"));
@@ -387,26 +356,56 @@ mod tests {
         assert!(js.contains("var HOVER_IMAGES = true;"));
         assert!(js.contains("var HOVER_VIDEOS = false;"));
         assert!(js.contains("var MARKS = true;"));
-        assert!(js.contains("var RESIZE = true;"));
-        assert!(js.contains("var IMG_MAX = 400;"));
-        assert!(js.contains("var VID_MAX = 427;"));
         assert!(js.contains("data-ab-blur"), "the marks stylesheet goes in with them");
-        // The bars a face has to clear are HaramBlur's, slid by the strictness
-        // number rather than replaced by it, and a face read as a child is left
-        // alone whatever the switches say. Losing either is silent in a browser.
-        assert!(js.contains("var MALE_MIN = 0.3 + SHIFT;"), "{js}");
-        assert!(js.contains("var FEMALE_MIN = 0.25 + SHIFT;"), "{js}");
-        assert!(js.contains("var MIN_AGE = 20;"), "{js}");
-        assert!(js.contains("if (f.age !== null && f.age < MIN_AGE) return false;"), "{js}");
-        // The chosen model reaches the runtime by name, and the name has to be
-        // one the table answers to.
-        assert!(js.contains(r#"var model = modelById("human")"#), "{js}");
-        assert!(js.contains(r#"id: "human""#), "{js}");
+        assert!(js.contains("function report("), "and the overlay itself");
+        // The weights have no CDN, so the page fetches them from its own address
+        // and Adblock answers. Getting this wrong is a detector that never loads.
+        assert!(
+            js.contains(r#"var MODEL_BASE = location.origin + "/__abx/blur-model/";"#),
+            "{js}"
+        );
+        // Girl rides on the women switch and Person is never hidden. Losing
+        // either half is silent in a browser: one leaves girls showing with
+        // women blurred, the other covers bodies the model could not read.
+        assert!(
+            js.contains(r#"(f.gender === "man" && MEN) ||"#)
+                && js.contains(r#"((f.gender === "woman" || f.gender === "girl") && WOMEN)"#)
+                && !js.contains(r#"f.gender === "person""#),
+            "{js}"
+        );
         assert!(!js.contains("__BLUR_"), "every placeholder must be replaced");
-        let js = blur_runtime(&blur_settings(10, 10, true, false, false));
+        assert!(!js.contains("__ROUTE_PREFIX__"), "the route prefix too");
+        let js = blur_runtime(&blur_settings(10, 10, true, false));
         assert!(js.contains("var VIDEOS = true;"));
         assert!(js.contains("var REGIONS = false;"));
-        assert!(js.contains("var RESIZE = false;"));
+    }
+
+    /// The overlay is a debugging aid that is off by default, and it is most of
+    /// the file. A page that did not ask for it is not sent a byte of it.
+    #[test]
+    fn the_overlay_only_goes_out_when_it_is_switched_on() {
+        let mut off = blur_settings(40, 40, true, true);
+        off.blur_marks = false;
+        let plain = blur_runtime(&off);
+        assert!(plain.contains("var MARKS = false;"));
+        assert!(!plain.contains("data-ab-blur"), "no marks stylesheet");
+        assert!(!plain.contains("abx-blur-hud"), "no panel");
+        assert!(!plain.contains("function report("), "and nothing that draws either");
+        assert!(!plain.contains("__BLUR_"), "the placeholder is filled in with nothing");
+
+        let on = blur_runtime(&blur_settings(40, 40, true, true));
+        assert!(on.len() > plain.len(), "so the switched-off page is the smaller one");
+    }
+
+    /// The strictness number is the only bar this pipeline has, and 40 has to
+    /// land on HaramBlur's own 0.35 or the two are not being compared on the
+    /// same terms. Worked out in the page, so it is worked out here too.
+    #[test]
+    fn the_default_strictness_is_haramblurs_own_score_bar() {
+        let bar = |strictness: f64| f64::max(0.05, (0.35 * (100.0 - strictness)) / 60.0);
+        assert!((bar(40.0) - 0.35).abs() < 1e-9, "40 is HaramBlur's 0.35");
+        assert!(bar(100.0) < bar(10.0), "higher strictness is a lower bar");
+        assert_eq!(bar(100.0), 0.05, "and it never reaches zero");
     }
 
     /// Same reason as the cosmetic runtime: it only ever runs in a browser, so
@@ -418,31 +417,28 @@ mod tests {
             eprintln!("node not installed; skipping the blur runtime syntax check");
             return;
         }
-        let js = blur_runtime(&blur_settings(20, 50, true, true, true));
+        let js = blur_runtime(&blur_settings(20, 50, true, true));
 
-        // Every model is a string that only ever gets parsed inside a Worker, so
-        // they need building and parsing here rather than reading. The model
-        // table is one unbroken run of the file, from the first worker source to
-        // the line that picks one, so it is lifted out whole and run with the
-        // values it interpolates stubbed. `new Function` then parses each source
-        // the table produced — a syntax error in any one of them fails here
-        // instead of on a page.
+        // The worker is a string that only ever gets parsed inside a Worker, so
+        // it needs building and parsing here rather than reading. The lines that
+        // build it are one unbroken run of the file, so they are lifted out
+        // whole and run; `new Function` then parses what they produced, and a
+        // syntax error fails here instead of on a page.
         let mut block = String::new();
-        for line in js.lines().skip_while(|l| !l.contains("var TJS = ")) {
-            if line.contains("var model = modelById(") {
-                break;
-            }
+        for line in js.lines().skip_while(|l| !l.contains("var WORKER_SRC = [")) {
             block.push_str(line);
             block.push('\n');
+            if line.trim() == "].join(\"\\n\");" {
+                break;
+            }
         }
-        assert!(block.contains("function humanSrc("), "the worker sources were not found: {block}");
-        assert!(block.contains("var MODELS = ["), "the model table was not found: {block}");
+        assert!(block.contains("nonMaxSuppressionAsync"), "the worker was not found: {block}");
         let worker = format!(
-            "var HUMAN = 'human', HUMAN_MODELS = 'models/';\n\
-             var MAX_FACES = 20;\n\
+            "var TFJS = 'tf.js', MODEL_BASE = 'model/';\n\
+             var MODEL_SIZE = 640, CLASSES = ['woman'], MAX_DETECTED = 70, IOU = 0.7;\n\
+             var SCORE = 0.35;\n\
              {block}\n\
-             if (MODELS.length < 2) throw new Error('a table with one model is not a table');\n\
-             MODELS.forEach(function (m) {{ new Function(m.src); }});"
+             new Function(WORKER_SRC);"
         );
 
         let checks = [("blur runtime", js.clone()), ("blur worker", worker)];
@@ -476,7 +472,7 @@ mod tests {
             eprintln!("node not installed; skipping the frame placement check");
             return;
         }
-        let js = blur_runtime(&blur_settings(20, 50, true, true, true));
+        let js = blur_runtime(&blur_settings(20, 50, true, true));
         let mut block = String::new();
         let mut at_last = false;
         for line in js.lines().skip_while(|l| !l.contains("function drawn(")) {
@@ -558,6 +554,135 @@ mod tests {
         assert!(
             out.status.success(),
             "frame placement is wrong: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// HaramBlur shrinks a frame before the model is handed it, and getting the
+    /// cap wrong is invisible: the worker scales whatever it gets to 640 anyway,
+    /// so a frame carried over whole still comes back with the right answer and
+    /// only costs. The function is lifted out and run.
+    #[test]
+    fn a_frame_is_shrunk_to_its_cap_before_the_model_sees_it() {
+        if std::process::Command::new("node").arg("-v").output().is_err() {
+            eprintln!("node not installed; skipping the frame shrink check");
+            return;
+        }
+        let js = blur_runtime(&blur_settings(20, 50, true, true));
+        let mut block = String::new();
+        for line in js.lines().skip_while(|l| !l.contains("function fit(")) {
+            block.push_str(line);
+            block.push('\n');
+            if line == "  }" {
+                break;
+            }
+        }
+        assert!(block.contains("resizeQuality"), "the shrink was not found: {block}");
+
+        let script = format!(
+            "{block}\n\
+             var assert = require('assert');\n\
+             // HaramBlur's two caps for this model: 640 for a picture, 720 for a\n\
+             // video frame.\n\
+             var IMAGE = 640, VIDEO = 720;\n\
+             function shrunk(w, h) {{ return {{ resizeWidth: w, resizeHeight: h,\n\
+               resizeQuality: 'pixelated' }}; }}\n\
+             // Already inside the cap, so nothing is asked for at all: a resize\n\
+             // asked for is a resize done, even onto the size it started at.\n\
+             assert.strictEqual(fit(474, 316, IMAGE), undefined, 'under the cap');\n\
+             assert.strictEqual(fit(640, 640, IMAGE), undefined, 'exactly the cap');\n\
+             assert.strictEqual(fit(0, 0, VIDEO), undefined, 'no metadata yet');\n\
+             // The cap is on the longest side, so 720p goes down on both paths.\n\
+             assert.deepStrictEqual(fit(1280, 720, IMAGE), shrunk(640, 360));\n\
+             assert.deepStrictEqual(fit(1280, 720, VIDEO), shrunk(720, 405));\n\
+             assert.deepStrictEqual(fit(3840, 2160, VIDEO), shrunk(720, 405), '4K');\n\
+             assert.deepStrictEqual(fit(600, 1800, IMAGE), shrunk(213, 640), 'portrait');\n\
+             // The shape has to survive it: a frame squashed here reaches the\n\
+             // detector with people no longer shaped like people.\n\
+             [[1280, 720, IMAGE], [3840, 2160, VIDEO], [600, 1800, IMAGE],\n\
+              [1001, 337, VIDEO]].forEach(function (c) {{\n\
+               var o = fit(c[0], c[1], c[2]);\n\
+               assert.ok(Math.abs(c[0] / c[1] - o.resizeWidth / o.resizeHeight) < 0.01,\n\
+                 'shape kept for ' + c[0] + 'x' + c[1]);\n\
+               assert.strictEqual(Math.max(o.resizeWidth, o.resizeHeight), c[2],\n\
+                 'longest side lands on the cap for ' + c[0] + 'x' + c[1]);\n\
+             }});\n"
+        );
+        let path = std::env::temp_dir().join(format!("adblock-fit-{}.js", std::process::id()));
+        std::fs::write(&path, &script).unwrap();
+        let out = std::process::Command::new("node").arg(&path).output().unwrap();
+        assert!(
+            out.status.success(),
+            "the frame shrink is wrong: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// Two overlapping patches blur the strip they share twice, which draws a
+    /// bright seam down the middle of the thing being hidden, so HaramBlur
+    /// swallows one box into the other first. Nothing in Rust can see a seam.
+    /// The functions are lifted out and run.
+    #[test]
+    fn people_standing_together_are_covered_by_one_patch() {
+        if std::process::Command::new("node").arg("-v").output().is_err() {
+            eprintln!("node not installed; skipping the patch merge check");
+            return;
+        }
+        let js = blur_runtime(&blur_settings(20, 50, true, true));
+        let mut block = String::new();
+        let mut at_last = false;
+        for line in js.lines().skip_while(|l| !l.contains("function merge(")) {
+            block.push_str(line);
+            block.push('\n');
+            at_last |= line.contains("function overlap(");
+            if at_last && line == "  }" {
+                break;
+            }
+        }
+        assert!(block.contains("Math.min"), "the merge was not found: {block}");
+
+        let script = format!(
+            "{block}\n\
+             var assert = require('assert');\n\
+             function box(x, y, w, h) {{ return {{ x: x, y: y, w: w, h: h }}; }}\n\
+             // Apart: two people, two patches.\n\
+             var apart = [box(0, 0, .2, .5), box(.5, 0, .2, .5)];\n\
+             assert.deepStrictEqual(merge(apart), apart);\n\
+             // Touching edge to edge is not overlapping — there is no shared\n\
+             // strip to blur twice, so they stay two.\n\
+             assert.strictEqual(merge([box(0, 0, .5, .5), box(.5, 0, .5, .5)]).length, 2);\n\
+             // Overlapping: one patch, the rectangle around both.\n\
+             assert.deepStrictEqual(merge([box(0, 0, .4, .6), box(.3, .2, .4, .6)]),\n\
+               [box(0, 0, .7, .8)]);\n\
+             // A third that reaches the merged pair joins it too.\n\
+             assert.deepStrictEqual(\n\
+               merge([box(0, 0, .3, .3), box(.2, .2, .3, .3), box(.4, .4, .3, .3)]),\n\
+               [box(0, 0, .7, .7)]);\n\
+             // One swallowed whole is still covered.\n\
+             assert.deepStrictEqual(merge([box(0, 0, 1, 1), box(.4, .4, .1, .1)]),\n\
+               [box(0, 0, 1, 1)]);\n\
+             assert.deepStrictEqual(merge([]), []);\n\
+             // Whatever it merges, every person has to end up under something.\n\
+             [apart, [box(.1, .1, .5, .5), box(.3, .0, .4, .9)],\n\
+              [box(0, 0, .3, .3), box(.2, .2, .3, .3), box(.9, .9, .1, .1)]\n\
+             ].forEach(function (people) {{\n\
+               var out = merge(people);\n\
+               people.forEach(function (p) {{\n\
+                 assert.ok(out.some(function (o) {{\n\
+                   return o.x <= p.x && o.y <= p.y &&\n\
+                     o.x + o.w >= p.x + p.w && o.y + o.h >= p.y + p.h;\n\
+                 }}), 'nobody is left uncovered');\n\
+               }});\n\
+             }});\n"
+        );
+        let path = std::env::temp_dir().join(format!("adblock-merge-{}.js", std::process::id()));
+        std::fs::write(&path, &script).unwrap();
+        let out = std::process::Command::new("node").arg(&path).output().unwrap();
+        assert!(
+            out.status.success(),
+            "the patch merge is wrong: {}",
             String::from_utf8_lossy(&out.stderr)
         );
         std::fs::remove_file(&path).ok();

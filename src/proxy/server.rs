@@ -405,6 +405,13 @@ impl Proxy {
         let req_enc = capture::content_encoding(&parts.headers);
         let req_hdrs = capture::headers_text(&parts.headers);
 
+        // Some requests are Adblock asking itself something — the scripts it put
+        // into the page calling home. It answers those; the proxy only sends the
+        // answer on, and never upstream.
+        if let Some(own) = self.inner.adblock.own_response(&decision, &req_bytes) {
+            return Ok(own.map(|b| full_body(Bytes::from(b))));
+        }
+
         if decision.blocked {
             let by = decision.attribution.display();
             self.record_block(
@@ -694,9 +701,7 @@ mod tests {
         }
     }
 
-    /// An Adblock built for these tests. It has no admin endpoint, so no
-    /// live-DOM runtime goes into a page unless the test asks for one with
-    /// `set_admin_endpoint`.
+    /// An Adblock built for these tests.
     fn blocker(rules: &[&str], scriptlet_resources: std::path::PathBuf) -> Arc<AdBlocker> {
         let cfg = AdblockConfig {
             enabled: true,
@@ -717,6 +722,18 @@ mod tests {
         resolver: Arc<dyn Resolver>,
     ) -> (Proxy, Arc<SharedState>) {
         proxy_with_adblock(blocker(rules, std::path::PathBuf::new()), client, resolver)
+    }
+
+    /// A proxy with the live-DOM runtime switched off, so cosmetic CSS is the
+    /// only thing that goes into a page and no script of ours does.
+    fn css_only_proxy(
+        rules: &[&str],
+        client: Arc<dyn Upstream>,
+        resolver: Arc<dyn Resolver>,
+    ) -> (Proxy, Arc<SharedState>) {
+        let adblock = blocker(rules, std::path::PathBuf::new());
+        adblock.set_decisions(br#"{"runtime": false}"#).unwrap();
+        proxy_with_adblock(adblock, client, resolver)
     }
 
     fn proxy_with_adblock(
@@ -1026,7 +1043,7 @@ mod tests {
             vec![("content-type", "text/html")],
             b"<html><head></head><body>x</body></html>",
         );
-        let (proxy, _state) = test_proxy(
+        let (proxy, _state) = css_only_proxy(
             &["example.com##.ad-banner"],
             upstream,
             FixedResolver::to(&["93.184.216.34:80"]),
@@ -1050,7 +1067,7 @@ mod tests {
             ],
             b"<html><head></head><body>x</body></html>",
         );
-        let (proxy, _state) = test_proxy(
+        let (proxy, _state) = css_only_proxy(
             &["$csp=worker-src 'none',domain=example.com"],
             upstream,
             FixedResolver::to(&["93.184.216.34:80"]),
@@ -1071,6 +1088,68 @@ mod tests {
         );
     }
 
+    /// The question the injected runtime asks goes to the page's own address,
+    /// so it arrives here like any other request. Adblock recognises the path
+    /// and answers it; the site never sees it.
+    #[tokio::test]
+    async fn adblocks_own_endpoint_is_answered_and_never_forwarded() {
+        let upstream = CannedUpstream::new(
+            StatusCode::OK,
+            vec![("content-type", "text/html")],
+            b"the site's own 404",
+        );
+        let (proxy, _state) = test_proxy(
+            &["##.adsbox"],
+            upstream.clone(),
+            FixedResolver::to(&["93.184.216.34:80"]),
+        );
+
+        let req = post(
+            "http://example.com/__abx/cosmetic",
+            &[("content-type", "application/json")],
+            br#"{"url": "https://example.com/feed", "classes": ["adsbox"], "ids": []}"#,
+        );
+        let resp = proxy.handle_forward(req, false).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get("content-type").unwrap(),
+            "application/json",
+            "the route names its own content type"
+        );
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(v["css"].as_str().unwrap().contains(".adsbox{display:none !important}"), "{v}");
+        assert_eq!(upstream.calls.load(Ordering::SeqCst), 0, "the site must never see it");
+
+        // A reserved path Adblock has no answer for is still Adblock's, and is
+        // refused here rather than passed on.
+        let req = get("http://example.com/__abx/blur-model/nope.txt", &[]);
+        let resp = proxy.handle_forward(req, false).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(upstream.calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// A filter list must not be able to take one of Adblock's own endpoints
+    /// away from it, by blocking it or by standing in for it.
+    #[tokio::test]
+    async fn no_rule_can_shadow_adblocks_own_endpoint() {
+        let upstream = CannedUpstream::new(StatusCode::OK, vec![], b"");
+        let (proxy, _state) = test_proxy(
+            &["||example.com^", "/__abx/*$redirect=noopjs"],
+            upstream.clone(),
+            FixedResolver::to(&["93.184.216.34:80"]),
+        );
+
+        let req = post(
+            "http://example.com/__abx/cosmetic",
+            &[("content-type", "application/json")],
+            br#"{"url": "https://example.com/feed", "classes": ["adsbox"], "ids": []}"#,
+        );
+        let resp = proxy.handle_forward(req, false).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "not blocked and not stood in for");
+        assert_eq!(resp.headers().get("content-type").unwrap(), "application/json");
+    }
+
     #[tokio::test]
     async fn the_live_dom_runtime_is_injected_and_takes_the_csp_with_it() {
         let upstream = CannedUpstream::new(
@@ -1082,7 +1161,6 @@ mod tests {
             b"<html><head></head><body>x</body></html>",
         );
         let adblock = blocker(&["example.com##.ad-banner"], std::path::PathBuf::new());
-        adblock.set_admin_endpoint("127.0.0.1:8081");
         let (proxy, _state) =
             proxy_with_adblock(adblock, upstream, FixedResolver::to(&["93.184.216.34:80"]));
 
@@ -1094,33 +1172,8 @@ mod tests {
         );
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let html = std::str::from_utf8(&body).unwrap();
-        assert!(html.contains("http://127.0.0.1:8081/api/cosmetic"), "html: {html}");
+        assert!(html.contains("/__abx/cosmetic"), "html: {html}");
         assert!(html.contains("MutationObserver"), "html: {html}");
-        assert!(html.contains(".ad-banner{display:none !important}"), "html: {html}");
-    }
-
-    #[tokio::test]
-    async fn no_admin_server_means_no_live_dom_runtime() {
-        let upstream = CannedUpstream::new(
-            StatusCode::OK,
-            vec![("content-type", "text/html"), ("content-security-policy", "script-src 'self'")],
-            b"<html><head></head><body>x</body></html>",
-        );
-        let (proxy, _state) = test_proxy(
-            &["example.com##.ad-banner"],
-            upstream,
-            FixedResolver::to(&["93.184.216.34:80"]),
-        );
-
-        let req = get("http://example.com/", &[("accept", "text/html")]);
-        let resp = proxy.handle_forward(req, false).await.unwrap();
-        assert!(
-            resp.headers().get("content-security-policy").is_some(),
-            "CSS-only injection has no script and must leave the CSP alone"
-        );
-        let body = resp.into_body().collect().await.unwrap().to_bytes();
-        let html = std::str::from_utf8(&body).unwrap();
-        assert!(!html.contains("/api/cosmetic"), "nothing to ask, nothing injected: {html}");
         assert!(html.contains(".ad-banner{display:none !important}"), "html: {html}");
     }
 
@@ -1132,7 +1185,6 @@ mod tests {
             b"<html><head></head><body>x</body></html>",
         );
         let adblock = blocker(&["example.com##.ad-banner"], std::path::PathBuf::new());
-        adblock.set_admin_endpoint("127.0.0.1:8081");
         adblock.set_decisions(br#"{"cosmetic": false}"#).unwrap();
         let (proxy, _state) =
             proxy_with_adblock(adblock, upstream, FixedResolver::to(&["93.184.216.34:80"]));
@@ -1143,7 +1195,7 @@ mod tests {
         let html = std::str::from_utf8(&body).unwrap();
         assert!(!html.contains("display:none"), "html: {html}");
         assert!(
-            html.contains("/api/cosmetic"),
+            html.contains("/__abx/cosmetic"),
             "the runtime has its own switch and stays on: {html}"
         );
     }
@@ -1156,7 +1208,6 @@ mod tests {
             b"<html><head></head><body><div class=\"ad-banner\">ad</div></body></html>",
         );
         let adblock = blocker(&["example.com##.ad-banner"], std::path::PathBuf::new());
-        adblock.set_admin_endpoint("127.0.0.1:8081");
         adblock.set_decisions(br#"{"runtime": false}"#).unwrap();
         let (proxy, _state) =
             proxy_with_adblock(adblock, upstream, FixedResolver::to(&["93.184.216.34:80"]));
@@ -1165,7 +1216,7 @@ mod tests {
         let resp = proxy.handle_forward(req, false).await.unwrap();
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let html = std::str::from_utf8(&body).unwrap();
-        assert!(!html.contains("/api/cosmetic"), "html: {html}");
+        assert!(!html.contains("/__abx/cosmetic"), "html: {html}");
         assert!(
             html.contains("display:none"),
             "the CSS has its own switch and stays on: {html}"
@@ -1253,7 +1304,7 @@ mod tests {
             ],
             b"<html><head></head><body>x</body></html>",
         );
-        let (proxy, _state) = test_proxy(
+        let (proxy, _state) = css_only_proxy(
             &["example.com##.ad-banner"],
             upstream,
             FixedResolver::to(&["93.184.216.34:80"]),

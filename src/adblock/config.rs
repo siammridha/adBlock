@@ -23,6 +23,12 @@ impl AdblockConfig {
         self.data_dir.join("blocklists")
     }
     /// Scriptlet resource bundle.
+    /// Where the picture detector's model files live. Not fetched: there is no
+    /// CDN for this model, so the files are put here by hand.
+    pub fn blur_model_dir(&self) -> PathBuf {
+        self.data_dir.join("blur-model")
+    }
+
     pub fn scriptlets_dir(&self) -> PathBuf {
         self.data_dir.join("scriptlets")
     }
