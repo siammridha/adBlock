@@ -27,17 +27,26 @@
 // reloading. That is for trying one against another on a page that matters; the
 // lasting choice is a setting.
 //
+// The switches, and what is done with a verdict once it lands, follow HaramBlur:
+// blur with or without the colour drained out, the whole picture or a patch per
+// person, images and videos separately, everything blurred from the moment it is
+// seen until a verdict says otherwise, and the blur lifted while the pointer is
+// over it.
+//
 // __BLUR_AMOUNT__, __BLUR_STRICTNESS__, __BLUR_MEN__, __BLUR_WOMEN__,
-// __BLUR_VIDEOS__, __BLUR_REGIONS__, __BLUR_MARKS__, __BLUR_RESIZE__,
-// __BLUR_IMG_SIZE__, __BLUR_VIDEO_SIZE__ and __BLUR_MODEL__ are replaced with
+// __BLUR_IMAGES__, __BLUR_VIDEOS__, __BLUR_REGIONS__, __BLUR_GRAY__,
+// __BLUR_ON_LOAD__, __BLUR_HOVER_IMAGES__, __BLUR_HOVER_VIDEOS__,
+// __BLUR_MARKS__, __BLUR_RESIZE__, __BLUR_IMG_SIZE__, __BLUR_VIDEO_SIZE__,
+// __BLUR_SKIP_SMALL__, __BLUR_MIN_SIZE__ and __BLUR_MODEL__ are replaced with
 // Adblock's settings before this is injected.
 (function () {
   var AMOUNT = __BLUR_AMOUNT__;
-  // Strictness runs 0–100 and slides the bars a face has to clear before it
-  // counts as a man or a woman. Higher strictness, lower bars, more blurring.
-  // At 50 the bars are HaramBlur's own: a man at 0.30, a woman at 0.25, and a
-  // face read as a woman the model is under 0.20 sure of counted as a man
-  // instead. HaramBlur also skips anyone it reads as under 20.
+  // Strictness runs 10–100, which is HaramBlur's own 0.1–1 written as a
+  // percentage. It slides the bars a face has to clear before it counts as a man
+  // or a woman: higher strictness, lower bars, more blurring. At 50 the bars are
+  // HaramBlur's own: a man at 0.30, a woman at 0.25, and a face read as a woman
+  // the model is under 0.20 sure of counted as a man instead. HaramBlur also
+  // skips anyone it reads as under 20.
   var STRICTNESS = __BLUR_STRICTNESS__;
   var SHIFT = ((50 - STRICTNESS) / 100) * 0.5;
   var MALE_MIN = 0.3 + SHIFT;
@@ -46,9 +55,19 @@
   var MIN_AGE = 20;
   var MEN = __BLUR_MEN__;
   var WOMEN = __BLUR_WOMEN__;
+  var IMAGES = __BLUR_IMAGES__;
   var VIDEOS = __BLUR_VIDEOS__;
   var REGIONS = __BLUR_REGIONS__;
+  var GRAY = __BLUR_GRAY__;
+  var ON_LOAD = __BLUR_ON_LOAD__;
+  var HOVER_IMAGES = __BLUR_HOVER_IMAGES__;
+  var HOVER_VIDEOS = __BLUR_HOVER_VIDEOS__;
   var MARKS = __BLUR_MARKS__;
+  // How long a picture blurred on load stays blurred with no verdict. A
+  // detector that never answers must not leave the page unreadable for good, so
+  // the load blur is an animation that runs out rather than a class that waits.
+  // HaramBlur's own cap, to the millisecond.
+  var WAIT_MS = 20000;
 
   var CLASS = "abx-blur";
   var HUD = "abx-blur-hud"; // the corner panel, only ever built when MARKS is on
@@ -433,17 +452,43 @@
 
   var model = modelById("__BLUR_MODEL__");
 
+  // What a blur looks like, in one string, so the element filter, the patch
+  // backdrop and the load animation cannot drift apart. HaramBlur's: a radius,
+  // and the colour drained out with it if that is switched on.
+  var FILTER = "blur(" + AMOUNT + "px)" + (GRAY ? " grayscale(100%)" : "");
+
   var sheet = document.createElement("style");
   sheet.textContent =
-    "." + CLASS + "{filter:blur(" + AMOUNT + "px)!important}" +
+    "." + CLASS + "{filter:" + FILTER + "!important;transition:filter .1s ease!important}" +
     // A region cover is a box laid over the picture, holding one patch per
     // person to hide. The patches blur what is behind them rather than the
     // element, so the rest of the picture stays as it was.
     // No z-index here: a patch layer is stacked where the picture it covers is
     // stacked, which is only known per picture, so it is set as one is placed.
     "." + CLASS + "-box{position:absolute;pointer-events:none}" +
-    "." + CLASS + "-box>i{position:absolute;backdrop-filter:blur(" + AMOUNT + "px);" +
-    "-webkit-backdrop-filter:blur(" + AMOUNT + "px)}" +
+    "." + CLASS + "-box>i{position:absolute;border-radius:5px;" +
+    "background:rgba(255,255,255,.2);box-shadow:0 4px 30px rgba(0,0,0,.1);" +
+    "backdrop-filter:" + FILTER + ";-webkit-backdrop-filter:" + FILTER + "}" +
+    // The blur lifted while the pointer is over the picture. It has to reach
+    // both ways of blurring: the filter on the element, and the patch layer,
+    // which is not a child of the picture and so cannot be reached by a CSS
+    // hover rule on it.
+    (HOVER_IMAGES || HOVER_VIDEOS
+      ? "." + CLASS + "." + CLASS + "-off{filter:none!important}" +
+        "." + CLASS + "-box." + CLASS + "-off{display:none!important}" +
+        // Two classes to one, so this beats the rule it is overriding on
+        // specificity and does not depend on which was written first.
+        "." + CLASS + "-wait." + CLASS + "-off{animation:none!important;filter:none!important}"
+      : "") +
+    // Blurred from the moment it is seen until a verdict lands. Written as an
+    // animation that ends in no filter at all, so a detector that never answers
+    // cannot leave a page unreadable — the blur runs out on its own.
+    (ON_LOAD
+      ? "." + CLASS + "-wait{animation:" + CLASS + "-wait " + WAIT_MS +
+        "ms ease-in-out forwards!important}" +
+        "@keyframes " + CLASS + "-wait{0%{filter:" + FILTER + "}" +
+        "95%{filter:" + FILTER + "}100%{filter:none}}"
+      : "") +
     // Every picture the runtime has an opinion about gets outlined with what
     // that opinion is, and says the same thing in its tooltip. Grey means seen
     // and waiting, blue means the model has it, green means nobody to blur, red
@@ -531,8 +576,12 @@
       "radius " + AMOUNT + "px | strictness " + STRICTNESS +
       " (man " + MALE_MIN.toFixed(2) + " | woman " + FEMALE_MIN.toFixed(2) +
       " | age " + MIN_AGE + "+)\n" +
-      "men " + onOff(MEN) + " | women " + onOff(WOMEN) + " | sample video " + onOff(VIDEOS) + "\n" +
-      "cover each person " + onOff(REGIONS) + "\n" +
+      "men " + onOff(MEN) + " | women " + onOff(WOMEN) +
+      " | images " + onOff(IMAGES) + " | videos " + onOff(VIDEOS) + "\n" +
+      "cover each person " + onOff(REGIONS) + " | grayscale " + onOff(GRAY) +
+      " | blur on load " + onOff(ON_LOAD) + "\n" +
+      "unblur on hover: images " + onOff(HOVER_IMAGES) +
+      " | videos " + onOff(HOVER_VIDEOS) + "\n" +
       "shrink " + onOff(RESIZE) + " | image " + IMG_MAX + "px | video " + VID_MAX + "px\n" +
       "skip under " + MIN_SIZE + "px " + onOff(SKIP_SMALL);
   }
@@ -718,6 +767,13 @@
   // The tooltip carries the numbers the outline cannot. Overwriting the page's
   // own title is only acceptable because this is a debugging switch.
   function mark(el, state, note) {
+    // A picture blurred on load stops being blurred on load the moment there is
+    // a verdict, whatever it says — blurred properly, nothing to blur, or
+    // nothing readable. Done here because every one of those paths reports
+    // itself through mark() already, and this runs whether or not marks are on.
+    if (ON_LOAD && state !== "queued" && state !== "looking") {
+      el.classList.remove(CLASS + "-wait");
+    }
     if (!MARKS) return;
     var text = state + (note === undefined ? "" : " " + note);
     el.dataset.abBlur = state;
@@ -1152,6 +1208,32 @@
     uncover(el);
   }
 
+  // Lift the blur off a picture while the pointer is over it, and put it back
+  // when the pointer leaves. Both ways of blurring have to be reached: the class
+  // on the element, and the patch layer, which lives beside the element rather
+  // than inside it. The layer is looked up at the moment of the hover because a
+  // video grows and loses one as it plays.
+  function lift(el, off) {
+    el.classList.toggle(CLASS + "-off", off);
+    var entry = el.__abCover;
+    if (entry && entry.box) entry.box.classList.toggle(CLASS + "-off", off);
+  }
+
+  function hoverable(el) {
+    el.addEventListener("mouseenter", function () {
+      lift(el, true);
+    });
+    el.addEventListener("mouseleave", function () {
+      lift(el, false);
+    });
+  }
+
+  // Blur it now, before anything has looked at it. The class comes off in
+  // mark(), on whatever the verdict turns out to be.
+  function preblur(el) {
+    if (ON_LOAD) el.classList.add(CLASS + "-wait");
+  }
+
   if (REGIONS || MARKS) {
     window.addEventListener("scroll", reflow, true);
     window.addEventListener("resize", reflow);
@@ -1261,6 +1343,8 @@
     // that turns out to matter.
     if (img.__abSeen) return;
     img.__abSeen = true;
+    preblur(img);
+    if (HOVER_IMAGES) hoverable(img);
     mark(img, "queued");
     visible.observe(img);
   }
@@ -1272,6 +1356,8 @@
   function watchVideo(v) {
     if (v.__abSeen) return;
     v.__abSeen = true;
+    preblur(v);
+    if (HOVER_VIDEOS) hoverable(v);
     mark(v, "queued");
 
     var busy = false;
@@ -1393,9 +1479,8 @@
     }
 
     // A video nobody has played is still showing something: its poster, or the
-    // frame it is parked on. That gets looked at once, whether or not video
-    // sampling is on — it costs one run, not one per frame, and a thumbnail is
-    // the picture a reader actually sees.
+    // frame it is parked on. That gets looked at once, before any play starts —
+    // a thumbnail standing in for a video is the picture a reader actually sees.
     var stilled = false;
     // A frame can only be read once one has been decoded, which is a state
     // later than having the metadata. Read a video before that and the browser
@@ -1414,23 +1499,26 @@
     v.addEventListener("loadedmetadata", checkStill);
     checkStill();
 
-    if (!VIDEOS) return;
     v.addEventListener("play", schedule);
     schedule();
   }
 
-  // Videos are watched whatever the video setting says: with it off they are
-  // only ever looked at once, for their poster or their parked frame.
+  // Images and videos are two switches, as they are in HaramBlur: with one off
+  // that kind of media is never looked at and never touched.
+  function watch(el) {
+    if (el.tagName === "IMG") {
+      if (IMAGES) watchImage(el);
+    } else if (VIDEOS) {
+      watchVideo(el);
+    }
+  }
+
   function sweep(root) {
     if (!root || root.nodeType !== 1) return;
-    if (root.tagName === "IMG") watchImage(root);
-    else if (root.tagName === "VIDEO") watchVideo(root);
+    if (root.tagName === "IMG" || root.tagName === "VIDEO") watch(root);
     if (!root.querySelectorAll) return;
     var found = root.querySelectorAll("img,video");
-    for (var i = 0; i < found.length; i++) {
-      if (found[i].tagName === "IMG") watchImage(found[i]);
-      else watchVideo(found[i]);
-    }
+    for (var i = 0; i < found.length; i++) watch(found[i]);
   }
 
   new MutationObserver(function (records) {

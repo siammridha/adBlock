@@ -56,8 +56,13 @@ pub(crate) fn blur_runtime(on: &super::settings::DecisionSettings) -> String {
         .replace("__BLUR_STRICTNESS__", &on.blur_strictness.to_string())
         .replace("__BLUR_MEN__", if on.blur_men { "true" } else { "false" })
         .replace("__BLUR_WOMEN__", if on.blur_women { "true" } else { "false" })
+        .replace("__BLUR_IMAGES__", if on.blur_images { "true" } else { "false" })
         .replace("__BLUR_VIDEOS__", if on.blur_videos { "true" } else { "false" })
         .replace("__BLUR_REGIONS__", if on.blur_regions { "true" } else { "false" })
+        .replace("__BLUR_GRAY__", if on.blur_gray { "true" } else { "false" })
+        .replace("__BLUR_ON_LOAD__", if on.blur_on_load { "true" } else { "false" })
+        .replace("__BLUR_HOVER_IMAGES__", if on.blur_hover_images { "true" } else { "false" })
+        .replace("__BLUR_HOVER_VIDEOS__", if on.blur_hover_videos { "true" } else { "false" })
         .replace("__BLUR_MARKS__", if on.blur_marks { "true" } else { "false" })
         .replace("__BLUR_RESIZE__", if on.blur_resize { "true" } else { "false" })
         .replace("__BLUR_IMG_SIZE__", &on.blur_img_size.to_string())
@@ -346,8 +351,13 @@ mod tests {
             blur: true,
             blur_men: true,
             blur_women: true,
+            blur_images: true,
             blur_videos: videos,
             blur_regions: regions,
+            blur_gray: true,
+            blur_on_load: true,
+            blur_hover_images: true,
+            blur_hover_videos: false,
             blur_marks: true,
             blur_resize: resize,
             blur_amount: amount,
@@ -367,8 +377,15 @@ mod tests {
         assert!(js.contains("var STRICTNESS = 75;"), "strictness goes in as written");
         assert!(js.contains("var MEN = true;"));
         assert!(js.contains("var WOMEN = true;"));
+        assert!(js.contains("var IMAGES = true;"));
         assert!(js.contains("var VIDEOS = false;"));
         assert!(js.contains("var REGIONS = true;"));
+        // The switches that only change what a blur looks like still have to
+        // reach the page: they are read once, when the stylesheet is built.
+        assert!(js.contains("var GRAY = true;"));
+        assert!(js.contains("var ON_LOAD = true;"));
+        assert!(js.contains("var HOVER_IMAGES = true;"));
+        assert!(js.contains("var HOVER_VIDEOS = false;"));
         assert!(js.contains("var MARKS = true;"));
         assert!(js.contains("var RESIZE = true;"));
         assert!(js.contains("var IMG_MAX = 400;"));
@@ -386,7 +403,7 @@ mod tests {
         assert!(js.contains(r#"var model = modelById("human")"#), "{js}");
         assert!(js.contains(r#"id: "human""#), "{js}");
         assert!(!js.contains("__BLUR_"), "every placeholder must be replaced");
-        let js = blur_runtime(&blur_settings(1, 0, true, false, false));
+        let js = blur_runtime(&blur_settings(10, 10, true, false, false));
         assert!(js.contains("var VIDEOS = true;"));
         assert!(js.contains("var REGIONS = false;"));
         assert!(js.contains("var RESIZE = false;"));

@@ -131,7 +131,8 @@ pub(super) fn edit_adblock_config(
         format!(
             "adblock: redirect={} removeparam={} csp={}; \
              page injection: cosmetic={} scriptlets={} runtime={}; \
-             blur={} (men={} women={} videos={} regions={} marks={} amount={} strictness={} \
+             blur={} (men={} women={} images={} videos={} regions={} gray={} on_load={} \
+             hover_images={} hover_videos={} marks={} amount={} strictness={} \
              resize={} img_size={} video_size={} skip_small={} min_size={} model={})",
             s.redirect,
             s.removeparam,
@@ -142,8 +143,13 @@ pub(super) fn edit_adblock_config(
             s.blur,
             s.blur_men,
             s.blur_women,
+            s.blur_images,
             s.blur_videos,
             s.blur_regions,
+            s.blur_gray,
+            s.blur_on_load,
+            s.blur_hover_images,
+            s.blur_hover_videos,
             s.blur_marks,
             s.blur_amount,
             s.blur_strictness,

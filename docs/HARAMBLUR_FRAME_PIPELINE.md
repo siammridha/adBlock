@@ -3,12 +3,12 @@
 > **This describes an old version.** The GitHub repository stops at 0.2.6 (July
 > 2024). The extension people actually install is 0.4.1 (August 2025), which was
 > never pushed there and is licensed "All Rights Reserved" rather than AGPL. 0.4.1
-> replaced the Human face pipeline described below with its own encrypted
-> YOLO-style model — classes `Woman`, `Man`, `Girl`, `Person`, 640×640,
-> `maxDetected: 70`, one score bar at 0.35 — and added per-person blurring
-> (`specificBlur`, on by default). The weights are AES-encrypted and served from
-> their own host, so none of it is usable here. What is still true below is the
-> frame-moving argument in sections 3 to 5; the model details are 0.2.6's.
+> replaced the Human face pipeline described below with its own YOLOv8 model —
+> classes `Woman`, `Man`, `Girl`, `Person`, one score bar at 0.33–0.35,
+> `maxDetected: 70` — and added per-person blurring (`specificBlur`, on by
+> default). What is still true below is the frame-moving argument in sections 3 to
+> 5; the model details are 0.2.6's. Section 7 covers 0.4.1's settings, which this
+> project's picture blur now follows.
 
 Source read: [alganzory/HaramBlur](https://github.com/alganzory/HaramBlur), `main`
 branch, version 0.2.6 (last code commit July 2024). Files that matter:
@@ -182,3 +182,45 @@ Face and NSFW models are 20–30 MB of weights. HaramBlur ships them inside the
 extension package. We would have to serve them through the proxy on first use and
 let the browser cache them, which means the first page with a video pays a real
 download. Worth measuring before committing to this feature.
+
+## 7. 0.4.1's settings, and which of them we have
+
+Read off `dist/popup/popup.html` and the defaults object in `dist/content.js`.
+Every one of these is now a setting in `adblock/`, under the same meaning and the
+same default, so the dashboard's picture blur behaves the way the extension does
+out of the box.
+
+| HaramBlur | Default | Ours |
+| --------- | ------- | ---- |
+| `status` | on | `blur` — off, because ours downloads a model on first use |
+| `blurAmount`, 10–50 | 25 | `blur_amount` |
+| `gray` | on | `blur_gray` |
+| `specificBlur` | on | `blur_regions` |
+| `strictness`, 0.1–1 | 0.4 | `blur_strictness`, the same range as a percentage |
+| `blurMale` | off | `blur_men` |
+| `blurFemale` | on | `blur_women` |
+| `blurImages` | on | `blur_images` |
+| `blurVideos` | on | `blur_videos` |
+| `blurryStartMode` | off | `blur_on_load` |
+| `unblurImages` | off | `blur_hover_images` |
+| `unblurVideos` | off | `blur_hover_videos` |
+| `detectionModel` | one of three | `blur_model`, our own list |
+| `whitelist` | empty | the proxy's excluded hosts, which already exist |
+| `hideVideoToggle` | off | **not ours** — it hides a per-video button we do not draw |
+
+`passwordProtectionEnabled`, `companionMode` and `trialWelcomeShown` are account
+features, not blur settings, and have no place here.
+
+What the switches do to a picture is taken from the extension's stylesheet as
+well: `filter: blur(Npx) grayscale(100%)` with a 0.1s transition on the element,
+and for per-person blurring a patch with `backdrop-filter`, a 5px radius and a
+faint white wash. `blurryStartMode` is an animation rather than a class that
+waits, so that a detector which never answers cannot leave a page unreadable —
+HaramBlur caps it at 20 seconds and so do we.
+
+Four settings are ours and have no HaramBlur equivalent: the frame sizes a
+picture is shrunk to (`blur_resize`, `blur_img_size`, `blur_video_size`), the
+size below which a picture is not worth looking at (`blur_skip_small`,
+`blur_min_size`), the choice of detector, and `blur_marks` — the overlay that
+outlines every picture with the verdict it got and lists them in a panel.
+HaramBlur feeds its detector one fixed size and has nothing to debug with.

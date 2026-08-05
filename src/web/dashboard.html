@@ -125,6 +125,12 @@
   fieldset.group h4 { margin:12px 0 6px; font-size:12px; color:var(--muted);
     text-transform:uppercase; letter-spacing:.06em; }
   .switches { display:flex; gap:14px; flex-wrap:wrap; align-items:center; }
+  /* A slider with its value beside it, the way HaramBlur shows blur amount and
+     strictness. */
+  .slide { display:flex; align-items:center; gap:8px; }
+  .slide input[type=range] { width:180px; }
+  .slide output { font-variant-numeric:tabular-nums; color:var(--fg);
+    font-weight:600; min-width:44px; }
   /* What each outline colour means, in the colours the page itself draws. */
   .marks-key { display:flex; gap:6px 16px; flex-wrap:wrap; margin:6px 0 0; padding:0;
     list-style:none; color:var(--muted); font-size:12px; }
@@ -844,6 +850,76 @@
             off nothing below has any effect.</p>
         </div>
 
+        <fieldset class="group" id="blur-look" disabled>
+          <legend>Blur</legend>
+          <p class="hint switches" style="margin-top:8px">
+            <span class="slide">Blur amount
+              <input type="range" id="blur-amount" min="10" max="50" step="1">
+              <output id="blur-amount-value"></output></span>
+            <label class="sw"><input type="checkbox" id="blur-gray"> Grayscale</label>
+          </p>
+          <p class="hint" style="margin-top:8px">How far the blur spreads, in CSS pixels, and
+            whether the colour is drained out along with it. Both are HaramBlur's, including
+            the range: 10 is still readable at a glance, 50 is a smear.</p>
+
+          <h4>Blur mode</h4>
+          <p class="hint switches">
+            <label class="sw"><input type="radio" name="blur-mode" id="blur-mode-specific"> Specific blur</label>
+            <label class="sw"><input type="radio" name="blur-mode" id="blur-mode-whole"> Whole blur</label>
+          </p>
+          <p class="hint" style="margin-top:8px"><b>Specific blur</b> lays a patch over each
+            person found and leaves the rest of the picture as it was. <b>Whole blur</b> blurs
+            the entire image or video the moment anyone is found in it.</p>
+
+          <h4>Strictness</h4>
+          <p class="hint switches">
+            <span class="slide">
+              <input type="range" id="blur-strictness" min="10" max="100" step="10">
+              <output id="blur-strictness-value"></output></span>
+          </p>
+          <p class="hint" style="margin-top:8px">How weak the evidence can be before a person is
+            blurred anyway. Higher blurs more and gets it wrong more often. At 50 the bars are
+            HaramBlur's own: 0.30 for a man and 0.25 for a woman. A face read as under 20 is
+            never blurred.</p>
+        </fieldset>
+
+        <fieldset class="group" id="blur-what" disabled>
+          <legend>What to blur</legend>
+          <h4>Faces to blur</h4>
+          <p class="hint switches">
+            <label class="sw"><input type="checkbox" id="blur-men"> Male</label>
+            <label class="sw"><input type="checkbox" id="blur-women"> Female</label>
+          </p>
+          <h4>Media to blur</h4>
+          <p class="hint switches">
+            <label class="sw"><input type="checkbox" id="blur-images"> Images</label>
+            <label class="sw"><input type="checkbox" id="blur-videos"> Videos</label>
+          </p>
+          <p class="hint" style="margin-top:8px">With neither face ticked, or neither kind of
+            media, nothing happens and the script is not added to the page at all. Videos cost
+            far more than images: an image is looked at once when it scrolls into view, a
+            playing video is looked at over and over.</p>
+        </fieldset>
+
+        <fieldset class="group" id="blur-extra" disabled>
+          <legend>Additional settings</legend>
+          <p class="hint switches" style="margin-top:8px">
+            <label class="sw"><input type="checkbox" id="blur-on-load"> Blur media on load</label>
+          </p>
+          <p class="hint" style="margin-top:8px">Blur every image and video from the moment it
+            appears, and lift the blur once the detector has looked at it and found nothing to
+            hide. Nothing is briefly readable before the verdict lands; the cost is a page that
+            starts out obscured. A picture the detector never answers about clears itself after
+            20 seconds, so a broken detector cannot leave a page unreadable.</p>
+          <h4>Unblur on hover</h4>
+          <p class="hint switches">
+            <label class="sw"><input type="checkbox" id="blur-hover-images"> Images</label>
+            <label class="sw"><input type="checkbox" id="blur-hover-videos"> Videos</label>
+          </p>
+          <p class="hint" style="margin-top:8px">Lift the blur while the pointer is over the
+            picture, and put it back when the pointer leaves. Works in both blur modes.</p>
+        </fieldset>
+
         <fieldset class="group" id="blur-model-group" disabled>
           <legend>Model</legend>
           <p class="hint" style="margin-top:8px">Which detector runs in the page. They do not
@@ -864,7 +940,7 @@
               </select></span>
           </p>
           <p class="hint" style="margin-top:8px">A model that cannot tell men from women treats
-            every person as a match, so <b>Blur men</b> and <b>Blur women</b> stop meaning
+            every person as a match, so <b>Male</b> and <b>Female</b> stop meaning
             anything separately — either one being on hides everybody it finds. With
             <b>Mark what was checked</b> on you can also switch model from the panel on the
             page itself, for that page only, which is the quick way to see which one suits a
@@ -872,8 +948,9 @@
         </fieldset>
 
         <fieldset class="group" id="blur-media" disabled>
-          <legend>Media</legend>
-          <p class="hint" style="margin-top:8px">What gets sent to the detector, and at what
+          <legend>Frame sizes</legend>
+          <p class="hint" style="margin-top:8px">Ours, not HaramBlur's, which feeds its detector
+            one fixed size. What gets sent to the detector, and at what
             size. <b>Shrink before checking</b> scales a frame down until its longest side
             fits the limit below it. The shape is kept and a small picture is never enlarged.
             Bigger numbers find smaller faces and take longer. Untick it to send everything
@@ -904,35 +981,21 @@
           </p>
 
           <h4>Videos</h4>
-          <p class="hint"><b>Sample videos too</b> costs far more than images — every presented
-            frame is a candidate. With it off a video is still looked at once, at its poster or
-            at the frame it is parked on, so a thumbnail standing in for a video is not a gap.
-            Either way the patches move with the people, a fraction of a second behind.</p>
+          <p class="hint">A playing video is looked at over and over — every presented frame is
+            a candidate. A video nobody has played is looked at once, at its poster or at the
+            frame it is parked on, so a thumbnail standing in for a video is not a gap. Either
+            way the patches move with the people, a fraction of a second behind.</p>
           <p class="hint switches" style="margin-top:8px">
-            <label class="sw"><input type="checkbox" id="blur-videos"> Sample videos too</label>
             <span>Video size
               <input type="number" id="blur-video-size" min="32" max="4096" step="1" style="width:90px"> px</span>
           </p>
         </fieldset>
 
         <fieldset class="group" id="blur-other" disabled>
-          <legend>Other</legend>
+          <legend>Overlay</legend>
           <p class="hint switches" style="margin-top:8px">
-            <label class="sw"><input type="checkbox" id="blur-men"> Blur men</label>
-            <label class="sw"><input type="checkbox" id="blur-women"> Blur women</label>
-            <label class="sw"><input type="checkbox" id="blur-regions"> Cover each person only</label>
             <label class="sw"><input type="checkbox" id="blur-marks"> Mark what was checked</label>
-            <span>Blur radius
-              <input type="number" id="blur-amount" min="1" max="100" step="1" style="width:80px"> px</span>
-            <span>Strictness
-              <input type="number" id="blur-strictness" min="0" max="100" step="5" style="width:80px"> / 100</span>
           </p>
-          <p class="hint">With neither <b>Blur men</b> nor <b>Blur women</b> ticked nothing
-            happens. Higher strictness blurs on weaker evidence: at 50 the bars are the ones
-            HaramBlur uses, 0.30 for a man and 0.25 for a woman. A face read as under 20 is
-            never blurred.
-            <b>Cover each person only</b> patches each person found and leaves the rest of the
-            picture visible; off, the whole image or video is blurred.</p>
           <p class="hint" style="margin-top:8px"><b>Mark what was checked</b> outlines every
             picture with the verdict it got, repeats it in the tooltip, and adds a draggable
             panel listing these settings and the frame each picture went to the detector as.</p>
@@ -1375,8 +1438,17 @@ async function refreshAdblockCfg(){
     $("blur-on").checked = !!d.blur;
     $("blur-men").checked = !!d.blur_men;
     $("blur-women").checked = !!d.blur_women;
+    $("blur-images").checked = !!d.blur_images;
     $("blur-videos").checked = !!d.blur_videos;
-    $("blur-regions").checked = !!d.blur_regions;
+    $("blur-gray").checked = !!d.blur_gray;
+    $("blur-on-load").checked = !!d.blur_on_load;
+    $("blur-hover-images").checked = !!d.blur_hover_images;
+    $("blur-hover-videos").checked = !!d.blur_hover_videos;
+    // One setting, two radios: HaramBlur puts blur mode as a pair of choices
+    // rather than a tickbox, so the pair is what is shown and the boolean is
+    // what is sent.
+    $("blur-mode-specific").checked = !!d.blur_regions;
+    $("blur-mode-whole").checked = !d.blur_regions;
     $("blur-marks").checked = !!d.blur_marks;
     $("blur-resize").checked = !!d.blur_resize;
     $("blur-skip-small").checked = !!d.blur_skip_small;
@@ -1386,6 +1458,7 @@ async function refreshAdblockCfg(){
     $("blur-img-size").value = d.blur_img_size;
     $("blur-video-size").value = d.blur_video_size;
     $("blur-model").value = d.blur_model;
+    blurSlides();
     blurGroups();
   } catch(e){}
 }
@@ -1393,10 +1466,18 @@ async function refreshAdblockCfg(){
 // its own controls, so nothing here touches them one by one.
 function blurGroups(){
   const on = $("blur-on").checked;
-  $("blur-media").disabled = $("blur-other").disabled =
+  $("blur-look").disabled = $("blur-what").disabled = $("blur-extra").disabled =
+    $("blur-media").disabled = $("blur-other").disabled =
     $("blur-model-group").disabled = !on;
 }
 $("blur-on").addEventListener("change", blurGroups);
+// A slider says nothing on its own, so each one writes its value beside it.
+function blurSlides(){
+  $("blur-amount-value").textContent = $("blur-amount").value + " px";
+  $("blur-strictness-value").textContent = $("blur-strictness").value + "%";
+}
+$("blur-amount").addEventListener("input", blurSlides);
+$("blur-strictness").addEventListener("input", blurSlides);
 // Both panels post to the same endpoint, each sending only its own switches.
 // Adblock leaves anything absent alone, so neither can undo the other.
 async function saveAdblockCfg(el, body){
@@ -1418,8 +1499,12 @@ $("ab-save").addEventListener("click", ()=>
 $("blur-save").addEventListener("click", ()=>
   saveAdblockCfg($("blur-status"),
     {blur: $("blur-on").checked, blur_men: $("blur-men").checked,
-     blur_women: $("blur-women").checked, blur_videos: $("blur-videos").checked,
-     blur_regions: $("blur-regions").checked, blur_marks: $("blur-marks").checked,
+     blur_women: $("blur-women").checked, blur_images: $("blur-images").checked,
+     blur_videos: $("blur-videos").checked, blur_gray: $("blur-gray").checked,
+     blur_on_load: $("blur-on-load").checked,
+     blur_hover_images: $("blur-hover-images").checked,
+     blur_hover_videos: $("blur-hover-videos").checked,
+     blur_regions: $("blur-mode-specific").checked, blur_marks: $("blur-marks").checked,
      // Sent as typed. Adblock decides what a usable number is and says why when
      // it isn't; an empty box drops out as null and leaves that setting alone.
      blur_resize: $("blur-resize").checked,
