@@ -1,6 +1,7 @@
 //! Ad blocking: wraps the `adblock` crate engine and owns the filter lists
 //! behind it.
 
+use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
 
 use adblock::cosmetic_filter_cache::ProceduralOrActionFilter;
@@ -61,13 +62,19 @@ struct EngineCore {
     engine: RwLock<Arc<Engine>>,
     lists: Mutex<Vec<ListEntry>>,
     scriptlets: Scriptlets,
+    /// Where the compiled engine is cached, as the list store reports it.
+    engine_cache: Option<std::path::PathBuf>,
 }
 
 impl EngineCore {
     fn rebuild(&self, lists: &[ListEntry]) {
         let resources = self.scriptlets.resources();
-        let engine = build_engine(lists, &resources);
-        *self.engine.write().expect("engine lock") = Arc::new(engine);
+        let (engine, unsaved) = build_engine(lists, &resources, self.engine_cache.as_deref());
+        let engine = Arc::new(engine);
+        *self.engine.write().expect("engine lock") = engine.clone();
+        if let (Some(path), Some(key)) = (self.engine_cache.clone(), unsaved) {
+            cache_engine_in_background(path, key, engine);
+        }
     }
 
     fn mutate<R>(&self, f: impl FnOnce(&mut Vec<ListEntry>) -> R) -> R {
@@ -215,8 +222,17 @@ pub fn with_store(
         .filter(|s| !s.is_empty())
         .collect();
 
+    // Startup is dominated by these two steps — reading the lists, then getting an
+    // engine out of them — so both say how long they took.
+    let started = std::time::Instant::now();
     let stored = store.load();
     let outcome = curation::reconcile(&mut lists, stored);
+    tracing::info!(
+        lists = lists.len(),
+        bytes = lists.iter().map(|l| l.text.len()).sum::<usize>(),
+        ms = started.elapsed().as_millis(),
+        "blocklists read"
+    );
     custom_lines.extend(outcome.custom_lines);
     for id in &outcome.remove {
         store.remove(id);
@@ -234,12 +250,20 @@ pub fn with_store(
         text,
     });
 
-    let engine = build_engine(&lists, &scriptlets.resources());
+    let engine_cache = store.engine_cache();
+    let started = std::time::Instant::now();
+    let (engine, unsaved) = build_engine(&lists, &scriptlets.resources(), engine_cache.as_deref());
+    tracing::info!(ms = started.elapsed().as_millis(), "engine ready");
+    let engine = Arc::new(engine);
+    if let (Some(path), Some(key)) = (engine_cache.clone(), unsaved) {
+        cache_engine_in_background(path, key, engine.clone());
+    }
     let core = Arc::new(EngineCore {
         enabled: cfg.enabled,
-        engine: RwLock::new(Arc::new(engine)),
+        engine: RwLock::new(engine),
         lists: Mutex::new(lists),
         scriptlets,
+        engine_cache,
     });
     Ok((
         Arc::new(AdBlocker {
@@ -693,16 +717,130 @@ fn decode_redirect(data_url: &str) -> Option<Redirect> {
     Some(Redirect { mime: mime.to_string(), body: STANDARD.decode(payload).ok()? })
 }
 
-fn build_engine(lists: &[ListEntry], resources: &[Resource]) -> Engine {
+/// Bump when what goes into the engine changes in a way the rules themselves do
+/// not show — the parse options, the debug/optimize flags, or an upgrade of the
+/// `adblock` dependency. Every cached engine written under an older number is
+/// then ignored and rebuilt.
+const ENGINE_CACHE_FORMAT: u32 = 1;
+
+/// The enabled lists in a fixed order, so the same rules always give the same
+/// engine and the same cache key however the store handed them over. The disk
+/// store lists a directory, and that order is not stable — writing the cache
+/// file into it is enough to change it — so an order taken as given would miss
+/// the cache on every start and rewrite it every time.
+fn enabled_in_order(lists: &[ListEntry]) -> Vec<&ListEntry> {
+    let mut out: Vec<&ListEntry> = lists.iter().filter(|l| l.enabled).collect();
+    // Names are unique once reconciled; the text breaks a tie so the order is
+    // total either way.
+    out.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.text.cmp(&b.text)));
+    out
+}
+
+/// Compiling the lists costs seconds; reading back the compiled form costs
+/// milliseconds. The key covers every rule that went in, so any edit to a list —
+/// its text, its name, or its enabled flag — misses the cache and the engine is
+/// built from the rules again.
+fn engine_key(lists: &[ListEntry]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    ENGINE_CACHE_FORMAT.hash(&mut h);
+    for l in enabled_in_order(lists) {
+        l.name.hash(&mut h);
+        l.text.hash(&mut h);
+    }
+    h.finish()
+}
+
+/// The engine, and the key to cache it under when it had to be built from the
+/// rules. `None` means it came out of the cache and is already on disk.
+fn build_engine(
+    lists: &[ListEntry],
+    resources: &[Resource],
+    cache: Option<&Path>,
+) -> (Engine, Option<u64>) {
+    let key = engine_key(lists);
+    if let Some(path) = cache {
+        if let Some(mut engine) = load_cached_engine(path, key) {
+            if !resources.is_empty() {
+                engine.use_resources(resources.iter().cloned());
+            }
+            tracing::info!(path = %path.display(), "engine loaded from cache");
+            return (engine, None);
+        }
+    }
+
     let mut filter_set = FilterSet::new(true);
-    for l in lists.iter().filter(|l| l.enabled) {
+    for l in enabled_in_order(lists) {
         filter_set.add_filter_list(&l.text, ParseOptions::default());
     }
     let mut engine = Engine::from_filter_set(filter_set, false);
     if !resources.is_empty() {
         engine.use_resources(resources.iter().cloned());
     }
-    engine
+    (engine, cache.map(|_| key))
+}
+
+/// `None` whenever the cache cannot be used — missing, truncated, written for a
+/// different set of rules, or in a format this build of the `adblock` crate does
+/// not read. Every one of those just means building the engine from the rules.
+fn load_cached_engine(path: &Path, key: u64) -> Option<Engine> {
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.len() < 8 || u64::from_le_bytes(bytes[..8].try_into().ok()?) != key {
+        return None;
+    }
+    // `false` to match `from_filter_set` below: the rules are kept as written
+    // rather than combined, so a matched rule can be reported as it was typed.
+    let mut engine = Engine::new(false);
+    match engine.deserialize(&bytes[8..]) {
+        Ok(()) => Some(engine),
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = ?e, "ignoring unreadable engine cache");
+            None
+        }
+    }
+}
+
+/// Writing the cache takes seconds, and rebuilding the engine also happens when
+/// a list is added, removed, or switched over from the admin UI — so the write
+/// runs on its own thread and nobody waits for it. The engine is already in use
+/// by then; the cache only matters to the next start.
+fn cache_engine_in_background(path: std::path::PathBuf, key: u64, engine: Arc<Engine>) {
+    std::thread::spawn(move || save_cached_engine(&path, key, &engine));
+}
+
+/// Best effort: a cache that cannot be written costs startup time and nothing
+/// else, so a failure is logged and the engine is used as built.
+fn save_cached_engine(path: &Path, key: u64, engine: &Engine) {
+    // Scriptlet and `$redirect` resources are not part of the serialized form;
+    // they are applied to the engine again on the way back in.
+    let body = match engine.serialize_raw() {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(error = ?e, "serializing engine for cache");
+            return;
+        }
+    };
+    let started = std::time::Instant::now();
+    let mut buf = key.to_le_bytes().to_vec();
+    buf.extend_from_slice(&body);
+    // Write beside the target and rename, so an interrupted write leaves the
+    // previous cache in place instead of a half-written one. The name carries the
+    // key, so two rebuilds in quick succession cannot write over each other's
+    // half-finished file — the rename picks a winner instead.
+    let tmp = path.with_extension(format!("{key:x}.tmp"));
+    let written = std::fs::write(&tmp, &buf).and_then(|()| std::fs::rename(&tmp, path));
+    match written {
+        Ok(()) => tracing::info!(
+            path = %path.display(),
+            bytes = buf.len(),
+            ms = started.elapsed().as_millis(),
+            "engine cached"
+        ),
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "writing engine cache");
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
 }
 
 fn rule_categories(text: &str) -> (usize, usize, usize) {
@@ -748,6 +886,76 @@ mod tests {
 
     fn blocker_with(rules: &[&str]) -> (Arc<AdBlocker>, Arc<ListCuration>) {
         with_store(&cfg(rules), Arc::new(MemoryListStore::new())).unwrap()
+    }
+
+    #[test]
+    fn the_engine_cache_round_trips_and_is_keyed_to_the_rules() {
+        let dir = std::env::temp_dir().join(format!(
+            "sp-engine-cache-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("engine.dat");
+
+        let named = |name: &str, text: &str| ListEntry {
+            name: name.into(),
+            source: "test".into(),
+            rules: 1,
+            enabled: true,
+            text: text.into(),
+        };
+        let entry = |text: &str| named("test", text);
+        let lists = vec![entry("||ads.example.com^")];
+        let hits = |e: &Engine| {
+            e.check_network_request(
+                &Request::new("https://ads.example.com/x.png", "https://news.org/", "image")
+                    .unwrap(),
+            )
+            .matched
+        };
+
+        // The engine read back from the cache blocks the same request, so the
+        // rules survived the round trip. Saved here rather than through the
+        // background writer so the test does not race it.
+        let (built, unsaved) = build_engine(&lists, &[], Some(&path));
+        assert!(hits(&built));
+        save_cached_engine(&path, unsaved.expect("a fresh build must want saving"), &built);
+        assert!(path.exists(), "the cache should have been written");
+        let cached = load_cached_engine(&path, engine_key(&lists)).expect("cache should load");
+        assert!(hits(&cached));
+
+        // The order the store happens to hand the lists over in is not stable and
+        // must not reach the key, or every start would miss and rewrite the cache.
+        let shuffled = vec![named("b", "||b.example.com^"), named("a", "||a.example.com^")];
+        let mut reordered = shuffled.clone();
+        reordered.reverse();
+        assert_eq!(
+            engine_key(&shuffled),
+            engine_key(&reordered),
+            "the same lists in another order are the same engine"
+        );
+
+        // A changed rule, a renamed list, and a disabled list each change the key.
+        for changed in [
+            vec![entry("||other.example.com^")],
+            vec![ListEntry { name: "renamed".into(), ..entry("||ads.example.com^") }],
+            vec![ListEntry { enabled: false, ..entry("||ads.example.com^") }],
+        ] {
+            assert!(
+                load_cached_engine(&path, engine_key(&changed)).is_none(),
+                "a different set of rules must not load the old engine"
+            );
+        }
+
+        // A truncated or junk file is ignored rather than trusted.
+        std::fs::write(&path, b"junk").unwrap();
+        assert!(load_cached_engine(&path, engine_key(&lists)).is_none());
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
