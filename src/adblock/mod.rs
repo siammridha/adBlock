@@ -402,6 +402,15 @@ impl AdBlocker {
         body: Option<&[u8]>,
     ) -> ResponseEdit {
         let edit = body.and_then(|b| self.edit_page(url, parts, b)).unwrap_or_default();
+        // The blur runtime has to read a picture's pixels to judge it, which a
+        // cross-origin response forbids by default. This is the response side
+        // of that one feature and rides its switch.
+        // With the master switch off nothing is injected, so there is no
+        // runtime to read anything and no reason to loosen the response.
+        let on = self.decisions.settings();
+        if on.enabled && on.blurring() {
+            rewrite::allow_pixel_read(&mut parts.headers);
+        }
         // Appended rather than set, because two CSP headers are enforced
         // together and the site's own policy has to keep applying. This happens
         // after the page edit on purpose — injecting strips the site's CSP so
@@ -450,10 +459,17 @@ impl AdBlocker {
             .then(|| self.procedural_injection(url))
             .flatten()
             .unwrap_or_default();
+        // Not a filter rule but the same kind of edit: a script Adblock puts
+        // into the page, on Adblock's own switch. The caller never asks for it.
+        let blur = match on.blurring() {
+            true => rewrite::blur_runtime(&on),
+            false => String::new(),
+        };
         let script = [
             scriptlets.as_ref().map_or("", |i| i.js.as_str()),
             procedural.as_str(),
             runtime,
+            blur.as_str(),
         ]
         .into_iter()
         .filter(|part| !part.is_empty())
@@ -1137,6 +1153,41 @@ mod tests {
         }
     }
 
+    /// The blur is one feature made of two edits — a script into the page and a
+    /// permission onto the picture responses — and both hang off one switch.
+    #[test]
+    fn the_blur_switch_puts_the_script_in_and_opens_the_pictures_up() {
+        fn parts(content_type: &str) -> hyper::http::response::Parts {
+            hyper::Response::builder()
+                .header(hyper::header::CONTENT_TYPE, content_type)
+                .body(())
+                .unwrap()
+                .into_parts()
+                .0
+        }
+        let page = b"<html><head></head><body><img src=x></body></html>";
+        let (b, _) = blocker_with(&[]);
+
+        for (setting, want) in [(r#"{"blur":false}"#, false), (r#"{"blur":true}"#, true)] {
+            b.set_decisions(setting.as_bytes()).unwrap();
+
+            let mut html = parts("text/html");
+            let d = b.check("https://news.test/", "https://news.test/", "document");
+            let edit = b.filter_response("https://news.test/", &d, &mut html, Some(page));
+            let out = String::from_utf8(edit.body.unwrap_or_else(|| page.to_vec())).unwrap();
+            assert_eq!(out.contains("abx-blur"), want, "blur={want}, page: {out}");
+
+            let mut img = parts("image/png");
+            let d = b.check("https://news.test/p.png", "https://news.test/", "image");
+            b.filter_response("https://news.test/p.png", &d, &mut img, None);
+            assert_eq!(
+                img.headers.contains_key("access-control-allow-origin"),
+                want,
+                "blur={want}: a picture is only opened up while the detector needs it"
+            );
+        }
+    }
+
     #[test]
     fn a_stand_in_can_be_a_binary_file_and_is_never_injectable() {
         // 1x1.gif, uBO's transparent pixel, as raw bytes rather than text.
@@ -1352,8 +1403,10 @@ mod tests {
         }
         let (b, _) = blocker_with(&["example.com##.promo:has-text(</b>)"]);
         let js = b.procedural_injection("https://example.com/").unwrap();
-        let path =
-            std::env::temp_dir().join(format!("adblock-js-check-{}.js", std::process::id()));
+        // Named for this test alone: the tests run in one process, so two of
+        // them sharing a scratch file would delete each other's mid-check.
+        let path = std::env::temp_dir()
+            .join(format!("adblock-evaluator-check-{}.js", std::process::id()));
         std::fs::write(&path, &js).unwrap();
         let out = std::process::Command::new("node").arg("--check").arg(&path).output().unwrap();
         assert!(

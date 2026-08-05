@@ -130,8 +130,29 @@ pub(super) fn edit_adblock_config(
         EventKind::Info,
         format!(
             "adblock: redirect={} removeparam={} csp={}; \
-             page injection: cosmetic={} scriptlets={} runtime={}",
-            s.redirect, s.removeparam, s.csp, s.cosmetic, s.scriptlets, s.runtime
+             page injection: cosmetic={} scriptlets={} runtime={}; \
+             blur={} (men={} women={} videos={} regions={} marks={} amount={} strictness={} \
+             resize={} img_size={} video_size={} skip_small={} min_size={} model={})",
+            s.redirect,
+            s.removeparam,
+            s.csp,
+            s.cosmetic,
+            s.scriptlets,
+            s.runtime,
+            s.blur,
+            s.blur_men,
+            s.blur_women,
+            s.blur_videos,
+            s.blur_regions,
+            s.blur_marks,
+            s.blur_amount,
+            s.blur_strictness,
+            s.blur_resize,
+            s.blur_img_size,
+            s.blur_video_size,
+            s.blur_skip_small,
+            s.blur_min_size,
+            s.blur_model.id()
         ),
     );
     json_ok(adblock_settings_json(adblock))

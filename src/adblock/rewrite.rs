@@ -6,6 +6,7 @@
 //! it gets back; it never edits a page itself.
 
 const COSMETIC_RUNTIME: &str = include_str!("cosmetic_runtime.js");
+const BLUR_RUNTIME: &str = include_str!("blur_runtime.js");
 
 /// Pages bigger than this are forwarded untouched. Splicing costs a full copy
 /// of the page, and a page carrying ads is never this big.
@@ -44,6 +45,54 @@ fn endpoint(host: &str, port: &str) -> String {
         "__COSMETIC_ENDPOINT__",
         &format!("http://{host}:{port}/api/cosmetic"),
     )
+}
+
+/// The picture-blurring script, carrying the settings it was built with. Built
+/// per page rather than once, because the settings can change between pages and
+/// this is a few string replacements on a few kilobytes.
+pub(crate) fn blur_runtime(on: &super::settings::DecisionSettings) -> String {
+    BLUR_RUNTIME
+        .replace("__BLUR_AMOUNT__", &on.blur_amount.to_string())
+        .replace("__BLUR_STRICTNESS__", &on.blur_strictness.to_string())
+        .replace("__BLUR_MEN__", if on.blur_men { "true" } else { "false" })
+        .replace("__BLUR_WOMEN__", if on.blur_women { "true" } else { "false" })
+        .replace("__BLUR_VIDEOS__", if on.blur_videos { "true" } else { "false" })
+        .replace("__BLUR_REGIONS__", if on.blur_regions { "true" } else { "false" })
+        .replace("__BLUR_MARKS__", if on.blur_marks { "true" } else { "false" })
+        .replace("__BLUR_RESIZE__", if on.blur_resize { "true" } else { "false" })
+        .replace("__BLUR_IMG_SIZE__", &on.blur_img_size.to_string())
+        .replace("__BLUR_VIDEO_SIZE__", &on.blur_video_size.to_string())
+        .replace("__BLUR_SKIP_SMALL__", if on.blur_skip_small { "true" } else { "false" })
+        .replace("__BLUR_MIN_SIZE__", &on.blur_min_size.to_string())
+        .replace("__BLUR_MODEL__", on.blur_model.id())
+}
+
+/// Let a page read a picture's pixels back.
+///
+/// A cross-origin image or video is tainted: the blur runtime can display it
+/// but cannot look at it, so nothing can be detected. Saying the response may
+/// be read lifts that. Only ever done while the blur is on, only for pictures,
+/// and never over a permission the server already granted — its own header is
+/// left exactly as it sent it, so a site relying on a narrower one keeps
+/// working. The read this allows is credential-free, so it exposes nothing a
+/// page could not have fetched for itself.
+pub(crate) fn allow_pixel_read(headers: &mut hyper::HeaderMap) {
+    const ALLOW_ORIGIN: &str = "access-control-allow-origin";
+    if headers.contains_key(ALLOW_ORIGIN) {
+        return;
+    }
+    let is_picture = headers
+        .get(hyper::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|ct| ct.starts_with("image/") || ct.starts_with("video/"))
+        .unwrap_or(false);
+    if !is_picture {
+        return;
+    }
+    headers.insert(
+        hyper::header::HeaderName::from_static(ALLOW_ORIGIN),
+        hyper::header::HeaderValue::from_static("*"),
+    );
 }
 
 /// Whether a response is one we can rewrite at all: a successful, uncompressed
@@ -277,6 +326,243 @@ mod tests {
             String::from_utf8_lossy(&out.stderr)
         );
         std::fs::remove_file(&path).ok();
+    }
+
+    fn blur_settings(
+        amount: u8,
+        strictness: u8,
+        videos: bool,
+        regions: bool,
+        resize: bool,
+    ) -> super::super::settings::DecisionSettings {
+        super::super::settings::DecisionSettings {
+            enabled: true,
+            redirect: true,
+            removeparam: true,
+            csp: true,
+            cosmetic: true,
+            scriptlets: true,
+            runtime: true,
+            blur: true,
+            blur_men: true,
+            blur_women: true,
+            blur_videos: videos,
+            blur_regions: regions,
+            blur_marks: true,
+            blur_resize: resize,
+            blur_amount: amount,
+            blur_strictness: strictness,
+            blur_img_size: 400,
+            blur_video_size: 427,
+            blur_skip_small: true,
+            blur_min_size: 32,
+            blur_model: super::super::settings::BlurModel::Human,
+        }
+    }
+
+    #[test]
+    fn the_blur_runtime_carries_its_settings() {
+        let js = blur_runtime(&blur_settings(40, 75, false, true, true));
+        assert!(js.contains("var AMOUNT = 40;"), "{js}");
+        assert!(js.contains("var STRICTNESS = 75;"), "strictness goes in as written");
+        assert!(js.contains("var MEN = true;"));
+        assert!(js.contains("var WOMEN = true;"));
+        assert!(js.contains("var VIDEOS = false;"));
+        assert!(js.contains("var REGIONS = true;"));
+        assert!(js.contains("var MARKS = true;"));
+        assert!(js.contains("var RESIZE = true;"));
+        assert!(js.contains("var IMG_MAX = 400;"));
+        assert!(js.contains("var VID_MAX = 427;"));
+        assert!(js.contains("data-ab-blur"), "the marks stylesheet goes in with them");
+        // The bars a face has to clear are HaramBlur's, slid by the strictness
+        // number rather than replaced by it, and a face read as a child is left
+        // alone whatever the switches say. Losing either is silent in a browser.
+        assert!(js.contains("var MALE_MIN = 0.3 + SHIFT;"), "{js}");
+        assert!(js.contains("var FEMALE_MIN = 0.25 + SHIFT;"), "{js}");
+        assert!(js.contains("var MIN_AGE = 20;"), "{js}");
+        assert!(js.contains("if (f.age !== null && f.age < MIN_AGE) return false;"), "{js}");
+        // The chosen model reaches the runtime by name, and the name has to be
+        // one the table answers to.
+        assert!(js.contains(r#"var model = modelById("human")"#), "{js}");
+        assert!(js.contains(r#"id: "human""#), "{js}");
+        assert!(!js.contains("__BLUR_"), "every placeholder must be replaced");
+        let js = blur_runtime(&blur_settings(1, 0, true, false, false));
+        assert!(js.contains("var VIDEOS = true;"));
+        assert!(js.contains("var REGIONS = false;"));
+        assert!(js.contains("var RESIZE = false;"));
+    }
+
+    /// Same reason as the cosmetic runtime: it only ever runs in a browser, so
+    /// a syntax error would reach every page unnoticed. The detector source is
+    /// a string inside it, so that gets parsed too.
+    #[test]
+    fn the_blur_runtime_and_its_worker_parse() {
+        if std::process::Command::new("node").arg("-v").output().is_err() {
+            eprintln!("node not installed; skipping the blur runtime syntax check");
+            return;
+        }
+        let js = blur_runtime(&blur_settings(20, 50, true, true, true));
+
+        // Every model is a string that only ever gets parsed inside a Worker, so
+        // they need building and parsing here rather than reading. The model
+        // table is one unbroken run of the file, from the first worker source to
+        // the line that picks one, so it is lifted out whole and run with the
+        // values it interpolates stubbed. `new Function` then parses each source
+        // the table produced — a syntax error in any one of them fails here
+        // instead of on a page.
+        let mut block = String::new();
+        for line in js.lines().skip_while(|l| !l.contains("var TJS = ")) {
+            if line.contains("var model = modelById(") {
+                break;
+            }
+            block.push_str(line);
+            block.push('\n');
+        }
+        assert!(block.contains("function humanSrc("), "the worker sources were not found: {block}");
+        assert!(block.contains("var MODELS = ["), "the model table was not found: {block}");
+        let worker = format!(
+            "var HUMAN = 'human', HUMAN_MODELS = 'models/';\n\
+             var MAX_FACES = 20;\n\
+             {block}\n\
+             if (MODELS.length < 2) throw new Error('a table with one model is not a table');\n\
+             MODELS.forEach(function (m) {{ new Function(m.src); }});"
+        );
+
+        let checks = [("blur runtime", js.clone()), ("blur worker", worker)];
+        for (name, source) in checks {
+            let path = std::env::temp_dir()
+                .join(format!("adblock-{}-{}.js", name.replace(' ', "-"), std::process::id()));
+            std::fs::write(&path, &source).unwrap();
+            // The runtime is only parsed; the worker script is run, because
+            // running it is what parses the string it builds.
+            let mut cmd = std::process::Command::new("node");
+            if name == "blur runtime" {
+                cmd.arg("--check");
+            }
+            let out = cmd.arg(&path).output().unwrap();
+            assert!(
+                out.status.success(),
+                "the {name} does not parse: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            std::fs::remove_file(&path).ok();
+        }
+    }
+
+    /// A patch is placed as a fraction of the frame, so the layer has to be the
+    /// frame and not the element around it. A video is letterboxed inside its
+    /// element by default, and getting this wrong slides every patch sideways,
+    /// which no Rust test would see. The function is lifted out and run.
+    #[test]
+    fn a_letterboxed_frame_is_measured_where_it_is_drawn() {
+        if std::process::Command::new("node").arg("-v").output().is_err() {
+            eprintln!("node not installed; skipping the frame placement check");
+            return;
+        }
+        let js = blur_runtime(&blur_settings(20, 50, true, true, true));
+        let mut block = String::new();
+        let mut at_last = false;
+        for line in js.lines().skip_while(|l| !l.contains("function drawn(")) {
+            block.push_str(line);
+            block.push('\n');
+            at_last |= line.contains("function frac(");
+            if at_last && line == "  }" {
+                break;
+            }
+        }
+        assert!(block.contains("objectFit"), "the placement functions were not found: {block}");
+
+        let script = format!(
+            "var fit = 'contain';\n\
+             var edge = '0px';\n\
+             var place = '50% 50%';\n\
+             var window = {{ getComputedStyle: function () {{\n\
+               return {{ objectFit: fit, objectPosition: place,\n\
+                 borderLeftWidth: edge, borderRightWidth: edge,\n\
+                 borderTopWidth: edge, borderBottomWidth: edge, paddingLeft: edge,\n\
+                 paddingRight: edge, paddingTop: edge, paddingBottom: edge }};\n\
+             }} }};\n\
+             {block}\n\
+             var assert = require('assert');\n\
+             function elem(w, h) {{\n\
+               return {{\n\
+                 videoWidth: w, videoHeight: h,\n\
+                 getBoundingClientRect: function () {{\n\
+                   return {{ left: 0, top: 0, width: 400, height: 300 }};\n\
+                 }},\n\
+               }};\n\
+             }}\n\
+             // A 16:9 frame in a 4:3 element: bars top and bottom, and the frame\n\
+             // is pushed down by half the leftover height.\n\
+             var el = elem(1920, 1080);\n\
+             var d = drawn(el);\n\
+             assert.deepStrictEqual(d.frame, {{ left: 0, top: 37.5, width: 400, height: 225 }});\n\
+             // The other way round: a tall frame in a wide element sits in from\n\
+             // the left, which is the offset a layer sized to the element misses.\n\
+             assert.deepStrictEqual(drawn(elem(1080, 1920)).frame,\n\
+               {{ left: 115.625, top: 0, width: 168.75, height: 300 }});\n\
+             // A page that moves the frame in its box moves the patches with it:\n\
+             // hard down the bottom edge, and a plain length from the top one.\n\
+             place = '50% 100%';\n\
+             assert.strictEqual(drawn(el).frame.top, 75, 'against the bottom edge');\n\
+             place = '50% 12px';\n\
+             assert.strictEqual(drawn(el).frame.top, 12, 'a length is from the near edge');\n\
+             place = '50% 50%';\n\
+             // A border and padding hold the frame in by their own widths, on top\n\
+             // of that: 10px of each takes 20 off every side.\n\
+             edge = '10px';\n\
+             assert.deepStrictEqual(drawn(el).frame, {{ left: 20, top: 48.75, width: 360, height: 202.5 }});\n\
+             edge = '0px';\n\
+             fit = 'fill';\n\
+             assert.deepStrictEqual(drawn(el).frame, d.box, 'a filled frame is the whole box');\n\
+             fit = 'cover';\n\
+             d = drawn(el);\n\
+             assert.strictEqual(d.frame.height, 300, 'a covered frame fills the short side');\n\
+             assert.ok(d.frame.left < 0 && d.frame.width > 400, 'and hangs over the long one');\n\
+             // A covered frame runs past the box, so a patch is trimmed to the\n\
+             // slice of the frame that is on the picture and no wider.\n\
+             var vx = seen(d.box.left, d.box.left + d.box.width, d.frame.left, d.frame.width);\n\
+             assert.ok(vx[0] > 0 && vx[1] < 1, 'the sides of a covered frame are off the picture');\n\
+             assert.ok(Math.abs(vx[0] + vx[1] - 1) < 1e-9, 'centred, so the trim is even');\n\
+             assert.deepStrictEqual(\n\
+               seen(d.box.top, d.box.top + d.box.height, d.frame.top, d.frame.height), [0, 1],\n\
+               'the side it fills is all of it');\n\
+             fit = 'contain';\n\
+             d = drawn(elem(0, 0));\n\
+             assert.deepStrictEqual(d.frame, d.box, 'no frame size, no opinion');\n\
+             d = drawn(el);\n\
+             assert.deepStrictEqual(\n\
+               seen(d.box.left, d.box.left + d.box.width, d.frame.left, d.frame.width), [0, 1],\n\
+               'a letterboxed frame is all on the picture, so nothing is trimmed');\n"
+        );
+        let path = std::env::temp_dir().join(format!("adblock-drawn-{}.js", std::process::id()));
+        std::fs::write(&path, &script).unwrap();
+        let out = std::process::Command::new("node").arg(&path).output().unwrap();
+        assert!(
+            out.status.success(),
+            "frame placement is wrong: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn pixels_are_only_opened_up_for_pictures_the_server_did_not_speak_for() {
+        let allow = |pairs: &[(&str, &str)]| {
+            let mut h = headers(pairs);
+            allow_pixel_read(&mut h);
+            h.get("access-control-allow-origin").map(|v| v.to_str().unwrap().to_string())
+        };
+        assert_eq!(allow(&[("content-type", "image/jpeg")]).as_deref(), Some("*"));
+        assert_eq!(allow(&[("content-type", "video/mp4")]).as_deref(), Some("*"));
+        assert_eq!(allow(&[("content-type", "text/html")]), None, "only pictures");
+        assert_eq!(allow(&[]), None, "no content type, no opinion");
+        assert_eq!(
+            allow(&[("content-type", "image/png"), ("access-control-allow-origin", "https://a.example")])
+                .as_deref(),
+            Some("https://a.example"),
+            "the server's own permission is never widened"
+        );
     }
 
     #[test]

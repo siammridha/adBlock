@@ -116,6 +116,21 @@
   .hint { color:var(--muted); font-size:12px; }
   /* A status line reporting a failure, set by say(). */
   .hint.bad, .bad { color:var(--error); }
+  /* Settings grouped behind one switch. A disabled fieldset disables every
+     control inside it, so the master switch needs no per-control wiring. */
+  fieldset.group { border:1px solid var(--border); border-radius:8px;
+    padding:4px 14px 12px; margin:0; }
+  fieldset.group[disabled] { opacity:.45; }
+  fieldset.group legend { font-weight:600; padding:0 6px; }
+  fieldset.group h4 { margin:12px 0 6px; font-size:12px; color:var(--muted);
+    text-transform:uppercase; letter-spacing:.06em; }
+  .switches { display:flex; gap:14px; flex-wrap:wrap; align-items:center; }
+  /* What each outline colour means, in the colours the page itself draws. */
+  .marks-key { display:flex; gap:6px 16px; flex-wrap:wrap; margin:6px 0 0; padding:0;
+    list-style:none; color:var(--muted); font-size:12px; }
+  .marks-key li { display:flex; align-items:center; gap:6px; }
+  .marks-key i { width:22px; height:12px; border:3px solid var(--border);
+    border-radius:2px; flex:none; }
   button { background:var(--accent); color:#fff; border:none; border-radius:8px;
     padding:8px 14px; font-weight:600; cursor:pointer; }
   button.ghost { background:var(--panel2); border:1px solid var(--border); color:var(--fg); }
@@ -760,7 +775,8 @@
     <div id="rt-result"></div>
   </section>
 
-  <section class="panel tabpane" id="pane-adblockcfg">
+  <section class="tabpane" id="pane-adblockcfg">
+    <div class="panel">
     <h2>Adblock settings</h2>
     <div style="display:flex;flex-direction:column;gap:14px;max-width:660px">
       <div>
@@ -808,6 +824,137 @@
     <div class="actions">
       <button id="ab-save">Save</button>
       <span class="hint" id="ab-status"></span>
+    </div>
+    </div>
+
+    <div class="panel">
+      <h2>Picture blur <span class="hint">— find the people in images and video, and blur them</span></h2>
+      <div style="display:flex;flex-direction:column;gap:14px;max-width:660px">
+        <div>
+          <label class="sw"><input type="checkbox" id="blur-on"> Blur people in pictures</label>
+          <p class="hint">The one switch for the whole feature. It adds a script that looks at
+            images and video frames in the browser, finds every face, works out whether each
+            one is a man or a woman, and blurs the ones you picked below. It uses the
+            <a href="https://github.com/vladmandic/human" target="_blank" rel="noreferrer">Human</a>
+            library, the same detector HaramBlur uses, running on WebAssembly. The first page
+            with a picture worth looking at
+            downloads the model picked below — 9 to 46&nbsp;MB — which the browser then caches.
+            While this is on, picture responses are also marked readable by the page — without
+            that the detector cannot see a cross-origin image at all. Off by default; with it
+            off nothing below has any effect.</p>
+        </div>
+
+        <fieldset class="group" id="blur-model-group" disabled>
+          <legend>Model</legend>
+          <p class="hint" style="margin-top:8px">Which detector runs in the page. They do not
+            all see the same thing, and the right one depends on the pages you read.
+            <b>Human</b> finds faces, so it can tell men from women and skip children, but a
+            face box says nothing about where the body went — the covered area below it is a
+            fixed guess, and nobody photographed from behind or in profile is found at all.
+            <b>DETR + PETA</b> finds whole people and reads man or woman off the whole figure,
+            so it still answers with no face in frame and the cover lands on the person — but
+            it is a much larger download and cannot read an age.</p>
+          <p class="hint switches" style="margin-top:8px">
+            <span>Detector
+              <select id="blur-model">
+                <option value="human">Human — faces, man/woman and age (~9 MB)</option>
+                <option value="human-fairface">Human + FairFace — faces, ~93% (~90 MB)</option>
+                <option value="human-rizvandwiki">Human + rizvandwiki — faces, ~92% (~90 MB)</option>
+                <option value="people-peta">DETR + PETA — whole people, no face needed, ~91% (~410 MB)</option>
+              </select></span>
+          </p>
+          <p class="hint" style="margin-top:8px">A model that cannot tell men from women treats
+            every person as a match, so <b>Blur men</b> and <b>Blur women</b> stop meaning
+            anything separately — either one being on hides everybody it finds. With
+            <b>Mark what was checked</b> on you can also switch model from the panel on the
+            page itself, for that page only, which is the quick way to see which one suits a
+            site before saving it here.</p>
+        </fieldset>
+
+        <fieldset class="group" id="blur-media" disabled>
+          <legend>Media</legend>
+          <p class="hint" style="margin-top:8px">What gets sent to the detector, and at what
+            size. <b>Shrink before checking</b> scales a frame down until its longest side
+            fits the limit below it. The shape is kept and a small picture is never enlarged.
+            Bigger numbers find smaller faces and take longer. Untick it to send everything
+            through at its own size — slowest, and not always better.</p>
+          <p class="hint" style="margin-top:8px">
+            <label class="sw"><input type="checkbox" id="blur-resize"> Shrink before checking</label>
+          </p>
+          <p class="hint" style="margin-top:8px"><b>Skip small pictures</b> throws out anything
+            with a side under the limit before the detector ever sees it. Icons, bullets,
+            spacers and tracking pixels are most of what a page carries and none of them can
+            hold a face, but each one otherwise costs a full run of the detector. The limit is
+            the picture's own size, not the size it is drawn at.</p>
+          <p class="hint switches" style="margin-top:8px">
+            <label class="sw"><input type="checkbox" id="blur-skip-small"> Skip small pictures</label>
+            <span>Smaller than
+              <input type="number" id="blur-min-size" min="1" max="4096" step="1" style="width:90px"> px</span>
+          </p>
+
+          <h4>Images</h4>
+          <p class="hint">Every image big enough is checked — an avatar holds a face the same as
+            a photograph does. One is looked at once, when it scrolls into view.
+            Pictures go through the model one at a time, and whatever is on screen when it
+            comes free goes next, so what you are looking at is dealt with before the rest of
+            the page.</p>
+          <p class="hint switches" style="margin-top:8px">
+            <span>Image size
+              <input type="number" id="blur-img-size" min="32" max="4096" step="1" style="width:90px"> px</span>
+          </p>
+
+          <h4>Videos</h4>
+          <p class="hint"><b>Sample videos too</b> costs far more than images — every presented
+            frame is a candidate. With it off a video is still looked at once, at its poster or
+            at the frame it is parked on, so a thumbnail standing in for a video is not a gap.
+            Either way the patches move with the people, a fraction of a second behind.</p>
+          <p class="hint switches" style="margin-top:8px">
+            <label class="sw"><input type="checkbox" id="blur-videos"> Sample videos too</label>
+            <span>Video size
+              <input type="number" id="blur-video-size" min="32" max="4096" step="1" style="width:90px"> px</span>
+          </p>
+        </fieldset>
+
+        <fieldset class="group" id="blur-other" disabled>
+          <legend>Other</legend>
+          <p class="hint switches" style="margin-top:8px">
+            <label class="sw"><input type="checkbox" id="blur-men"> Blur men</label>
+            <label class="sw"><input type="checkbox" id="blur-women"> Blur women</label>
+            <label class="sw"><input type="checkbox" id="blur-regions"> Cover each person only</label>
+            <label class="sw"><input type="checkbox" id="blur-marks"> Mark what was checked</label>
+            <span>Blur radius
+              <input type="number" id="blur-amount" min="1" max="100" step="1" style="width:80px"> px</span>
+            <span>Strictness
+              <input type="number" id="blur-strictness" min="0" max="100" step="5" style="width:80px"> / 100</span>
+          </p>
+          <p class="hint">With neither <b>Blur men</b> nor <b>Blur women</b> ticked nothing
+            happens. Higher strictness blurs on weaker evidence: at 50 the bars are the ones
+            HaramBlur uses, 0.30 for a man and 0.25 for a woman. A face read as under 20 is
+            never blurred.
+            <b>Cover each person only</b> patches each person found and leaves the rest of the
+            picture visible; off, the whole image or video is blurred.</p>
+          <p class="hint" style="margin-top:8px"><b>Mark what was checked</b> outlines every
+            picture with the verdict it got, repeats it in the tooltip, and adds a draggable
+            panel listing these settings and the frame each picture went to the detector as.</p>
+          <ul class="marks-key">
+            <li><i style="border-color:#888"></i> seen, waiting</li>
+            <li><i style="border-color:#39f"></i> at the model</li>
+            <li><i style="border-color:#2c2"></i> nobody to blur</li>
+            <li><i style="border-color:#e33"></i> blurred</li>
+            <li><i style="border-color:#f90"></i> could not be read</li>
+            <li><i style="border-color:#a3c"></i> too small to bother with</li>
+            <li><i style="border-color:#0ff"></i> a face, blurred or not</li>
+            <li><i style="border-color:transparent"></i> no outline: never seen</li>
+          </ul>
+          <p class="hint" style="margin-top:6px">A face box is labelled man/woman score, then
+            face score, then age. A low first number is a face the strictness bar turned down;
+            an age under 20 is one the age bar turned down.</p>
+        </fieldset>
+      </div>
+      <div class="actions">
+        <button id="blur-save">Save</button>
+        <span class="hint" id="blur-status"></span>
+      </div>
     </div>
   </section>
 
@@ -1225,13 +1372,35 @@ async function refreshAdblockCfg(){
     $("inj-cosmetic").checked = !!d.cosmetic;
     $("inj-scriptlets").checked = !!d.scriptlets;
     $("inj-runtime").checked = !!d.runtime;
+    $("blur-on").checked = !!d.blur;
+    $("blur-men").checked = !!d.blur_men;
+    $("blur-women").checked = !!d.blur_women;
+    $("blur-videos").checked = !!d.blur_videos;
+    $("blur-regions").checked = !!d.blur_regions;
+    $("blur-marks").checked = !!d.blur_marks;
+    $("blur-resize").checked = !!d.blur_resize;
+    $("blur-skip-small").checked = !!d.blur_skip_small;
+    $("blur-min-size").value = d.blur_min_size;
+    $("blur-amount").value = d.blur_amount;
+    $("blur-strictness").value = d.blur_strictness;
+    $("blur-img-size").value = d.blur_img_size;
+    $("blur-video-size").value = d.blur_video_size;
+    $("blur-model").value = d.blur_model;
+    blurGroups();
   } catch(e){}
 }
-$("ab-save").addEventListener("click", async ()=>{
-  const el = $("ab-status"); say(el, "saving…");
-  const body = {redirect: $("ab-redirect").checked, removeparam: $("ab-removeparam").checked,
-                csp: $("ab-csp").checked, cosmetic: $("inj-cosmetic").checked,
-                scriptlets: $("inj-scriptlets").checked, runtime: $("inj-runtime").checked};
+// The master switch greys out everything under it. A disabled fieldset disables
+// its own controls, so nothing here touches them one by one.
+function blurGroups(){
+  const on = $("blur-on").checked;
+  $("blur-media").disabled = $("blur-other").disabled =
+    $("blur-model-group").disabled = !on;
+}
+$("blur-on").addEventListener("change", blurGroups);
+// Both panels post to the same endpoint, each sending only its own switches.
+// Adblock leaves anything absent alone, so neither can undo the other.
+async function saveAdblockCfg(el, body){
+  say(el, "saving…");
   try {
     const r = await fetch("/api/adblock/config", {method:"POST",
       headers:{"content-type":"application/json"}, body: JSON.stringify(body)});
@@ -1240,7 +1409,27 @@ $("ab-save").addEventListener("click", async ()=>{
     say(el, "saved ✓ (applied live, persisted)");
     refreshAdblockCfg();
   } catch(e){ say(el, "failed: " + e.message); }
-});
+}
+$("ab-save").addEventListener("click", ()=>
+  saveAdblockCfg($("ab-status"),
+    {redirect: $("ab-redirect").checked, removeparam: $("ab-removeparam").checked,
+     csp: $("ab-csp").checked, cosmetic: $("inj-cosmetic").checked,
+     scriptlets: $("inj-scriptlets").checked, runtime: $("inj-runtime").checked}));
+$("blur-save").addEventListener("click", ()=>
+  saveAdblockCfg($("blur-status"),
+    {blur: $("blur-on").checked, blur_men: $("blur-men").checked,
+     blur_women: $("blur-women").checked, blur_videos: $("blur-videos").checked,
+     blur_regions: $("blur-regions").checked, blur_marks: $("blur-marks").checked,
+     // Sent as typed. Adblock decides what a usable number is and says why when
+     // it isn't; an empty box drops out as null and leaves that setting alone.
+     blur_resize: $("blur-resize").checked,
+     blur_skip_small: $("blur-skip-small").checked,
+     blur_amount: $("blur-amount").valueAsNumber,
+     blur_strictness: $("blur-strictness").valueAsNumber,
+     blur_img_size: $("blur-img-size").valueAsNumber,
+     blur_video_size: $("blur-video-size").valueAsNumber,
+     blur_min_size: $("blur-min-size").valueAsNumber,
+     blur_model: $("blur-model").value}));
 
 // ---- rule-type tester: whether /test is served at all ---------------------
 async function refreshTester(){
