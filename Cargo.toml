@@ -69,6 +69,13 @@ tikv-jemallocator = "0.6"
 # time (tokio::time::advance) for the blackhole TTL test.
 tokio = { version = "1", features = ["test-util"] }
 
+# Dependencies optimised even in dev builds. Parsing 35 MB of blocklists into the
+# adblock engine takes ~17s unoptimised and ~2.5s at opt-level 3 — most of what a
+# `cargo run` used to wait for. Our own code stays unoptimised, so debugging and
+# incremental rebuilds are unaffected; only the one-off dependency build is slower.
+[profile.dev.package."*"]
+opt-level = 3
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

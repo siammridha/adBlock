@@ -46,6 +46,12 @@ pub trait ListStore: Send + Sync {
     fn persist(&self, id: &ListId, text: &str) -> Result<()>;
     fn remove(&self, id: &ListId);
     fn age(&self, id: &ListId) -> Option<Duration>;
+    /// Where the compiled engine built from these lists may be cached, if the
+    /// store keeps anything on disk. A store that does not (the in-memory one)
+    /// answers `None` and the engine is rebuilt from the rules every time.
+    fn engine_cache(&self) -> Option<PathBuf> {
+        None
+    }
 }
 
 pub struct DiskStore {
@@ -108,6 +114,12 @@ impl ListStore for DiskStore {
             .and_then(|m| m.modified())
             .ok()
             .and_then(|t| t.elapsed().ok())
+    }
+
+    // Sits beside the lists it was compiled from. `load` only picks up `.txt`,
+    // so this file is never mistaken for a blocklist.
+    fn engine_cache(&self) -> Option<PathBuf> {
+        Some(self.dir.join("engine.dat"))
     }
 }
 
