@@ -238,6 +238,15 @@
     "." + CLASS + "-box>i{position:absolute;border-radius:5px;" +
     "background:rgba(255,255,255,.2);box-shadow:0 4px 30px rgba(0,0,0,.1);" +
     "backdrop-filter:" + FILTER + ";-webkit-backdrop-filter:" + FILTER + "}" +
+    // The per-video toggle. Placed by script at the video's top-right corner
+    // (top/right here would be against its containing block, not the video), so
+    // left/top are set as it is positioned. A z-index above everything: it is a
+    // control the reader clicks, not a cover.
+    "." + CLASS + "-toggle{position:absolute;z-index:2147483647;margin:0;" +
+    "padding:3px 8px;font:600 11px/1.4 system-ui,sans-serif;color:#fff;" +
+    "background:rgba(0,0,0,.6);border:0;border-radius:12px;cursor:pointer;" +
+    "opacity:.85;pointer-events:auto;user-select:none;-webkit-user-select:none}" +
+    "." + CLASS + "-toggle:hover{opacity:1}" +
     // The blur lifted while the pointer is over the picture. It has to reach
     // both ways of blurring: the filter on the element, and the patch layer,
     // which is not a child of the picture and so cannot be reached by a CSS
@@ -1078,7 +1087,7 @@
     }
 
     function look() {
-      if (v.__abStop || busy) return;
+      if (v.__abStop || v.__abOff || busy) return;
       // A video's own size only turns up once it has metadata, so this is
       // checked here rather than when it was first seen.
       if (v.videoWidth && tooSmall(v.videoWidth, v.videoHeight)) {
@@ -1142,7 +1151,7 @@
     }
 
     function sample(now) {
-      if (v.__abStop) return;
+      if (v.__abStop || v.__abOff) return;
       if (!v.paused && !v.ended && !busy && v.readyState >= 2 && now - last >= SAMPLE_MS) {
         last = now;
         look();
@@ -1153,9 +1162,58 @@
     // requestVideoFrameCallback fires once per presented frame, so a paused or
     // stalled video costs nothing and no frame is ever sampled twice.
     function schedule() {
-      if (v.__abStop || v.paused || v.ended) return;
+      if (v.__abStop || v.__abOff || v.paused || v.ended) return;
       if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(sample);
       else requestAnimationFrame(sample);
+    }
+
+    // The reader's own switch, one per video, in the top-right corner. Off, no
+    // frame is sent to the model — every sampling path checks v.__abOff — and
+    // the cover comes off. On again, the current frame is looked at at once and
+    // the sampling loop is restarted.
+    var btn = null;
+    function place() {
+      // The button is an absolute sibling of the video, so it shares the video's
+      // containing block and rides along on scroll. Its own corner is measured
+      // at the origin and the video's top-right is stepped to from there, which
+      // holds however the page nests the video — the same trick the patch layers
+      // use.
+      btn.style.left = "0px";
+      btn.style.top = "0px";
+      var o = btn.getBoundingClientRect();
+      var r = v.getBoundingClientRect();
+      btn.style.left = r.right - o.left - btn.offsetWidth - 6 + "px";
+      btn.style.top = r.top - o.top + 6 + "px";
+    }
+    function toggle() {
+      v.__abOff = !v.__abOff;
+      btn.textContent = v.__abOff ? "Blur off" : "Blur on";
+      if (v.__abOff) {
+        v.classList.remove(CLASS + "-wait");
+        show(v);
+        if (MARKS) outline(v, []);
+      } else {
+        stilled = false;
+        look();
+        schedule();
+      }
+    }
+    function addToggle() {
+      // Nothing on an icon or a control-strip video: the button would be bigger
+      // than the picture. Measured by how big it is drawn, not its own pixels.
+      if (btn || tooSmall(v.clientWidth, v.clientHeight)) return;
+      btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = CLASS + "-toggle";
+      btn.textContent = "Blur on";
+      btn.addEventListener("click", function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        toggle();
+      });
+      (v.parentNode || document.body).insertBefore(btn, v);
+      place();
+      if (window.ResizeObserver) new ResizeObserver(place).observe(v);
     }
 
     // A video nobody has played is still showing something: its poster, or the
@@ -1171,6 +1229,8 @@
     function checkStill() {
       if (stilled || v.__abStop) return;
       if (v.readyState < 2 && !v.poster) return;
+      addToggle();
+      if (v.__abOff) return;
       stilled = true;
       look();
     }
