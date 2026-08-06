@@ -147,6 +147,29 @@
     toggle.appendChild(boxOn);
     toggle.appendChild(document.createTextNode("boxes around each person"));
 
+    // The video sample rate, in frames a second. SAMPLE_MS is read live by
+    // sample(), so moving this changes the rate on the very next frame. It is a
+    // live tweak only, like the boxes switch: nothing persists, a reload goes
+    // back to the built-in rate.
+    var rate = document.createElement("label");
+    var rateText = document.createTextNode("");
+    var rateIn = document.createElement("input");
+    rateIn.type = "range";
+    rateIn.min = "1";
+    rateIn.max = "30";
+    rateIn.step = "1";
+    rateIn.value = String(Math.round(1000 / SAMPLE_MS));
+    function showRate() {
+      rateText.nodeValue = "sample videos at " + rateIn.value + " fps ";
+    }
+    showRate();
+    rateIn.addEventListener("input", function () {
+      SAMPLE_MS = 1000 / Number(rateIn.value);
+      showRate();
+    });
+    rate.appendChild(rateText);
+    rate.appendChild(rateIn);
+
     // Dragged by its heading, which is also what folds it. The pointer is
     // captured so a drag that runs off the panel — or off the window — still
     // arrives here, and a drag that moved swallows the click that ends it.
@@ -193,6 +216,7 @@
 
     hud.appendChild(head);
     hud.appendChild(toggle);
+    hud.appendChild(rate);
     hud.appendChild(hudCfg);
     hud.appendChild(hudRows);
     document.body.appendChild(hud);
