@@ -9,7 +9,6 @@
 // the same layer code. On its own it is not valid JavaScript.
 
   var HUD = "abx-blur-hud"; // the corner panel
-  var FRAME_EVERY = 5; // the panel redraws a video every this many samples
 
   // Added to the sheet rather than built with it: the sheet is put together and
   // in the page before this is spliced in.
@@ -244,19 +243,13 @@
   // The frame exactly as the model got it, drawn at the size it was handed over
   // at, so what the detector had to work with can be looked at rather than
   // guessed. Drawing does not consume the bitmap, so it is still transferable
-  // afterwards.
-  //
-  // A video would redraw on every sample, which is all the panel would ever do,
-  // so it only refreshes every few.
+  // afterwards. A video redraws on every sample, so the panel shows every frame
+  // sent for detection.
   function thumb(el, bmp) {
     el.__abDims = bmp.width + "x" + bmp.height;
     // The size is known before the model answers, so the line is rewritten now
     // rather than left short until the verdict lands.
     if (el.__abSaid !== undefined) say(el, el.__abSaid);
-    if (el.tagName === "VIDEO") {
-      el.__abFrames = (el.__abFrames || 0) + 1;
-      if (el.__abFrames % FRAME_EVERY !== 1) return;
-    }
     var r = row(el);
     if (!r) return;
     if (!el.__abShot) {
