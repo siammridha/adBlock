@@ -563,13 +563,19 @@ impl AdBlocker {
         // Only the class/id scan needs text, and it can be sloppy about bad
         // bytes: the names it finds are used to look up rules and never written
         // back into the page, so a mangled character just means one rule misses.
-        let css = match on.cosmetic {
+        let mut css = match on.cosmetic {
             true => {
                 let (classes, ids) = rewrite::html_classes_and_ids(&String::from_utf8_lossy(body));
                 self.cosmetic_css(url, &classes, &ids)
             }
             false => String::new(),
         };
+        // Blur media before the runtime has reached it, so nothing flashes
+        // unblurred while the model loads. Only when blur-on-load asks for it;
+        // held-hidden pages fall to the runtime's own class instead.
+        if on.blurring() && on.blur_on_load {
+            css.push_str(&rewrite::blur_preload_css(&on));
+        }
         let out = rewrite::inject_into_html(body, &css, &script)?;
         // Any inline script of ours needs the page's CSP out of the way,
         // scriptlet or runtime alike.

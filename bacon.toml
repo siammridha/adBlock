@@ -1,0 +1,16 @@
+# Bacon watches the crate and re-runs a job on every save.
+# Docs: https://dystroy.org/bacon
+#
+# `default_job = clippy` gives lint-on-save, which catches more than plain
+# `cargo check` for the same cost. Built-in jobs (check, clippy, test, nextest,
+# doc, run) still work — switch live with their keys, or `bacon nextest`.
+#
+# The exports block makes bacon write every error and warning to
+# `.bacon-locations` after each run — one line per finding, `kind path:line:col
+# message`. That file is how an automated agent reads the current state without
+# a terminal; it is gitignored. Only `auto = true` is set so the built-in
+# exporter, path and format are inherited (overriding them disables it).
+default_job = "clippy"
+
+[exports.locations]
+auto = true

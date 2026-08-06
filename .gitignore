@@ -8,5 +8,6 @@ data/
 models/
 .DS_Store
 .claude/
+.bacon-locations
 vendor/
 docs/HARAMBLUR_FRAME_PIPELINE.md

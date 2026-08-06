@@ -24,6 +24,13 @@
 // or a hide, and the blur lifted while the pointer is over it. Which classes a
 // switch hides is ours: the women switch takes Girl as well.
 //
+// When the on-load switch is set, Adblock also injects a small stylesheet into
+// the page's own <head>, ahead of this script, that blurs every img and video
+// the moment it paints — so nothing flashes unblurred while the model is still
+// downloading. That rule lets go of an element the moment this runtime adds the
+// abx-blur-seen class to it, which mark() does on the first verdict: a blurred
+// element then holds its own class, a cleared one goes sharp.
+//
 // __BLUR_AMOUNT__, __BLUR_STRICTNESS__, __BLUR_MEN__, __BLUR_WOMEN__,
 // __BLUR_IMAGES__, __BLUR_VIDEOS__, __BLUR_REGIONS__, __BLUR_GRAY__,
 // __BLUR_ON_LOAD__, __BLUR_HOVER_IMAGES__, __BLUR_HOVER_VIDEOS__,
@@ -271,6 +278,10 @@
     // through mark() already, and this runs whether or not marks are on.
     if (state !== "queued" && state !== "looking") {
       el.classList.remove(CLASS + "-wait");
+      // The preload stylesheet blurs every img and video until this lands. From
+      // here the runtime owns the element: a blurred one keeps its own class, a
+      // cleared or skipped one goes sharp. Either way the blanket rule lets go.
+      el.classList.add(CLASS + "-seen");
     }
     if (MARKS) report(el, state, note);
   }
@@ -642,13 +653,20 @@
       if (gone) continue;
       var vx = seen(d.box.left, d.box.left + d.box.width, r.left, r.width);
       var vy = seen(d.box.top, d.box.top + d.box.height, r.top, r.height);
-      // A layer sits beside the picture, so it is placed against the same corner
-      // the picture is placed against — its offset parent — rather than against
-      // the page. The frame is measured in the viewport, so the step from the
-      // picture's own corner to the frame's is what carries over.
-      var hr = entry.host.getBoundingClientRect();
-      var x0 = entry.host.offsetLeft + (r.left - hr.left);
-      var y0 = entry.host.offsetTop + (r.top - hr.top);
+      // A layer is placed against its own containing block, which is not always
+      // the corner the picture is placed against: an image in a plain table cell
+      // is offset from the table, but the layer, absolute with no positioned
+      // ancestor, is offset from the page. So the layer is parked at its own
+      // origin and measured to find where that origin lands in the viewport, and
+      // the frame — also in viewport coordinates — is stepped to from there. This
+      // holds however the page nests the picture. Both layers share the picture's
+      // parent, so one measurement serves both.
+      var probe = entry.box || entry.marks;
+      probe.style.left = "0px";
+      probe.style.top = "0px";
+      var o = probe.getBoundingClientRect();
+      var x0 = r.left - o.left;
+      var y0 = r.top - o.top;
       // One step above the picture, which is HaramBlur's rule. Anything the page
       // stacks over the picture — a play button, a caption, its own controls —
       // is above that and stays over the blur, instead of being blurred with it.

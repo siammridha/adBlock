@@ -51,6 +51,34 @@ pub(crate) fn blur_runtime(on: &super::settings::DecisionSettings) -> String {
         .replace("__BLUR_MARKS__", if on.blur_marks { "true" } else { "false" })
 }
 
+/// CSS that blurs media the instant it paints, before the runtime has reached
+/// it. Injected into the page's `<head>` when blur-on-load is on, so a picture
+/// never flashes unblurred while the model is still downloading. The runtime
+/// lifts it per element by adding `abx-blur-seen` once it has a verdict: cleared
+/// media goes sharp, and blurred media is held by the runtime's own class.
+///
+/// Empty when neither images nor videos are being looked at — the caller only
+/// asks for this when blur-on-load is set, but the two media switches still
+/// decide which selectors are worth writing.
+pub(crate) fn blur_preload_css(on: &super::settings::DecisionSettings) -> String {
+    let filter = format!(
+        "blur({}px){}",
+        on.blur_amount,
+        if on.blur_gray { " grayscale(100%)" } else { "" }
+    );
+    let mut selectors = Vec::new();
+    if on.blur_images {
+        selectors.push("img:not(.abx-blur-seen)");
+    }
+    if on.blur_videos {
+        selectors.push("video:not(.abx-blur-seen)");
+    }
+    if selectors.is_empty() {
+        return String::new();
+    }
+    format!("{}{{filter:{filter}!important}}", selectors.join(","))
+}
+
 /// Let a page read a picture's pixels back.
 ///
 /// A cross-origin image or video is tainted: the blur runtime can display it
@@ -378,6 +406,25 @@ mod tests {
         let js = blur_runtime(&blur_settings(10, 10, true, false));
         assert!(js.contains("var VIDEOS = true;"));
         assert!(js.contains("var REGIONS = false;"));
+    }
+
+    #[test]
+    fn the_preload_css_blurs_the_media_switches_ask_for() {
+        // Images only, colour drained out.
+        let css = blur_preload_css(&blur_settings(40, 40, false, false));
+        assert_eq!(css, "img:not(.abx-blur-seen){filter:blur(40px) grayscale(100%)!important}");
+        // Both kinds share one rule, and the runtime lifts either off the same
+        // seen class it adds on a verdict.
+        let mut on = blur_settings(20, 40, true, false);
+        on.blur_gray = false;
+        assert_eq!(
+            blur_preload_css(&on),
+            "img:not(.abx-blur-seen),video:not(.abx-blur-seen){filter:blur(20px)!important}"
+        );
+        // Nothing to look at, nothing to write.
+        on.blur_images = false;
+        on.blur_videos = false;
+        assert!(blur_preload_css(&on).is_empty());
     }
 
     /// The overlay is a debugging aid that is off by default, and it is most of

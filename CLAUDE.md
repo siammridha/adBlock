@@ -1,6 +1,8 @@
 - When reporting back to me from now on explain things in plain, simple language. Use short sentences and everyday words. Avoid unnecessary detail, buzzwords, overly formal language, metaphors, analogies, and figures of speech. Be direct, clear, and literal.
 
 - Do not add Co-Authored-By trailers on this repo.
+- Use cargo nextest run insted of cargo test.
+- For browser and end-to-end testing use agent-browser (the Rust CLI, `cargo install agent-browser`) driving the container's system Chromium at `/usr/bin/chromium`. Chrome for Testing has no Linux arm64 build, so the system Chromium is used with `--no-sandbox`. The browser test is `e2e/browser-test.sh`; it drives the already-running proxy on 127.0.0.1:8080/8081 and restores every setting it touches. Rust `cargo nextest` still covers proxy, adblock and DNS logic — the browser test only adds a browser layer, it does not replace the Rust tests.
 - Use task management skills to impliment features.
 - Ensure all changes are clean, don't leave behind dangling code, unused variables, or stale configuration.
 - Before making any commit, make sure to update all relevant documentation so it accurately reflects the current changes.

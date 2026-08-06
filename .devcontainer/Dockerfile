@@ -17,6 +17,18 @@ RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --no-modify-path \
         -c rustfmt -c clippy -c rust-src -c rust-analyzer \
     && chown -R vscode:vscode /usr/local/cargo /usr/local/rustup
 
+# Dev CLIs: the test runner (cargo nextest), the file watcher (bacon), and the
+# browser-test driver (agent-browser). Installed into the shared cargo paths so
+# the cargo-cache volume keeps them, then chowned like the rest of the toolchain.
+RUN cargo install --locked cargo-nextest bacon agent-browser \
+    && chown -R vscode:vscode /usr/local/cargo
+
+# Chromium for the agent-browser browser test. Chrome for Testing has no arm64
+# build, so the test drives this system Chromium at /usr/bin/chromium.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends chromium \
+    && rm -rf /var/lib/apt/lists/*
+
 # Node.js 24 (Claude Code needs Node). NodeSource's "nodistro" repo works on bullseye.
 RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
