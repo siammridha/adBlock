@@ -12,8 +12,18 @@
                 "reveal": "always",
                 "panel": "dedicated",
                 "clear": true
-            },
-            "problemMatcher": []
+            }
+        },
+        {
+            "label": "cargo-build",
+            "detail": "Run cargo Build",
+            "type": "shell",
+            "command": "cargo build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated",
+                "clear": true
+            }
         }
     ]
 }
