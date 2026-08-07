@@ -48,6 +48,8 @@ pub struct RequestRecord {
     pub blocked_by: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub scriptlets: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub injected: String,
     pub ech: bool,
 }
 
@@ -75,6 +77,8 @@ pub struct RequestDetail {
     pub resp_body_raw: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub scriptlets: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub injected: String,
 }
 
 impl RequestDetail {
@@ -86,6 +90,7 @@ impl RequestDetail {
             && r.req_body.is_empty()
             && r.resp_body.is_empty()
             && r.scriptlets.is_empty()
+            && r.injected.is_empty()
         {
             return None;
         }
@@ -98,6 +103,7 @@ impl RequestDetail {
             req_body_raw: r.req_body_raw.clone(),
             resp_body_raw: r.resp_body_raw.clone(),
             scriptlets: r.scriptlets.clone(),
+            injected: r.injected.clone(),
         })
     }
 }
@@ -111,6 +117,7 @@ pub enum CaptureSlot {
     ReqHeaders,
     RespHeaders,
     Scriptlets,
+    Injected,
 }
 
 impl CaptureSlot {
@@ -123,6 +130,7 @@ impl CaptureSlot {
             CaptureSlot::ReqHeaders => "req_headers",
             CaptureSlot::RespHeaders => "resp_headers",
             CaptureSlot::Scriptlets => "scriptlets",
+            CaptureSlot::Injected => "injected",
         }
     }
 
@@ -135,6 +143,7 @@ impl CaptureSlot {
             CaptureSlot::ReqHeaders => &mut record.req_headers,
             CaptureSlot::RespHeaders => &mut record.resp_headers,
             CaptureSlot::Scriptlets => &mut record.scriptlets,
+            CaptureSlot::Injected => &mut record.injected,
         } = text;
     }
 }

@@ -19,10 +19,20 @@
 // and no age.
 //
 // Everything else follows HaramBlur too: blur with or without the colour drained
-// out, the whole picture or a patch per person, images and videos separately,
-// every picture held back until a verdict lands and whether that hold is a blur
-// or a hide, and the blur lifted while the pointer is over it. Which classes a
-// switch hides is ours: the women switch takes Girl as well.
+// out, images and videos separately, every picture held back until a verdict
+// lands and whether that hold is a blur or a hide, and the blur lifted while the
+// pointer is over it. Which classes a switch hides is ours: the women switch
+// takes Girl as well.
+//
+// How the blur is put on follows HaramBlur as well. With region blur off,
+// everything is blurred whole by a CSS filter on the element itself. With region
+// blur on, a still picture is baked: the people are blurred into a canvas and the
+// result written back onto the element, its src or its background-image, so only
+// they are blurred and nothing floats. A video with region blur on cannot be
+// baked frame by frame, so its people are covered by a floating box of blur
+// patches that tracks them. That box sits over the video it covers, so it stays
+// put; baking the still pictures is what stopped their box drifting on top of a
+// video playing over a thumbnail.
 //
 // When the on-load switch is set, Adblock also injects a small stylesheet into
 // the page's own <head>, ahead of this script, that blurs every img and video
@@ -38,8 +48,13 @@
 // __BLUR_ON_LOAD__, __BLUR_HOVER_IMAGES__, __BLUR_HOVER_VIDEOS__,
 // and __BLUR_MARKS__ are replaced with Adblock's settings before this is
 // injected, and __ROUTE_PREFIX__ with the path Adblock reserves on the page's
-// own origin. The overlay placeholder further down is replaced with
-// blur_overlay.js when the marks setting is on, and with nothing when it is off.
+// own origin.
+//
+// Nothing here touches the page until run() is called. On its own this file
+// calls it itself at the bottom. With the marks setting on, Adblock does not
+// inject this file — it injects debug_blur_runtime.js with this one spliced
+// inside it, and that file's panel decides when run() happens and when stop()
+// does.
 (function () {
   var AMOUNT = __BLUR_AMOUNT__;
   // Strictness runs 10–100, which is HaramBlur's own 0.1–1 written as a
@@ -59,8 +74,15 @@
   var ON_LOAD = __BLUR_ON_LOAD__;
   var HOVER_IMAGES = __BLUR_HOVER_IMAGES__;
   var HOVER_VIDEOS = __BLUR_HOVER_VIDEOS__;
-  var VERSION = "__BLUR_VERSION__";
   var MARKS = __BLUR_MARKS__;
+  // Whether the blur is running. Off until run() is called, and off again after
+  // stop(); every path that queues a picture or sends a frame to the model asks
+  // this first.
+  var live = false;
+  // Whether the one-time page furniture — the stylesheet and the layout
+  // listeners — has been put in. A stop leaves it, so a second run does not add
+  // it again.
+  var wired = false;
   var CLASS = "abx-blur";
   // A picture with a side under this many of its own pixels is not looked at.
   // Icons, bullets, spacers and tracking pixels are most of what a page carries
@@ -113,6 +135,11 @@
   // an eighth larger. Its floor of 512 never bites, because this model is 640.
   var IMAGE_CAP = MODEL_SIZE;
   var VIDEO_CAP = Math.round(MODEL_SIZE * 1.125);
+  // The picture is baked at close to full size, not at the model's cap: the
+  // people are blurred but the rest stays sharp, and softening the whole thing
+  // to 640 to save a downscale would give the sharp part away. Bounded so a huge
+  // original does not build a canvas out of all proportion to what is on screen.
+  var BAKE_CAP = 2048;
   var CLASSES = ["woman", "man", "girl", "person"];
   var MAX_DETECTED = 70;
   var IOU = 0.7;
@@ -237,11 +264,12 @@
   var sheet = document.createElement("style");
   sheet.textContent =
     "." + CLASS + "{filter:" + FILTER + "!important;transition:filter .1s ease!important}" +
-    // A region cover is a box laid over the picture, holding one patch per
-    // person to hide. The patches blur what is behind them rather than the
-    // element, so the rest of the picture stays as it was.
-    // No z-index here: a patch layer is stacked where the picture it covers is
-    // stacked, which is only known per picture, so it is set as one is placed.
+    // A region cover is a box laid over a video, holding one patch per person to
+    // hide. The patches blur what is behind them rather than the element, so the
+    // rest of the frame stays as it was. Only video uses it now — a still picture
+    // with region blur on is baked instead.
+    // No z-index here: a patch layer is stacked where the video it covers is
+    // stacked, which is only known per video, so it is set as one is placed.
     "." + CLASS + "-box{position:absolute;pointer-events:none}" +
     // A patch is put where it is and does not travel there. HaramBlur's
     // stylesheet eases one over .3s, but nothing there is ever eased: it throws
@@ -274,11 +302,13 @@
         (ON_LOAD ? "filter:" + FILTER : "visibility:hidden") +
         "!important}"
       : "") +
-    // The blur lifted while the pointer is over the picture. It has to reach
-    // both ways of blurring: the filter on the element, and the patch layer,
-    // which is not a child of the picture and so cannot be reached by a CSS
-    // hover rule on it. HaramBlur eases it off over half a second and waits a
-    // second first, so brushing past a picture does not flash it.
+    // The blur lifted while the pointer is over the picture. A picture blurred by
+    // a filter on the element is lifted by that class. A baked picture is lifted
+    // by script, swapping the original back in, since its blur is in the pixels
+    // not the CSS. A video's patch box is not a child of the video and so cannot
+    // be reached by a hover rule on it; script toggles the class below and this
+    // hides the box. HaramBlur eases it off over half a second and waits a second
+    // first, so brushing past a picture does not flash it.
     (HOVER_IMAGES || HOVER_VIDEOS
       ? "." + CLASS + "." + CLASS + "-off{filter:none!important;" +
         "transition:filter .5s ease!important;transition-delay:1s!important}" +
@@ -289,13 +319,8 @@
         ":not(." + CLASS + "-processed)." + CLASS + "-off{visibility:visible!important;" +
         "filter:none!important}"
       : "");
-  (document.head || document.documentElement).appendChild(sheet);
-
-  // The debugging overlay is spliced in here, and only when it is switched on.
-  // Everything it needs is above it or hoisted, and every call into it is behind
-  // MARKS, so with the switch off this line is nothing and no call is reached.
-  __BLUR_OVERLAY__
-
+  // Not put in the page here: the sheet carries the hold, and a hold with
+  // nothing running behind it never lets go. run() appends it.
 
   // Every verdict passes through here, which is why the hold comes off here.
   // The overlay is told the same thing, when there is one.
@@ -456,26 +481,17 @@
   // model never sees any of that detail either way.
   //
   // Videos are sampled straight off the element — a player feeding an MSE blob
-  // is already same-origin. A video with no frame decoded yet is showing its
-  // poster instead, so that is what gets read: the thumbnail standing in for a
-  // video is a picture of people the same as any other.
+  // is already same-origin — and only while playing, the same as HaramBlur: a
+  // video is never read before it plays, so its poster and its parked first
+  // frame are never looked at.
   //
-  // Readiness is what says whether there is a frame, not the size: a video
-  // reports its size as soon as it has metadata, a whole state before the first
-  // frame is decoded.
-  // A poster is fitted into the element by its own shape, and a video with no
-  // frame yet reports no shape at all — videoWidth is zero until metadata
-  // arrives. So the poster's own size is kept off the bitmap and stands in for
-  // it, or every patch on a thumbnail is laid out as if the poster filled the
-  // element and lands beside the person instead of on them. Shrinking keeps the
-  // shape, so it is still the ratio the poster is laid out by.
-  //
-  // A background picture is fetched the same way and kept the same way: there is
-  // no element behind it to report a natural size either, and the box it is
-  // painted in is not that size.
+  // A background picture is fetched instead of read off an element: there is no
+  // element behind it to report a natural size, so its own size is kept off the
+  // bitmap and stands in for it, or every patch is laid out as if it filled the
+  // box and lands beside the person instead of on them. Shrinking keeps the
+  // shape, so it is still the ratio it is laid out by.
   function grab(el) {
     if (el.tagName === "VIDEO") {
-      if (el.readyState < 2 && el.poster) return fromUrl(el.poster, VIDEO_CAP).then(sized(el));
       return createImageBitmap(el, fit(el.videoWidth, el.videoHeight, VIDEO_CAP));
     }
     if (el.__abBg) return fromUrl(el.__abBg, IMAGE_CAP).then(sized(el));
@@ -525,8 +541,6 @@
   // until the next resize; put a ResizeObserver on the host if that shows up.
   var covers = [];
   var placing = false;
-  // Live, so it is looked up once and answers for the page as it is now.
-  var players = document.getElementsByTagName("video");
 
   function drop(entry) {
     if (entry.box) entry.box.remove();
@@ -561,8 +575,8 @@
       width: Math.max(0, r.width - l - px(css.borderRightWidth) - px(css.paddingRight)),
       height: Math.max(0, r.height - t - px(css.borderBottomWidth) - px(css.paddingBottom)),
     };
-    // A video with a decoded frame is measured by that frame; one still showing
-    // its poster by the poster, whose size was taken when it was read.
+    // A video is measured by its decoded frame; a background picture by its own
+    // size, taken when it was read, since the div behind it reports none.
     var still = el.__abStill;
     var iw = el.videoWidth || el.naturalWidth || (still && still.w) || 0;
     var ih = el.videoHeight || el.naturalHeight || (still && still.h) || 0;
@@ -628,34 +642,6 @@
   // of the frame that can be seen. The trim is done on the patches and not with
   // a clip on the layer, because a clipped layer is a backdrop root, and a patch
   // inside one of those has nothing behind it left to blur.
-  // A thumbnail with a video playing over it is not the picture anybody is
-  // looking at. A player that previews on hover, and one that leaves its still
-  // underneath the video rather than taking it away, both keep the thumbnail in
-  // the page at full size and simply cover it — so nothing about the element
-  // says it has gone, and its patches carry on being painted, now over the
-  // video, and over that video's own patches.
-  //
-  // ponytail: box against box, which is how these players do it — the video
-  // goes exactly where the still was. A video over part of a picture is not
-  // treated as covering it.
-  function behind(host, r) {
-    if (host.tagName === "VIDEO") return false;
-    for (var i = 0; i < players.length; i++) {
-      var v = players[i];
-      if (v.paused || v.ended || !v.videoWidth) continue;
-      var q = v.getBoundingClientRect();
-      if (
-        q.left <= r.left + 1 &&
-        q.top <= r.top + 1 &&
-        q.right >= r.left + r.width - 1 &&
-        q.bottom >= r.top + r.height - 1
-      ) {
-        return true;
-      }
-    }
-    return false;
-  }
-
   function placeAll() {
     placing = false;
     for (var i = covers.length - 1; i >= 0; i--) {
@@ -672,8 +658,7 @@
       // keep its patches and its outlines painted over the video now playing
       // where it was, on top of that video's own.
       var css = window.getComputedStyle(entry.host);
-      var gone =
-        !r.width || !r.height || css.visibility === "hidden" || behind(entry.host, r);
+      var gone = !r.width || !r.height || css.visibility === "hidden";
       if (entry.box) entry.box.style.display = gone ? "none" : "";
       if (entry.marks) entry.marks.style.display = gone ? "none" : "";
       if (gone) continue;
@@ -765,25 +750,16 @@
     placeAll();
   }
 
-  function cover(el, cells) {
-    lay(el, "box", CLASS + "-box", "i", cells);
-  }
-
-  function uncover(el) {
-    lay(el, "box", CLASS + "-box", "i", []);
-  }
-
   // How many of the people found were ones to hide, for the tooltip.
   function tally(picked, total) {
     return picked + " of " + total + (total === 1 ? " person" : " people");
   }
 
-  // Two people standing together come back as two boxes that overlap, and two
-  // overlapping patches blur the shared strip twice — a bright seam down the
-  // middle of exactly the thing being hidden. So a box that touches one already
-  // taken is swallowed into it and the pair becomes the rectangle around both.
-  // HaramBlur's own merge, including that it is one pass: a box is compared
-  // against what has been taken so far and nothing is reconsidered afterwards.
+  // Two people standing together come back as two boxes that overlap. They are
+  // folded into one rectangle around both, so the bake copies one region instead
+  // of two that share a strip. HaramBlur's own merge, including that it is one
+  // pass: a box is compared against what has been taken so far and nothing is
+  // reconsidered afterwards.
   function merge(cells) {
     var out = [];
     for (var i = 0; i < cells.length; i++) {
@@ -820,36 +796,154 @@
     );
   }
 
-  // Hide the people picked out of a frame: each one under its own patch, or the
-  // whole element when region covers are switched off.
+  // A box of blur patches laid over a video, one patch per person. No cells
+  // takes the box away.
+  function cover(el, cells) {
+    lay(el, "box", CLASS + "-box", "i", cells);
+  }
+
+  function uncover(el) {
+    lay(el, "box", CLASS + "-box", "i", []);
+  }
+
+  // Hide the people picked out of a frame. With region blur off, the whole
+  // element is blurred by a filter on itself — no float, it lives in the
+  // element's own stacking place. With region blur on: a still picture is baked
+  // (the blur drawn into the pixels and written back onto the element, so only
+  // the people are blurred and still nothing floats), and a video, which cannot
+  // be baked frame by frame, gets a floating box of patches over its people
+  // instead. That box sits over the video it covers, so it never drifts onto
+  // something else the way an image's box once drifted onto a video. Returns a
+  // promise, so the caller can wait for a bake before lifting the hold — the CSS
+  // and box paths resolve at once, the picture already blurred by the time the
+  // hold goes.
   function hide(el, picked) {
     if (!REGIONS) {
-      uncover(el);
       el.classList.add(CLASS);
-      return;
+      return Promise.resolve();
     }
-    el.classList.remove(CLASS);
-    cover(
-      el,
-      merge(
-        picked.map(function (f) {
-          return area(f.box);
-        })
-      )
+    var cells = merge(
+      picked.map(function (f) {
+        return area(f.box);
+      })
     );
+    if (el.tagName === "VIDEO") {
+      el.classList.remove(CLASS);
+      cover(el, cells);
+      return Promise.resolve();
+    }
+    return bake(el, cells);
+  }
+
+  // Draw the full picture, blur it whole into a second canvas, then copy each
+  // person's rectangle from the blurred copy back over the sharp one — copying
+  // pre-blurred pixels rather than blurring each rectangle in place, so there is
+  // no dark halo where a blur samples past the rectangle's edge into nothing.
+  // Write the result back onto the element and keep the original for hover and
+  // reset. The blob url is both the guard against re-entering detection and the
+  // handle to revoke.
+  function bake(el, cells) {
+    var src = el.__abBg || el.currentSrc || el.src;
+    return fromUrl(src, BAKE_CAP)
+      .then(function (bmp) {
+        var W = bmp.width,
+          H = bmp.height;
+        var sharp = new OffscreenCanvas(W, H);
+        var sc = sharp.getContext("2d");
+        sc.drawImage(bmp, 0, 0);
+        var soft = new OffscreenCanvas(W, H);
+        var xc = soft.getContext("2d");
+        xc.filter = FILTER;
+        xc.drawImage(bmp, 0, 0);
+        for (var i = 0; i < cells.length; i++) {
+          var c = cells[i];
+          var sx = Math.max(0, Math.floor(c.x * W));
+          var sy = Math.max(0, Math.floor(c.y * H));
+          var sw = Math.min(W - sx, Math.ceil(c.w * W));
+          var sh = Math.min(H - sy, Math.ceil(c.h * H));
+          if (sw <= 0 || sh <= 0) continue;
+          sc.drawImage(soft, sx, sy, sw, sh, sx, sy, sw, sh);
+        }
+        return sharp.convertToBlob();
+      })
+      .then(function (blob) {
+        var url = URL.createObjectURL(blob);
+        if (el.__abBaked) URL.revokeObjectURL(el.__abBaked);
+        else if (el.__abBg) {
+          el.__abOriginal = { bg: el.style.backgroundImage };
+        } else {
+          el.__abOriginal = { src: el.src, srcset: el.getAttribute("srcset"), sources: null };
+          // A <picture>'s <source> siblings out-rank the baked src, so detach
+          // them while the bake is in place and keep them to put back on reveal
+          // or reset.
+          if (el.parentNode && el.parentNode.tagName === "PICTURE") {
+            var srcs = [];
+            var found = el.parentNode.querySelectorAll("source");
+            for (var k = 0; k < found.length; k++) srcs.push(found[k]);
+            for (var m = 0; m < srcs.length; m++) srcs[m].parentNode.removeChild(srcs[m]);
+            el.__abOriginal.sources = srcs;
+          }
+        }
+        el.__abBaked = url;
+        if (el.__abBg) el.style.backgroundImage = "url(" + url + ")";
+        else {
+          el.removeAttribute("srcset");
+          el.src = url;
+        }
+      })
+      .catch(function () {
+        // The picture could not be read, decoded or encoded, so it was never
+        // baked. Fall back to a whole-element blur, which still does not float.
+        el.classList.add(CLASS);
+      });
+  }
+
+  // Undo a bake: drop the blob url, and put the original picture back only when
+  // asked. A reveal restores it; a reset for a fresh picture does not, because
+  // the page has already put the new one in place and painting the old one back
+  // would wipe it out.
+  function unbake(el, restore) {
+    if (!el.__abBaked) return;
+    URL.revokeObjectURL(el.__abBaked);
+    if (restore && el.__abOriginal) {
+      if (el.__abBg) el.style.backgroundImage = el.__abOriginal.bg;
+      else {
+        if (el.__abOriginal.sources && el.parentNode) {
+          for (var i = 0; i < el.__abOriginal.sources.length; i++) {
+            el.parentNode.insertBefore(el.__abOriginal.sources[i], el);
+          }
+        }
+        if (el.__abOriginal.srcset) el.setAttribute("srcset", el.__abOriginal.srcset);
+        if (el.__abOriginal.src != null) el.src = el.__abOriginal.src;
+        else el.removeAttribute("src");
+      }
+    }
+    el.__abBaked = null;
+    el.__abOriginal = null;
   }
 
   function show(el) {
     el.classList.remove(CLASS);
     uncover(el);
+    unbake(el, true);
   }
 
   // Lift the blur off a picture while the pointer is over it, and put it back
-  // when the pointer leaves. Both ways of blurring have to be reached: the class
-  // on the element, and the patch layer, which lives beside the element rather
-  // than inside it. The layer is looked up at the moment of the hover because a
-  // video grows and loses one as it plays.
+  // when the pointer leaves. A picture blurred by a filter on the element is
+  // lifted by a class; a baked one by swapping the original picture back in,
+  // since its blur is in the pixels. Its own writes here are ignored by the src
+  // watcher, which knows both the baked url and the original it was made from.
+  // A video's patch box lives beside the video, not inside it, so a CSS hover
+  // rule on the video cannot reach it — its class is toggled here instead.
   function lift(el, off) {
+    if (el.__abBaked && el.__abOriginal) {
+      if (el.__abBg) {
+        el.style.backgroundImage = off ? el.__abOriginal.bg : "url(" + el.__abBaked + ")";
+      } else {
+        el.src = off ? el.__abOriginal.src : el.__abBaked;
+      }
+      return;
+    }
     el.classList.toggle(CLASS + "-off", off);
     var entry = el.__abCover;
     if (entry && entry.box) entry.box.classList.toggle(CLASS + "-off", off);
@@ -864,10 +958,15 @@
     });
   }
 
-  if (REGIONS || MARKS) {
+  // A baked blur travels with the element it is part of, but a video's patch box
+  // and the marks overlay are laid beside the element and have to be re-placed
+  // when the page moves. Region blur only lays a box for video now. Hooked up by
+  // run(), because until then there is nothing laid over anything.
+  function watchLayout() {
+    if (!REGIONS && !MARKS) return;
     window.addEventListener("resize", reflow);
-    // A video starting or stopping decides whether the thumbnail under it is
-    // the picture on screen. Capture, because these two do not bubble.
+    // A video starting or stopping decides whether the thumbnail under it is the
+    // picture on screen. Capture, because these two do not bubble.
     document.addEventListener("play", reflow, true);
     document.addEventListener("pause", reflow, true);
   }
@@ -893,8 +992,13 @@
           mark(img, "clear", note);
           return;
         }
-        hide(img, picked);
-        mark(img, "blurred", note);
+        // Wait for the bake before letting the hold go: the hold blurs the
+        // picture on its own until then, so the blurred pixels are in place the
+        // moment it lifts and the original never flashes. The CSS paths resolve
+        // at once, so there is no wait for them.
+        return hide(img, picked).then(function () {
+          mark(img, "blurred", note);
+        });
       })
       .catch(function (e) {
         // The read itself failed: the anonymous re-fetch was refused, so there
@@ -927,7 +1031,7 @@
   }
 
   function pump() {
-    if (running || !queue.length) return;
+    if (!live || running || !queue.length) return;
     var pick = queue.length - 1;
     for (var i = 0; i < queue.length; i++) {
       if (onScreen(queue[i].getBoundingClientRect())) {
@@ -999,7 +1103,10 @@
   // The same clean-out a video gets on `emptied`, for the pictures that have no
   // such event.
   function reset(el) {
-    show(el);
+    el.classList.remove(CLASS);
+    // Drop the bake without repainting: the page has already put the new picture
+    // on this node, so painting the old original back would wipe it out.
+    unbake(el, false);
     // Re-arm the hold: the next picture on this node has not been looked at, so
     // drop the last one's verdict class or the hold rule would skip it.
     el.classList.remove(CLASS + "-processed");
@@ -1018,6 +1125,16 @@
   // An element with no picture on it yet is remembered as such and left alone.
   // A lazy loader filling its src in comes back through here.
   function watchImage(img, src) {
+    // A baked <img> writes a blob url into its own src, and hover swaps it for
+    // the original and back. None of those is a new picture, so they are ignored
+    // — only a src that is neither the baked copy nor the original it was made
+    // from is the page putting a different picture on the node.
+    if (
+      img.__abBaked &&
+      (src === img.__abBaked || (img.__abOriginal && src === img.__abOriginal.src))
+    ) {
+      return;
+    }
     if (img.__abSeen === src) return;
     var again = img.__abSeen !== undefined;
     img.__abSeen = src;
@@ -1028,10 +1145,10 @@
     visible.observe(img);
   }
 
-  // A video is covered the same way a picture is, only over and over: every
-  // sample brings a fresh set of people and the patches move onto them. The
-  // patches lag the picture by however long a sample takes, so they are grown
-  // generously rather than fitted tightly.
+  // A video is blurred whole by a filter on the element, turned on while a person
+  // is on screen and off when the run comes back clear. It is sampled over and
+  // over; the answer lags the picture by however long a sample takes, which is
+  // why a run of frames has to agree before the blur goes on or comes off.
   function watchVideo(v) {
     if (v.__abSeen) return;
     v.__abSeen = true;
@@ -1115,7 +1232,7 @@
     }
 
     function look() {
-      if (v.__abStop || v.__abOff || busy) return;
+      if (!live || v.__abStop || v.__abOff || busy) return;
       // A video's own size only turns up once it has metadata, so this is
       // checked here rather than when it was first seen.
       if (v.videoWidth && tooSmall(v.videoWidth, v.videoHeight)) {
@@ -1164,7 +1281,7 @@
           }
           // What the cover is doing right now, not what this one frame said:
           // inside a run neither has taken effect yet.
-          var still = v.classList.contains(CLASS) || (v.__abCover && v.__abCover.box);
+          var still = v.classList.contains(CLASS);
           mark(v, still ? "blurred" : "clear", tally(picked.length, people.length));
         })
         .then(function () {
@@ -1178,9 +1295,13 @@
         });
     }
 
+    // The loop is kept turning while the blur is stopped rather than torn down:
+    // it costs a callback on a frame the browser was drawing anyway, and it is
+    // what lets a video that was already playing carry on being sampled the
+    // moment the blur is run again — nothing has to find it a second time.
     function sample(now) {
       if (v.__abStop || v.__abOff) return;
-      if (!v.paused && !v.ended && !busy && v.readyState >= 2 && now - last >= SAMPLE_MS) {
+      if (live && !v.paused && !v.ended && !busy && v.readyState >= 2 && now - last >= SAMPLE_MS) {
         last = now;
         look();
       }
@@ -1225,7 +1346,6 @@
       } else {
         // Back on: re-arm the hold, then look again from scratch.
         v.classList.remove(CLASS + "-processed");
-        stilled = false;
         look();
         schedule();
       }
@@ -1248,28 +1368,18 @@
       if (window.ResizeObserver) new ResizeObserver(place).observe(v);
     }
 
-    // A video nobody has played is still showing something: its poster, or the
-    // frame it is parked on. That gets looked at once, before any play starts —
-    // a thumbnail standing in for a video is the picture a reader actually sees.
-    var stilled = false;
-    // A frame can only be read once one has been decoded, which is a state
-    // later than having the metadata. Read a video before that and the browser
-    // rejects the grab outright — which the catch above reads as a frame it is
-    // not allowed to see, and stops the video for good on the strength of it.
-    // Every video reaches loadedmetadata before its first frame, so that alone
-    // was enough to stop them all.
-    function checkStill() {
-      if (stilled || v.__abStop) return;
-      if (v.readyState < 2 && !v.poster) return;
+    // The reader's switch is put up as soon as the video has laid out, before
+    // any play. Nothing is looked at here: a video is read only while it plays,
+    // the same as HaramBlur, so its poster and parked first frame are left
+    // alone.
+    function ready() {
+      if (v.__abStop) return;
       addToggle();
-      if (v.__abOff) return;
-      stilled = true;
-      look();
     }
 
-    v.addEventListener("loadeddata", checkStill);
-    v.addEventListener("loadedmetadata", checkStill);
-    checkStill();
+    v.addEventListener("loadeddata", ready);
+    v.addEventListener("loadedmetadata", ready);
+    ready();
 
     // A player that moves to the next video keeps the element and swaps what is
     // in it. Everything held on it is about the video that has gone: the
@@ -1280,7 +1390,6 @@
       found = 0;
       clear = 0;
       fails = 0;
-      stilled = false;
       v.__abStop = false;
       show(v);
       // Re-arm the hold for the new video, same as reset() does for a picture.
@@ -1344,8 +1453,21 @@
   var UNSEEN =
     "*:not(img):not(video):not(html):not(body):not([data-ab-bg])";
 
+  // The on-load stylesheet blurs anything with an inline background url,
+  // because before this sweep has run there is nothing else to match a
+  // background div on. Once every element has been looked at, the ones holding a
+  // picture carry data-ab-hold and that blanket rule only blurs elements no
+  // verdict will ever clear — a box with a border image, a gradient placeholder
+  // — so it is cut out of the sheet. Written exactly as blur_preload_css joins
+  // it, leading comma and all.
+  var BLANKET = ',[style*="background-image: url("]';
+  var unblanketed = 0;
+
   function scan() {
     scanning = 0;
+    // A sweep already booked when the blur was stopped still comes due. It is
+    // dropped rather than run: run() books a fresh one.
+    if (!live) return;
     var all = document.querySelectorAll(UNSEEN);
     for (var i = 0; i < all.length; i++) {
       var url = background(all[i]);
@@ -1358,10 +1480,15 @@
       all[i].__abBg = url;
       watchImage(all[i], url);
     }
+    if (!unblanketed) {
+      unblanketed = 1;
+      var pre = document.querySelector("style[data-ab-css]");
+      if (pre) pre.textContent = pre.textContent.replace(BLANKET, "");
+    }
   }
 
   function sweepBackgrounds() {
-    if (!IMAGES || scanning) return;
+    if (!IMAGES || !live || scanning) return;
     scanning = setTimeout(scan, SCAN_MS);
   }
 
@@ -1370,7 +1497,7 @@
   // and the player are the same elements throughout, and going back puts
   // different pictures in them. HaramBlur watches the same one attribute for the
   // same reason.
-  new MutationObserver(function (records) {
+  var watcher = new MutationObserver(function (records) {
     for (var i = 0; i < records.length; i++) {
       var record = records[i];
       if (record.type === "attributes") {
@@ -1387,20 +1514,86 @@
       var added = record.addedNodes;
       for (var j = 0; j < added.length; j++) sweep(added[j]);
     }
-  }).observe(document.documentElement, {
-    childList: true,
-    subtree: true,
-    attributes: true,
-    attributeFilter: ["src"],
   });
 
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", function () {
-      sweep(document.body);
-      sweepBackgrounds();
-    });
-  } else {
+  function sweepAll() {
     sweep(document.body);
     sweepBackgrounds();
+  }
+
+  // Everything above this only declares things: no stylesheet in the page, no
+  // listener, no observer, no frame at the model. This is what starts it.
+  //
+  // Run again after a stop, it sweeps the page as it now stands, so pictures
+  // that arrived while it was stopped are picked up along with the rest.
+  function run() {
+    if (live) return;
+    live = true;
+    if (!wired) {
+      wired = true;
+      (document.head || document.documentElement).appendChild(sheet);
+      watchLayout();
+    }
+    watcher.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["src"],
+    });
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", sweepAll, { once: true });
+    } else {
+      sweepAll();
+    }
+    // A queue left part-done by a stop carries on from where it was.
+    pump();
+  }
+
+  // Stop looking: no new picture is queued, no frame is sent to the model. What
+  // is already blurred stays blurred and the hold stays on — this is a switch,
+  // not an undo, and lifting a blur nobody has re-checked would show exactly
+  // what it was put there to cover.
+  function stop() {
+    live = false;
+    watcher.disconnect();
+  }
+
+  // With the debugging panel wrapped around this file, CONTROL is its way in:
+  // it takes the handle and decides when the blur runs. On its own — no panel,
+  // no CONTROL — the runtime starts itself, which is the normal page.
+  if (typeof CONTROL === "function") {
+    CONTROL({
+      run: run,
+      stop: stop,
+      lay: lay,
+      CLASS: CLASS,
+      // The video sample rate is read live by sample(), so setting it here
+      // changes the rate on the very next frame.
+      rate: function (ms) {
+        if (ms) SAMPLE_MS = ms;
+        return SAMPLE_MS;
+      },
+      // What the panel prints as the settings this page was given.
+      config: {
+        amount: AMOUNT,
+        strictness: STRICTNESS,
+        score: SCORE,
+        men: MEN,
+        women: WOMEN,
+        images: IMAGES,
+        videos: VIDEOS,
+        regions: REGIONS,
+        gray: GRAY,
+        onLoad: ON_LOAD,
+        hoverImages: HOVER_IMAGES,
+        hoverVideos: HOVER_VIDEOS,
+        modelSize: MODEL_SIZE,
+        imageCap: IMAGE_CAP,
+        videoCap: VIDEO_CAP,
+        minSize: MIN_SIZE,
+      },
+    });
+  } else {
+    run();
   }
 })();

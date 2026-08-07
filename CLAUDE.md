@@ -7,6 +7,7 @@
 - Ensure all changes are clean, don't leave behind dangling code, unused variables, or stale configuration.
 - Before making any commit, make sure to update all relevant documentation so it accurately reflects the current changes.
 - When a question is asked just answer the question so that I can make an informative decission. Do not start planing and exicuting.
+- Once I approve a plan, build exactly what the plan says. If while building you think a step should change, stop and ask me first. Do not quietly do something different. If you did diverge, say so clearly in your report, do not smooth over it.
 - Write brief comments only when they add context that isn't obvious from the code itself. Don't use comments to describe what the code does.
 - Treat everything I report seeing as accurate. Never question or contradict my observations. Instead, do everything you can to accurately explain what I saw, including any plausible technical or UI behavior that could account for it.
 

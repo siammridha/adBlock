@@ -7,7 +7,7 @@
 
 const COSMETIC_RUNTIME: &str = include_str!("injected/cosmetic_runtime.js");
 const BLUR_RUNTIME: &str = include_str!("injected/blur_runtime.js");
-const BLUR_OVERLAY: &str = include_str!("injected/blur_overlay.js");
+const DEBUG_BLUR_RUNTIME: &str = include_str!("injected/debug_blur_runtime.js");
 
 /// A short tag of the blur JS that changes whenever either source file changes.
 /// Shown in the debug panel so a page can be checked for running the latest
@@ -16,7 +16,7 @@ static BLUR_VERSION: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     BLUR_RUNTIME.hash(&mut h);
-    BLUR_OVERLAY.hash(&mut h);
+    DEBUG_BLUR_RUNTIME.hash(&mut h);
     format!("{:08x}", h.finish() as u32)
 });
 
@@ -41,13 +41,17 @@ pub(crate) static COSMETIC_RUNTIME_JS: std::sync::LazyLock<String> =
 /// per page rather than once, because the settings can change between pages and
 /// this is a few string replacements on a few kilobytes.
 ///
-/// The debugging overlay — the outlines, the boxes and the corner panel — is a
-/// file of its own and is spliced in only when `blur_marks` asks for it, so a
-/// page that is not being debugged is never sent it.
+/// With `blur_marks` off the runtime goes out on its own and starts itself. With
+/// it on, what goes out is the debugging build: the runtime spliced inside
+/// `debug_blur_runtime.js`, which puts up the outlines, the boxes and the corner
+/// panel, and holds the runtime back until that panel's own switch is ticked. A
+/// page that is not being debugged is never sent a byte of the panel.
 pub(crate) fn blur_runtime(on: &super::settings::DecisionSettings) -> String {
-    BLUR_RUNTIME
-        .replace("__BLUR_OVERLAY__", if on.blur_marks { BLUR_OVERLAY } else { "" })
-        .replace("__ROUTE_PREFIX__", super::routes::PREFIX)
+    let js = match on.blur_marks {
+        true => DEBUG_BLUR_RUNTIME.replace("__BLUR_RUNTIME__", BLUR_RUNTIME),
+        false => BLUR_RUNTIME.to_string(),
+    };
+    js.replace("__ROUTE_PREFIX__", super::routes::PREFIX)
         .replace("__BLUR_AMOUNT__", &on.blur_amount.to_string())
         .replace("__BLUR_STRICTNESS__", &on.blur_strictness.to_string())
         .replace("__BLUR_MEN__", if on.blur_men { "true" } else { "false" })
@@ -70,6 +74,11 @@ pub(crate) fn blur_runtime(on: &super::settings::DecisionSettings) -> String {
 /// verdict; a picture the model could not read never gains the class, so it
 /// stays covered.
 ///
+/// Covers CSS backgrounds too: the ones the runtime has marked `data-ab-hold`,
+/// and — until the runtime's first sweep has been over the page — anything with
+/// an inline `background-image: url(`. The runtime deletes that last selector
+/// from this stylesheet once its own marks are in place.
+///
 /// Empty when neither images nor videos are being looked at — the caller only
 /// asks for this when blur-on-load is set, but the two media switches still
 /// decide which selectors are worth writing.
@@ -85,6 +94,15 @@ pub(crate) fn blur_preload_css(on: &super::settings::DecisionSettings) -> String
     }
     if on.blur_videos {
         selectors.push("video:not(.abx-blur-processed)");
+    }
+    if on.blur_images {
+        // A CSS background has no tag to match. The runtime marks the ones it
+        // finds with `data-ab-hold`, but only once it has run, so until then any
+        // element carrying an inline background url is covered on sight. The
+        // runtime drops that second selector out of this stylesheet as soon as
+        // its first sweep has looked at every element — see BLANKET there.
+        selectors.push("[data-ab-hold]:not(.abx-blur-processed)");
+        selectors.push(r#"[style*="background-image: url("]"#);
     }
     if selectors.is_empty() {
         return String::new();
@@ -146,7 +164,10 @@ pub(crate) fn inject_into_html(html: &[u8], css: &str, script: &str) -> Option<V
         return None;
     }
 
-    let style = (!css.is_empty()).then(|| format!("<style type=\"text/css\">{css}</style>"));
+    // Marked so the blur runtime can find this stylesheet again and take its
+    // pre-sweep background rule back out once it no longer needs it.
+    let style =
+        (!css.is_empty()).then(|| format!("<style type=\"text/css\" data-ab-css>{css}</style>"));
     // `document.currentScript.remove()` takes our own <script> tag back out of
     // the DOM once it has run, so anti-adblock code cannot find it in
     // `document.scripts` and read the scriptlet source back. It sits after the
@@ -272,7 +293,7 @@ mod tests {
         let s = String::from_utf8(out).unwrap();
         assert_eq!(
             s,
-            "<html><head><style type=\"text/css\">.ad{}</style></head><body>x</body></html>"
+            "<html><head><style type=\"text/css\" data-ab-css>.ad{}</style></head><body>x</body></html>"
         );
     }
 
@@ -398,7 +419,11 @@ mod tests {
         assert!(js.contains("var HOVER_VIDEOS = false;"));
         assert!(js.contains("var MARKS = true;"));
         assert!(js.contains("data-ab-blur"), "the marks stylesheet goes in with them");
-        assert!(js.contains("function report("), "and the overlay itself");
+        assert!(js.contains("function report("), "and the panel itself");
+        assert!(
+            js.contains("function CONTROL(") && js.contains("CONTROL({"),
+            "with the runtime inside it, handing itself over rather than starting"
+        );
         // The weights have no CDN, so the page fetches them from its own address
         // and Adblock answers. Getting this wrong is a detector that never loads.
         assert!(
@@ -425,14 +450,31 @@ mod tests {
     fn the_preload_css_blurs_the_media_switches_ask_for() {
         // Images only, colour drained out.
         let css = blur_preload_css(&blur_settings(40, 40, false, false));
-        assert_eq!(css, "img:not(.abx-blur-processed){filter:blur(40px) grayscale(100%)!important}");
+        assert_eq!(
+            css,
+            concat!(
+                r#"img:not(.abx-blur-processed),[data-ab-hold]:not(.abx-blur-processed),"#,
+                r#"[style*="background-image: url("]"#,
+                "{filter:blur(40px) grayscale(100%)!important}"
+            )
+        );
         // Both kinds share one rule, and the runtime lifts either off the same
         // processed class it adds on a verdict.
         let mut on = blur_settings(20, 40, true, false);
         on.blur_gray = false;
         assert_eq!(
             blur_preload_css(&on),
-            "img:not(.abx-blur-processed),video:not(.abx-blur-processed){filter:blur(20px)!important}"
+            concat!(
+                r#"img:not(.abx-blur-processed),video:not(.abx-blur-processed),"#,
+                r#"[data-ab-hold]:not(.abx-blur-processed),[style*="background-image: url("]"#,
+                "{filter:blur(20px)!important}"
+            )
+        );
+        // Videos only: no background selectors, those are the images switch.
+        on.blur_images = false;
+        assert_eq!(
+            blur_preload_css(&on),
+            "video:not(.abx-blur-processed){filter:blur(20px)!important}"
         );
         // Nothing to look at, nothing to write.
         on.blur_images = false;
@@ -440,10 +482,11 @@ mod tests {
         assert!(blur_preload_css(&on).is_empty());
     }
 
-    /// The overlay is a debugging aid that is off by default, and it is most of
-    /// the file. A page that did not ask for it is not sent a byte of it.
+    /// The panel is a debugging aid that is off by default. A page that did not
+    /// ask for it is not sent a byte of it, and the runtime it would have been
+    /// wrapped in starts itself instead.
     #[test]
-    fn the_overlay_only_goes_out_when_it_is_switched_on() {
+    fn the_panel_only_goes_out_when_it_is_switched_on() {
         let mut off = blur_settings(40, 40, true, true);
         off.blur_marks = false;
         let plain = blur_runtime(&off);
@@ -451,7 +494,12 @@ mod tests {
         assert!(!plain.contains("data-ab-blur"), "no marks stylesheet");
         assert!(!plain.contains("abx-blur-hud"), "no panel");
         assert!(!plain.contains("function report("), "and nothing that draws either");
-        assert!(!plain.contains("__BLUR_"), "the placeholder is filled in with nothing");
+        assert!(!plain.contains("__BLUR_"), "every placeholder is replaced");
+        // Nobody is going to ask it to start, so it asks itself.
+        assert!(
+            plain.contains("if (typeof CONTROL === \"function\") {"),
+            "the runtime still checks for a panel"
+        );
 
         let on = blur_runtime(&blur_settings(40, 40, true, true));
         assert!(on.len() > plain.len(), "so the switched-off page is the smaller one");

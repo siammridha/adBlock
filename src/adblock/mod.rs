@@ -177,6 +177,9 @@ pub struct ResponseEdit {
     /// Scriptlets that went into the page, for the caller's log. Empty unless
     /// the page was rewritten.
     pub scriptlets: Vec<String>,
+    /// The blur's two edits, named for the caller's log: the runtime script and
+    /// the blur-on-load stylesheet, whichever of them went in.
+    pub injected: Vec<&'static str>,
 }
 
 /// A stand-in body for a blocked request: a neutered copy of the real resource
@@ -573,9 +576,11 @@ impl AdBlocker {
         // Blur media before the runtime has reached it, so nothing flashes
         // unblurred while the model loads. Only when blur-on-load asks for it;
         // held-hidden pages fall to the runtime's own class instead.
-        if on.blurring() && on.blur_on_load {
-            css.push_str(&rewrite::blur_preload_css(&on));
-        }
+        let blur_css = match on.blurring() && on.blur_on_load {
+            true => rewrite::blur_preload_css(&on),
+            false => String::new(),
+        };
+        css.push_str(&blur_css);
         let out = rewrite::inject_into_html(body, &css, &script)?;
         // Any inline script of ours needs the page's CSP out of the way,
         // scriptlet or runtime alike.
@@ -588,6 +593,10 @@ impl AdBlocker {
         Some(ResponseEdit {
             body: Some(out),
             scriptlets: scriptlets.map(|i| i.names).unwrap_or_default(),
+            injected: [("blur script", !blur.is_empty()), ("blur-on-load css", !blur_css.is_empty())]
+                .into_iter()
+                .filter_map(|(name, went_in)| went_in.then_some(name))
+                .collect(),
         })
     }
 
@@ -1495,6 +1504,31 @@ mod tests {
                 want,
                 "blur={want}: a picture is only opened up while the detector needs it"
             );
+        }
+    }
+
+    /// The log tag names the blur edits that actually went into the page, so a
+    /// page that came back unblurred can be told apart from one that was never
+    /// touched. The stylesheet only goes in when blur-on-load asks for it.
+    #[test]
+    fn the_log_tag_names_the_blur_edits_that_went_in() {
+        let page = b"<html><head></head><body><img src=x></body></html>";
+        let (b, _) = blocker_with(&[]);
+        for (setting, want) in [
+            (r#"{"blur":false}"#, vec![]),
+            (r#"{"blur":true,"blur_on_load":false}"#, vec!["blur script"]),
+            (r#"{"blur":true,"blur_on_load":true}"#, vec!["blur script", "blur-on-load css"]),
+        ] {
+            b.set_decisions(setting.as_bytes()).unwrap();
+            let mut html = hyper::Response::builder()
+                .header(hyper::header::CONTENT_TYPE, "text/html")
+                .body(())
+                .unwrap()
+                .into_parts()
+                .0;
+            let d = b.check("https://news.test/", "https://news.test/", "document");
+            let edit = b.filter_response("https://news.test/", &d, &mut html, Some(page));
+            assert_eq!(edit.injected, want, "settings: {setting}");
         }
     }
 

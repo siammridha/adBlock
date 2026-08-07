@@ -905,7 +905,9 @@
             <label class="sw"><input type="checkbox" id="blur-marks"> Show what the detector did</label>
           </p>
           <p class="hint" style="margin-top:8px">Outlines every picture with its verdict, boxes
-            each person found, and adds a draggable panel listing these settings.</p>
+            each person found, and adds a draggable panel listing these settings. With this on,
+            the blur waits for the panel: nothing is looked at until you tick "run the blur"
+            there, and unticking it stops the blur without unblurring what it already did.</p>
           <ul class="marks-key">
             <li><i style="background:#888"></i> seen, waiting</li>
             <li><i style="background:#39f"></i> at the model</li>
@@ -1983,7 +1985,8 @@ function rqHay(rec){
   const st0 = rec.kind==="tunnel" ? (rec._closed_ms==null ? "open" : "closed")
     : rec.kind==="failed" ? "err error failed" : "blk blocked";
   return [rec.method, rec.status===0 ? st0 : rec.status,
-    rec.type, rec.url, rec.blocked_by, rec.scriptlets, rec.ech ? "ech" : ""].join(" ").toLowerCase();
+    rec.type, rec.url, rec.blocked_by, rec.scriptlets, rec.injected,
+    rec.ech ? "ech" : ""].join(" ").toLowerCase();
 }
 function rqView(){ return rqQuery ? rqAll.filter(r => rqHay(r).includes(rqQuery)) : rqAll; }
 function rqSync(){
@@ -2057,6 +2060,9 @@ function rqRowHTML(rec){
     const names = rec.scriptlets.split(", ").filter(Boolean);
     meta += `<span class="sj"><span>scriptlets</span><span class="sj-name">${esc(names[0])}</span>`+
       (names.length > 1 ? `<span class="hint">+${names.length-1} more</span>` : ``)+`</span>`;
+  }
+  if(rec.injected){
+    meta += `<span class="sj"><span>blur</span><span class="sj-name">${esc(rec.injected)}</span></span>`;
   }
   let host = "";
   try { host = new URL(rec.url).hostname; } catch(e){}
@@ -2150,7 +2156,8 @@ function rqFlush(){
 // ---- detail drawer (fetched on demand) ------------------------------------
 let rqDrawerSeq = null;
 function hasCaptures(rec){
-  return !!(rec.req_headers || rec.resp_headers || rec.req_body || rec.resp_body || rec.scriptlets);
+  return !!(rec.req_headers || rec.resp_headers || rec.req_body || rec.resp_body
+    || rec.scriptlets || rec.injected);
 }
 function openDrawer(seq){
   const rec = rqBySeq.get(seq);
@@ -2161,7 +2168,7 @@ function openDrawer(seq){
   if(rec._detail || hasCaptures(rec)){ renderDrawer(rec); return; }
   renderDrawer(rec, true); // spinner while the capture is fetched
   fetch("/api/request?seq=" + seq).then(r=>r.json()).then(d=>{
-    for(const k of ["req_headers","resp_headers","req_body","resp_body","scriptlets"])
+    for(const k of ["req_headers","resp_headers","req_body","resp_body","scriptlets","injected"])
       if(d[k]) rec[k] = d[k];
     rec._detail = true;
     if(rqDrawerSeq === seq) renderDrawer(rec);
@@ -2217,6 +2224,7 @@ function renderDrawer(d, loading){
     ["Type", d.type], ["Time", fmtTime(d.ts_ms)]];
   if(d.blocked_by) gen.push([d.kind==="tunnel" ? "Tunnel" : d.kind==="failed" ? "Error" : "Blocked by", d.blocked_by]);
   if(d.scriptlets) gen.push(["Scriptlets", d.scriptlets]);
+  if(d.injected) gen.push(["Blur injected", d.injected]);
   if(d.ech) gen.push(["SNI", "hidden — Encrypted Client Hello (ECH config from DNS)"]);
 
   cell.innerHTML =

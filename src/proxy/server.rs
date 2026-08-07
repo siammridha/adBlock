@@ -531,6 +531,11 @@ impl Proxy {
             tracing::info!(%url, scriptlets = %names, "scriptlets injected");
             exchange.attach(CaptureSlot::Scriptlets, || names.clone());
         }
+        if !edit.injected.is_empty() {
+            let names = edit.injected.join(", ");
+            tracing::info!(%url, injected = %names, "blur injected");
+            exchange.attach(CaptureSlot::Injected, || names.clone());
+        }
         let out = edit.body.map_or(collected, Bytes::from);
         Ok(Response::from_parts(parts, full_body(out)))
     }
