@@ -27,9 +27,11 @@
 // When the on-load switch is set, Adblock also injects a small stylesheet into
 // the page's own <head>, ahead of this script, that blurs every img and video
 // the moment it paints — so nothing flashes unblurred while the model is still
-// downloading. That rule lets go of an element the moment this runtime adds the
-// abx-blur-seen class to it, which mark() does on the first verdict: a blurred
-// element then holds its own class, a cleared one goes sharp.
+// downloading. This runtime rebuilds the same blanket rule and adds one more
+// selector for CSS backgrounds. Both rules let go of an element the moment it
+// gains the abx-blur-processed class, which mark() adds only on a real verdict
+// — a picture the model looked at and cleared, blurred, or skipped as too
+// small. A failure adds nothing, so a failed element stays covered.
 //
 // __BLUR_AMOUNT__, __BLUR_STRICTNESS__, __BLUR_MEN__, __BLUR_WOMEN__,
 // __BLUR_IMAGES__, __BLUR_VIDEOS__, __BLUR_REGIONS__, __BLUR_GRAY__,
@@ -57,6 +59,7 @@
   var ON_LOAD = __BLUR_ON_LOAD__;
   var HOVER_IMAGES = __BLUR_HOVER_IMAGES__;
   var HOVER_VIDEOS = __BLUR_HOVER_VIDEOS__;
+  var VERSION = "__BLUR_VERSION__";
   var MARKS = __BLUR_MARKS__;
   var CLASS = "abx-blur";
   // A picture with a side under this many of its own pixels is not looked at.
@@ -220,6 +223,17 @@
   // and the colour drained out with it if that is switched on.
   var FILTER = "blur(" + AMOUNT + "px)" + (GRAY ? " grayscale(100%)" : "");
 
+  // The pre-verdict hold. Every picture starts covered and stays covered until a
+  // verdict adds abx-blur-processed to it; nothing here has a clock. The proxy's
+  // on-load stylesheet writes the same img/video rule ahead of this script; this
+  // one rebuilds it and adds CSS backgrounds, which the runtime marks with
+  // data-ab-hold once it finds a real url() on them. Same switches the proxy
+  // uses: images cover img and backgrounds, videos cover video.
+  var HOLD = [];
+  if (IMAGES) HOLD.push("img:not(." + CLASS + "-processed)");
+  if (VIDEOS) HOLD.push("video:not(." + CLASS + "-processed)");
+  if (IMAGES) HOLD.push("[data-ab-hold]:not(." + CLASS + "-processed)");
+
   var sheet = document.createElement("style");
   sheet.textContent =
     "." + CLASS + "{filter:" + FILTER + "!important;transition:filter .1s ease!important}" +
@@ -247,6 +261,19 @@
     "background:rgba(0,0,0,.6);border:0;border-radius:12px;cursor:pointer;" +
     "opacity:.85;pointer-events:auto;user-select:none;-webkit-user-select:none}" +
     "." + CLASS + "-toggle:hover{opacity:1}" +
+    // The hold: blurred if the on-load switch says so, hidden outright if it
+    // does not. Lets go the moment a verdict adds abx-blur-processed. A hold
+    // that ran out on its own would show a picture nobody had looked at yet,
+    // which is the one thing this is for, so there is no clock — a failure never
+    // adds the class, so a picture the model could not read stays covered.
+    // Written before the hover rule so that, where the two match at the same
+    // specificity (a background div), the hover lift below wins on source order.
+    (HOLD.length
+      ? HOLD.join(",") +
+        "{" +
+        (ON_LOAD ? "filter:" + FILTER : "visibility:hidden") +
+        "!important}"
+      : "") +
     // The blur lifted while the pointer is over the picture. It has to reach
     // both ways of blurring: the filter on the element, and the patch layer,
     // which is not a child of the picture and so cannot be reached by a CSS
@@ -256,20 +283,12 @@
       ? "." + CLASS + "." + CLASS + "-off{filter:none!important;" +
         "transition:filter .5s ease!important;transition-delay:1s!important}" +
         "." + CLASS + "-box." + CLASS + "-off{display:none!important}" +
-        // Two classes to one, so this beats the rule it is overriding on
-        // specificity and does not depend on which was written first.
-        "." + CLASS + "-wait." + CLASS + "-off{visibility:visible!important;" +
+        // A held picture the pointer is over still lifts, before any verdict.
+        // Ties the background hold rule on specificity, so it is written after
+        // it to win on source order; it beats the img/video hold outright.
+        ":not(." + CLASS + "-processed)." + CLASS + "-off{visibility:visible!important;" +
         "filter:none!important}"
-      : "") +
-    // Held back from the moment it is seen until a verdict lands: blurred if
-    // that is what the switch says, hidden outright if it does not. There is no
-    // clock on it. A hold that ran out on its own would show a picture nobody
-    // had looked at yet, which is the one thing this is for; every way the
-    // detector can end — an answer, a failure, a picture too small, a model
-    // that never came up — goes through mark(), and mark() is what lets go.
-    "." + CLASS + "-wait{" +
-    (ON_LOAD ? "filter:" + FILTER : "visibility:hidden") +
-    "!important}";
+      : "");
   (document.head || document.documentElement).appendChild(sheet);
 
   // The debugging overlay is spliced in here, and only when it is switched on.
@@ -281,16 +300,14 @@
   // Every verdict passes through here, which is why the hold comes off here.
   // The overlay is told the same thing, when there is one.
   function mark(el, state, note) {
-    // A picture held back stops being held back the moment there is a verdict,
-    // whatever it says — blurred properly, nothing to blur, or nothing
-    // readable. Done here because every one of those paths reports itself
-    // through mark() already, and this runs whether or not marks are on.
-    if (state !== "queued" && state !== "looking") {
-      el.classList.remove(CLASS + "-wait");
-      // The preload stylesheet blurs every img and video until this lands. From
-      // here the runtime owns the element: a blurred one keeps its own class, a
-      // cleared or skipped one goes sharp. Either way the blanket rule lets go.
-      el.classList.add(CLASS + "-seen");
+    // The hold comes off only on a real verdict: the model looked at the picture
+    // and cleared it, blurred it, or skipped it as too small. A failure — the
+    // frame could not be read, or there is no model — is not a verdict and adds
+    // nothing, so the hold keeps that element covered. Done here because every
+    // one of those paths reports itself through mark() already, and this runs
+    // whether or not marks are on.
+    if (state === "clear" || state === "blurred" || state === "skipped") {
+      el.classList.add(CLASS + "-processed");
     }
     if (MARKS) report(el, state, note);
   }
@@ -847,12 +864,6 @@
     });
   }
 
-  // Hold it back now, before anything has looked at it. The class comes off in
-  // mark(), on whatever the verdict turns out to be.
-  function preblur(el) {
-    el.classList.add(CLASS + "-wait");
-  }
-
   if (REGIONS || MARKS) {
     window.addEventListener("resize", reflow);
     // A video starting or stopping decides whether the thumbnail under it is
@@ -866,6 +877,11 @@
     return snapshot(img)
       .then(findPeople)
       .then(function (people) {
+        // No answer means the pixels could not be read — the worker got the
+        // frame but could not look at it. An image we could not check stays
+        // covered, same as a read that failed outright below: we do not know
+        // what is in it. A failure adds no abx-blur-processed, so the hold rule
+        // keeps it covered on its own; nothing to add here.
         if (!people) {
           mark(img, "failed", "detector");
           return;
@@ -881,6 +897,9 @@
         mark(img, "blurred", note);
       })
       .catch(function (e) {
+        // The read itself failed: the anonymous re-fetch was refused, so there
+        // is nothing to look at. Kept covered for the same reason as above — no
+        // abx-blur-processed, so the hold rule holds it.
         mark(img, "failed", "unreadable");
         if (MARKS) console.warn("blur: cannot read", img.__abBg || img.currentSrc || img.src, e);
       });
@@ -981,6 +1000,9 @@
   // such event.
   function reset(el) {
     show(el);
+    // Re-arm the hold: the next picture on this node has not been looked at, so
+    // drop the last one's verdict class or the hold rule would skip it.
+    el.classList.remove(CLASS + "-processed");
     if (MARKS) outline(el, []);
     visible.unobserve(el);
     var at = queue.indexOf(el);
@@ -1002,7 +1024,6 @@
     if (again) reset(img);
     else if (HOVER_IMAGES) hoverable(img);
     if (!src) return;
-    preblur(img);
     mark(img, "queued");
     visible.observe(img);
   }
@@ -1014,7 +1035,6 @@
   function watchVideo(v) {
     if (v.__abSeen) return;
     v.__abSeen = true;
-    preblur(v);
     if (HOVER_VIDEOS) hoverable(v);
     mark(v, "queued");
 
@@ -1028,15 +1048,23 @@
     // acted on, because a video is sampled over and over and one bad frame says
     // nothing about the next.
     //
-    // Giving up takes the cover off. A video nobody is watching any more is a
-    // video whose patches can no longer move, and a patch that cannot move is a
-    // smear parked over a picture that keeps going — the wrong part of it within
-    // a second. It is also what this does everywhere else: a model that could
-    // not tell is never a reason to blur.
+    // Giving up takes the cover off, because a video nobody is sampling any
+    // more is a video whose patches can no longer move, and a patch that cannot
+    // move is a smear parked over a picture that keeps going. The one exception
+    // is a frame that could not be read at all: there, revealing the picture
+    // could mean showing exactly what the cover was hiding, so it stays on.
     function failed(why) {
       if (++fails >= FAIL_RUN) {
         v.__abStop = true;
-        show(v);
+        // A frame the model could not read says nothing, so it is never a
+        // reason to blur — except a frame that could not be read at all. That
+        // one is left covered rather than revealed, because unreadable is the
+        // one failure where showing the picture could be showing exactly what
+        // the cover was there to hide.
+        if (why !== "unreadable") {
+          show(v);
+          v.classList.add(CLASS + "-processed");
+        }
         if (MARKS) outline(v, []);
       }
       mark(v, "failed", why);
@@ -1189,10 +1217,14 @@
       v.__abOff = !v.__abOff;
       btn.textContent = v.__abOff ? "Blur off" : "Blur on";
       if (v.__abOff) {
-        v.classList.remove(CLASS + "-wait");
+        // Reader turned this video's blur off: reveal it and mark it processed
+        // so the hold rule lets go too.
+        v.classList.add(CLASS + "-processed");
         show(v);
         if (MARKS) outline(v, []);
       } else {
+        // Back on: re-arm the hold, then look again from scratch.
+        v.classList.remove(CLASS + "-processed");
         stilled = false;
         look();
         schedule();
@@ -1251,6 +1283,8 @@
       stilled = false;
       v.__abStop = false;
       show(v);
+      // Re-arm the hold for the new video, same as reset() does for a picture.
+      v.classList.remove(CLASS + "-processed");
       if (MARKS) outline(v, []);
     });
 
@@ -1317,6 +1351,10 @@
       var url = background(all[i]);
       all[i].dataset.abBg = "";
       if (!url) continue;
+      // The tag hold rule reaches img and video on its own; a background div has
+      // no tag to match, so mark it here — the same moment the old per-element
+      // hold went on. The hold rule covers it until a verdict clears the mark.
+      all[i].dataset.abHold = "";
       all[i].__abBg = url;
       watchImage(all[i], url);
     }

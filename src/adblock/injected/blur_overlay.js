@@ -120,7 +120,8 @@
       "unblur on hover: images " + onOff(HOVER_IMAGES) +
       " | videos " + onOff(HOVER_VIDEOS) + "\n" +
       "frame " + MODEL_SIZE + "px square | shrink to " + IMAGE_CAP + "px images, " +
-      VIDEO_CAP + "px video | skip under " + MIN_SIZE + "px";
+      VIDEO_CAP + "px video | skip under " + MIN_SIZE + "px\n" +
+      "build " + VERSION;
   }
 
   function buildHud() {

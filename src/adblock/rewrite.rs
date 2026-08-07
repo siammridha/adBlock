@@ -9,6 +9,17 @@ const COSMETIC_RUNTIME: &str = include_str!("injected/cosmetic_runtime.js");
 const BLUR_RUNTIME: &str = include_str!("injected/blur_runtime.js");
 const BLUR_OVERLAY: &str = include_str!("injected/blur_overlay.js");
 
+/// A short tag of the blur JS that changes whenever either source file changes.
+/// Shown in the debug panel so a page can be checked for running the latest
+/// build: same tag means the same bytes were compiled in and served.
+static BLUR_VERSION: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    BLUR_RUNTIME.hash(&mut h);
+    BLUR_OVERLAY.hash(&mut h);
+    format!("{:08x}", h.finish() as u32)
+});
+
 /// Pages bigger than this are forwarded untouched. Splicing costs a full copy
 /// of the page, and a page carrying ads is never this big.
 pub(crate) const MAX_EDIT_BYTES: usize = 4 * 1024 * 1024;
@@ -49,13 +60,15 @@ pub(crate) fn blur_runtime(on: &super::settings::DecisionSettings) -> String {
         .replace("__BLUR_HOVER_IMAGES__", if on.blur_hover_images { "true" } else { "false" })
         .replace("__BLUR_HOVER_VIDEOS__", if on.blur_hover_videos { "true" } else { "false" })
         .replace("__BLUR_MARKS__", if on.blur_marks { "true" } else { "false" })
+        .replace("__BLUR_VERSION__", &BLUR_VERSION)
 }
 
 /// CSS that blurs media the instant it paints, before the runtime has reached
 /// it. Injected into the page's `<head>` when blur-on-load is on, so a picture
 /// never flashes unblurred while the model is still downloading. The runtime
-/// lifts it per element by adding `abx-blur-seen` once it has a verdict: cleared
-/// media goes sharp, and blurred media is held by the runtime's own class.
+/// lifts it per element by adding `abx-blur-processed` once the model returns a
+/// verdict; a picture the model could not read never gains the class, so it
+/// stays covered.
 ///
 /// Empty when neither images nor videos are being looked at — the caller only
 /// asks for this when blur-on-load is set, but the two media switches still
@@ -68,10 +81,10 @@ pub(crate) fn blur_preload_css(on: &super::settings::DecisionSettings) -> String
     );
     let mut selectors = Vec::new();
     if on.blur_images {
-        selectors.push("img:not(.abx-blur-seen)");
+        selectors.push("img:not(.abx-blur-processed)");
     }
     if on.blur_videos {
-        selectors.push("video:not(.abx-blur-seen)");
+        selectors.push("video:not(.abx-blur-processed)");
     }
     if selectors.is_empty() {
         return String::new();
@@ -412,14 +425,14 @@ mod tests {
     fn the_preload_css_blurs_the_media_switches_ask_for() {
         // Images only, colour drained out.
         let css = blur_preload_css(&blur_settings(40, 40, false, false));
-        assert_eq!(css, "img:not(.abx-blur-seen){filter:blur(40px) grayscale(100%)!important}");
+        assert_eq!(css, "img:not(.abx-blur-processed){filter:blur(40px) grayscale(100%)!important}");
         // Both kinds share one rule, and the runtime lifts either off the same
-        // seen class it adds on a verdict.
+        // processed class it adds on a verdict.
         let mut on = blur_settings(20, 40, true, false);
         on.blur_gray = false;
         assert_eq!(
             blur_preload_css(&on),
-            "img:not(.abx-blur-seen),video:not(.abx-blur-seen){filter:blur(20px)!important}"
+            "img:not(.abx-blur-processed),video:not(.abx-blur-processed){filter:blur(20px)!important}"
         );
         // Nothing to look at, nothing to write.
         on.blur_images = false;

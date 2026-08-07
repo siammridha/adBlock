@@ -62,9 +62,9 @@ print(json.dumps({"name":"custom","rules":rules,"replace":True}))' \
 browser open "$PAGE" >/dev/null 2>&1
 
 # One eval, both checks. display=='none' proves the cosmetic rule was parsed and
-# applied; the abx-blur-seen marker in a parsed stylesheet proves the blur
+# applied; the abx-blur-processed marker in a parsed stylesheet proves the blur
 # preload rule was too (read from cssRules, not the raw HTML).
-result=$(browser eval "(()=>{const h=document.querySelector('h1');const disp=h?getComputedStyle(h).display:'no-h1';const seen=[...document.styleSheets].some(s=>{try{return[...s.cssRules].some(r=>r.cssText.includes('abx-blur-seen'))}catch(e){return false}});return disp+'|'+seen;})()" 2>/dev/null | tr -d '"')
+result=$(browser eval "(()=>{const h=document.querySelector('h1');const disp=h?getComputedStyle(h).display:'no-h1';const seen=[...document.styleSheets].some(s=>{try{return[...s.cssRules].some(r=>r.cssText.includes('abx-blur-processed'))}catch(e){return false}});return disp+'|'+seen;})()" 2>/dev/null | tr -d '"')
 
 fail=0
 check() { if [ "$3" = "$2" ]; then echo "ok   $1 ($3)"; else echo "FAIL $1 (want $2, got $3)"; fail=1; fi; }
