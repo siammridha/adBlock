@@ -24,15 +24,14 @@ function block(header) {
   throw new Error("unbalanced braces after `" + header + "`");
 }
 
-const URL = { createObjectURL: () => "blob:baked", revokeObjectURL: () => {} };
+const BAKED = "data:image/jpeg;base64,baked";
 const writeBack = new Function(
-  "URL", "el", "blob",
-  "return (function (blob) " + block(".then(function (blob)") + ")(blob);"
+  "el", "url",
+  "return (function (url) " + block(".then(function (url)") + ")(url);"
 );
 const unbake = new Function(
-  "URL",
   "function unbake(el, restore) " + block("function unbake(el, restore)") + " return unbake;"
-)(URL);
+)();
 
 function picture(nSources) {
   const pic = { tagName: "PICTURE", kids: [] };
@@ -82,8 +81,8 @@ const ids = (pic) => pic.kids.map((k) => k.id || k.tagName).join(",");
 // 1. Bake an <img> in a <picture>, then reveal (restore=true).
 {
   const { pic, img } = picture(2);
-  writeBack(URL, img, {});
-  ok("bake: src becomes the baked blob url", img.src === "blob:baked");
+  writeBack(img, BAKED);
+  ok("bake: src becomes the baked data url", img.src === BAKED);
   ok("bake: srcset cleared", img.getAttribute("srcset") === null);
   ok("bake: <source> siblings detached", pic.querySelectorAll("source").length === 0);
   ok("bake: originals kept in order", ids(pic) === "IMG" &&
@@ -100,7 +99,7 @@ const ids = (pic) => pic.kids.map((k) => k.id || k.tagName).join(",");
 //    because the page has already put the next picture on the node.
 {
   const { pic, img } = picture(2);
-  writeBack(URL, img, {});
+  writeBack(img, BAKED);
   unbake(img, false);
   ok("reset: <source> siblings not reinserted", ids(pic) === "IMG");
   ok("reset: bake state cleared", img.__abBaked === null && img.__abOriginal === null);
@@ -110,9 +109,9 @@ const ids = (pic) => pic.kids.map((k) => k.id || k.tagName).join(",");
 {
   const div = { tagName: "DIV" };
   const img = image(div);
-  writeBack(URL, img, {});
+  writeBack(img, BAKED);
   ok("plain img: no sources recorded", img.__abOriginal.sources === null);
-  ok("plain img: src baked", img.src === "blob:baked");
+  ok("plain img: src baked", img.src === BAKED);
   unbake(img, true);
   ok("plain img: src restored", img.src === "orig.jpg");
   ok("plain img: srcset restored", img.getAttribute("srcset") === "orig-2x.jpg 2x");

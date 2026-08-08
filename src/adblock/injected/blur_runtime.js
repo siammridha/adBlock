@@ -28,7 +28,10 @@
 // everything is blurred whole by a CSS filter on the element itself. With region
 // blur on, a still picture is baked: the people are blurred into a canvas and the
 // result written back onto the element, its src or its background-image, so only
-// they are blurred and nothing floats. A video with region blur on cannot be
+// they are blurred and nothing floats. The blur there is done by drawing the
+// picture small and back up again, not by a canvas filter — Safari's canvas has
+// no filter, and one asked for it there is ignored without complaint, which
+// bakes the picture back exactly as it was. A video with region blur on cannot be
 // baked frame by frame, so its people are covered by a floating box of blur
 // patches that tracks them. That box sits over the video it covers, so it stays
 // put; baking the still pictures is what stopped their box drifting on top of a
@@ -89,7 +92,7 @@
   // and none of them can hold a person, but each one costs a run of the
   // detector. HaramBlur's own cutoff, and not a setting for the same reason the
   // model is not: this branch is here to run HaramBlur's numbers.
-  var MIN_SIZE = 30;
+  var MIN_SIZE = 50;
   var SAMPLE_MS = 1000 / 25; // a video is sampled at most this often
   var SCAN_MS = 500; // the page is swept for background pictures at most this often
   // HaramBlur's own hysteresis on a video: two frames with somebody in them
@@ -495,7 +498,7 @@
       return createImageBitmap(el, fit(el.videoWidth, el.videoHeight, VIDEO_CAP));
     }
     if (el.__abBg) return fromUrl(el.__abBg, IMAGE_CAP).then(sized(el));
-    return fromUrl(el.currentSrc || el.src, IMAGE_CAP);
+    return fromUrl(el.src, IMAGE_CAP);
   }
 
   function sized(el) {
@@ -835,15 +838,76 @@
     return bake(el, cells);
   }
 
+  // A blur that does not ask a canvas to do it. Safari's canvas has no filter
+  // property at all: setting one throws nothing and does nothing, so a bake that
+  // leaned on it came out as the picture it started as — success reported, no
+  // blur anywhere. Shrinking the picture and drawing it back up throws the detail
+  // away and lets the smoothing put a soft version back, which is what a blur
+  // looks like, and every browser can do it. Colour is drained with a saturation
+  // blend for the same reason.
+  //
+  // ponytail: one pass down and one back up, so a large radius comes out
+  // soft-blocky rather than gaussian. That hides a person perfectly well. Halve
+  // repeatedly if it ever has to match the CSS blur exactly.
+  function soften(bmp, W, H, radius) {
+    var f = Math.max(1, radius);
+    var sw = Math.max(1, Math.round(W / f));
+    var sh = Math.max(1, Math.round(H / f));
+    var small = new OffscreenCanvas(sw, sh);
+    var mc = small.getContext("2d");
+    mc.imageSmoothingEnabled = true;
+    mc.imageSmoothingQuality = "high";
+    mc.drawImage(bmp, 0, 0, sw, sh);
+
+    var out = new OffscreenCanvas(W, H);
+    var oc = out.getContext("2d");
+    oc.imageSmoothingEnabled = true;
+    oc.imageSmoothingQuality = "high";
+    oc.drawImage(small, 0, 0, W, H);
+    if (GRAY) {
+      oc.globalCompositeOperation = "saturation";
+      oc.fillStyle = "hsl(0,0%,50%)";
+      oc.fillRect(0, 0, W, H);
+      oc.globalCompositeOperation = "source-over";
+    }
+    return out;
+  }
+
   // Draw the full picture, blur it whole into a second canvas, then copy each
   // person's rectangle from the blurred copy back over the sharp one — copying
   // pre-blurred pixels rather than blurring each rectangle in place, so there is
   // no dark halo where a blur samples past the rectangle's edge into nothing.
   // Write the result back onto the element and keep the original for hover and
-  // reset. The blob url is both the guard against re-entering detection and the
-  // handle to revoke.
+  // reset. The baked url is also the guard against re-entering detection: it is
+  // what the src watcher sees when the write-back lands.
+  //
+  // The picture goes back in as a JPEG data url, which is what HaramBlur does.
+  // The pixels travel in the attribute itself, so nothing has to stay alive
+  // behind a handle and nothing has to be revoked, and a page that copies the
+  // node or reads its src back gets the baked picture rather than a handle that
+  // may already be gone.
+  //
+  // ponytail: JPEG has no transparency, so a picture with a see-through
+  // background bakes onto black. Encode as PNG if a page turns up where that
+  // shows — at the cost of a much longer string in the DOM.
+  //
+  // The radius is the setting's, which is in the pixels the picture is shown at,
+  // scaled into the pixels the picture is made of. A wide photograph in a narrow
+  // column is drawn down on its way to the screen and would take the blur down
+  // with it.
+  function dataUrl(blob) {
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onload = function () {
+        resolve(reader.result);
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+  }
+
   function bake(el, cells) {
-    var src = el.__abBg || el.currentSrc || el.src;
+    var src = el.__abBg || el.src;
     return fromUrl(src, BAKE_CAP)
       .then(function (bmp) {
         var W = bmp.width,
@@ -851,10 +915,7 @@
         var sharp = new OffscreenCanvas(W, H);
         var sc = sharp.getContext("2d");
         sc.drawImage(bmp, 0, 0);
-        var soft = new OffscreenCanvas(W, H);
-        var xc = soft.getContext("2d");
-        xc.filter = FILTER;
-        xc.drawImage(bmp, 0, 0);
+        var soft = soften(bmp, W, H, (AMOUNT * W) / (el.clientWidth || W));
         for (var i = 0; i < cells.length; i++) {
           var c = cells[i];
           var sx = Math.max(0, Math.floor(c.x * W));
@@ -864,50 +925,60 @@
           if (sw <= 0 || sh <= 0) continue;
           sc.drawImage(soft, sx, sy, sw, sh, sx, sy, sw, sh);
         }
-        return sharp.convertToBlob();
+        return sharp.convertToBlob({ type: "image/jpeg", quality: 0.9 });
       })
-      .then(function (blob) {
-        var url = URL.createObjectURL(blob);
-        if (el.__abBaked) URL.revokeObjectURL(el.__abBaked);
-        else if (el.__abBg) {
-          el.__abOriginal = { bg: el.style.backgroundImage };
-        } else {
-          el.__abOriginal = { src: el.src, srcset: el.getAttribute("srcset"), sources: null };
-          // A <picture>'s <source> siblings out-rank the baked src, so detach
-          // them while the bake is in place and keep them to put back on reveal
-          // or reset.
-          if (el.parentNode && el.parentNode.tagName === "PICTURE") {
-            var srcs = [];
-            var found = el.parentNode.querySelectorAll("source");
-            for (var k = 0; k < found.length; k++) srcs.push(found[k]);
-            for (var m = 0; m < srcs.length; m++) srcs[m].parentNode.removeChild(srcs[m]);
-            el.__abOriginal.sources = srcs;
+      .then(dataUrl)
+      .then(function (url) {
+        // Only the first bake records the original: what is on the element
+        // during a re-bake is the last bake, not the page's picture.
+        if (!el.__abBaked) {
+          if (el.__abBg) el.__abOriginal = { bg: el.style.backgroundImage };
+          else {
+            el.__abOriginal = { src: el.src, srcset: el.getAttribute("srcset"), sources: null };
+            // A <picture>'s <source> siblings out-rank the baked src, so detach
+            // them while the bake is in place and keep them to put back on
+            // reveal or reset.
+            if (el.parentNode && el.parentNode.tagName === "PICTURE") {
+              var srcs = [];
+              var found = el.parentNode.querySelectorAll("source");
+              for (var k = 0; k < found.length; k++) srcs.push(found[k]);
+              for (var m = 0; m < srcs.length; m++) srcs[m].parentNode.removeChild(srcs[m]);
+              el.__abOriginal.sources = srcs;
+            }
           }
         }
         el.__abBaked = url;
+        // Keep __abSeen in step with this write, or the src watcher would read
+        // it back as a picture it has not seen and undo everything just done.
+        el.__abSeen = url;
         if (el.__abBg) el.style.backgroundImage = "url(" + url + ")";
         else {
           el.removeAttribute("srcset");
           el.src = url;
         }
       })
-      .catch(function () {
+      .catch(function (e) {
         // The picture could not be read, decoded or encoded, so it was never
-        // baked. Fall back to a whole-element blur, which still does not float.
+        // baked. Fall back to a whole-element blur, which still does not float,
+        // then hand the failure on rather than swallow it: the caller marks
+        // whatever this resolves to as blurred, and a bake that never happened
+        // reported as one is how a blur that did nothing went unnoticed.
         el.classList.add(CLASS);
+        throw e;
       });
   }
 
-  // Undo a bake: drop the blob url, and put the original picture back only when
+  // Undo a bake: forget the baked picture, and put the original back only when
   // asked. A reveal restores it; a reset for a fresh picture does not, because
   // the page has already put the new one in place and painting the old one back
   // would wipe it out.
   function unbake(el, restore) {
     if (!el.__abBaked) return;
-    URL.revokeObjectURL(el.__abBaked);
     if (restore && el.__abOriginal) {
-      if (el.__abBg) el.style.backgroundImage = el.__abOriginal.bg;
-      else {
+      if (el.__abBg) {
+        el.style.backgroundImage = el.__abOriginal.bg;
+        el.__abSeen = background(el);
+      } else {
         if (el.__abOriginal.sources && el.parentNode) {
           for (var i = 0; i < el.__abOriginal.sources.length; i++) {
             el.parentNode.insertBefore(el.__abOriginal.sources[i], el);
@@ -916,6 +987,7 @@
         if (el.__abOriginal.srcset) el.setAttribute("srcset", el.__abOriginal.srcset);
         if (el.__abOriginal.src != null) el.src = el.__abOriginal.src;
         else el.removeAttribute("src");
+        el.__abSeen = el.src;
       }
     }
     el.__abBaked = null;
@@ -931,16 +1003,19 @@
   // Lift the blur off a picture while the pointer is over it, and put it back
   // when the pointer leaves. A picture blurred by a filter on the element is
   // lifted by a class; a baked one by swapping the original picture back in,
-  // since its blur is in the pixels. Its own writes here are ignored by the src
-  // watcher, which knows both the baked url and the original it was made from.
-  // A video's patch box lives beside the video, not inside it, so a CSS hover
-  // rule on the video cannot reach it — its class is toggled here instead.
+  // since its blur is in the pixels. __abSeen is kept in step with each swap, or
+  // the src watcher would read it back as a new picture and reset everything
+  // this was mid-toggle. A video's patch box lives beside the video, not inside
+  // it, so a CSS hover rule on the video cannot reach it — its class is toggled
+  // here instead.
   function lift(el, off) {
     if (el.__abBaked && el.__abOriginal) {
       if (el.__abBg) {
         el.style.backgroundImage = off ? el.__abOriginal.bg : "url(" + el.__abBaked + ")";
+        el.__abSeen = background(el);
       } else {
         el.src = off ? el.__abOriginal.src : el.__abBaked;
+        el.__abSeen = el.src;
       }
       return;
     }
@@ -973,6 +1048,7 @@
 
   function checkImage(img) {
     mark(img, "looking");
+    console.log("blur: processing", img.__abBg || img.src);
     return snapshot(img)
       .then(findPeople)
       .then(function (people) {
@@ -1001,11 +1077,12 @@
         });
       })
       .catch(function (e) {
-        // The read itself failed: the anonymous re-fetch was refused, so there
-        // is nothing to look at. Kept covered for the same reason as above — no
-        // abx-blur-processed, so the hold rule holds it.
-        mark(img, "failed", "unreadable");
-        if (MARKS) console.warn("blur: cannot read", img.__abBg || img.currentSrc || img.src, e);
+        // Either the read failed — the anonymous re-fetch was refused, so there
+        // is nothing to look at — or the bake did, in which case it has already
+        // put a whole-element blur on. Kept covered either way for the same
+        // reason as above: no abx-blur-processed, so the hold rule holds it.
+        mark(img, "failed", "unreadable or unbakeable");
+        if (MARKS) console.warn("blur: cannot bake", img.__abBg || img.src, e);
       });
   }
 
@@ -1059,10 +1136,16 @@
   // picture arrives, however late, and simply never fires for one that is
   // broken.
   //
-  // A background has nothing to wait on and no size of its own to read, so it is
-  // measured by the box it is painted in instead. That is the one place this
-  // judges a picture by how big it is drawn rather than by its own pixels — the
-  // alternative is fetching every sprite and gradient on the page to find out.
+  // The size cutoff itself is judged by the box the picture is drawn in —
+  // clientWidth/clientHeight — not by the pixels of whatever file happens to be
+  // loaded. A lazy-loaded `<picture>` reports `load` for a tiny placeholder
+  // before the real photo lands, so its naturalWidth is briefly 1x1 while its
+  // layout box is already full size; sizing off naturalWidth read that
+  // placeholder as "too small" and skipped the picture for good, since a skip
+  // is a verdict and nothing rechecks it. The box a picture is laid out in
+  // doesn't have that problem — a background has no pixels of its own to read
+  // in the first place, so it was always measured this way; images are now
+  // measured the same way for the same reason.
   function enqueue(img) {
     if (queue.indexOf(img) >= 0) return;
     if (img.__abBg) {
@@ -1078,8 +1161,8 @@
       img.addEventListener("load", function () { enqueue(img); }, { once: true });
       return;
     }
-    if (tooSmall(img.naturalWidth, img.naturalHeight)) {
-      mark(img, "skipped", img.naturalWidth + "x" + img.naturalHeight + ", too small");
+    if (tooSmall(img.clientWidth, img.clientHeight)) {
+      mark(img, "skipped", img.clientWidth + "x" + img.clientHeight + ", too small");
       return;
     }
     queue.push(img);
@@ -1125,16 +1208,15 @@
   // An element with no picture on it yet is remembered as such and left alone.
   // A lazy loader filling its src in comes back through here.
   function watchImage(img, src) {
-    // A baked <img> writes a blob url into its own src, and hover swaps it for
-    // the original and back. None of those is a new picture, so they are ignored
-    // — only a src that is neither the baked copy nor the original it was made
-    // from is the page putting a different picture on the node.
-    if (
-      img.__abBaked &&
-      (src === img.__abBaked || (img.__abOriginal && src === img.__abOriginal.src))
-    ) {
-      return;
-    }
+    // __abSeen is not just "the first src found" — every write this script
+    // itself makes (bake, unbake, the hover swap) keeps it in sync with
+    // whatever it just put there, so it always names the current expected
+    // picture rather than the original one. A src equal to it is one of those
+    // writes landing, whatever value it happens to carry. Anything else is the
+    // page changing the picture — including a page that puts the original back
+    // itself, undoing a bake behind this script's back, which looks exactly
+    // like a new picture arriving and is handled the same way: reset and
+    // requeued for a fresh verdict.
     if (img.__abSeen === src) return;
     var again = img.__abSeen !== undefined;
     img.__abSeen = src;
@@ -1431,11 +1513,8 @@
   // sweep itself runs at most once every SCAN_MS: a page that inserts a hundred
   // nodes is one page to look over, not a hundred.
   //
-  // ponytail: a background put on an element after it was marked is never seen,
-  // and one swapped for another keeps the first one's verdict — an <img> gets
-  // that for free off the src attribute, a background has no attribute to watch
-  // that is only about the picture. Watch the style attribute if a page turns up
-  // where it shows.
+  // A background swapped on an element already marked is caught by the style
+  // watcher below instead of a sweep — see watchBackground.
   var URL_IN = /url\(\s*['"]?(.*?)['"]?\s*\)/i;
   var scanning = 0;
 
@@ -1492,16 +1571,39 @@
     scanning = setTimeout(scan, SCAN_MS);
   }
 
+  // A background reasserted, on an element already found to carry one. A
+  // single-page site that re-renders its own inline style puts the original,
+  // unblurred url straight back over a baked one — the same page behaviour the
+  // src watcher below exists for, just on a different attribute. watchImage
+  // already tells its own write from the page's, so routing through it here
+  // recovers the same way an <img> src change does: no abx-blur-processed, so
+  // the hold covers it again, and it goes back through detection from there.
+  // __abBg is kept live here for the same reason el.src needs no such update —
+  // bake() reads pixels from it, and a stale one would bake the wrong picture.
+  // Not touched when the write was this script's own baked copy landing: that
+  // is not a picture to remember as the source, only the __abSeen check below
+  // needs to see it. Elements never found to carry a background are skipped
+  // rather than resolving their style on every write — most style attributes on
+  // a page change for reasons that have nothing to do with a picture.
+  function watchBackground(el) {
+    if (!el.__abBg) return;
+    var url = background(el);
+    if (el.__abBaked && url === el.__abBaked) return;
+    el.__abBg = url;
+    watchImage(el, url);
+  }
+
   // Nodes arriving, and the source of a picture already here changing. The
   // second is what a single-page site does instead of loading a page: the feed
   // and the player are the same elements throughout, and going back puts
   // different pictures in them. HaramBlur watches the same one attribute for the
-  // same reason.
+  // same reason; a CSS background gets the same treatment on "style" instead.
   var watcher = new MutationObserver(function (records) {
     for (var i = 0; i < records.length; i++) {
       var record = records[i];
       if (record.type === "attributes") {
-        watch(record.target);
+        if (record.attributeName === "style") watchBackground(record.target);
+        else watch(record.target);
         continue;
       }
       sweepBackgrounds();
@@ -1538,7 +1640,7 @@
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ["src"],
+      attributeFilter: ["src", "style"],
     });
     if (document.readyState === "loading") {
       document.addEventListener("DOMContentLoaded", sweepAll, { once: true });
